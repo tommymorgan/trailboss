@@ -1,0 +1,21 @@
+[package]
+name = "herdr-fork"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace]
+members = ["crates/herdr-runtime", "crates/ghostty-vt"]
+resolver = "2"
+
+[dependencies]
+herdr-runtime = { path = "crates/herdr-runtime" }
+crossterm = "0.29"
+serde_json = "1"
+
+[dev-dependencies]
+ghostty-vt = { path = "crates/ghostty-vt" }
+portable-pty = "=0.9.0"
+
+[patch.crates-io]
+portable-pty = { path = "vendor/portable-pty" }

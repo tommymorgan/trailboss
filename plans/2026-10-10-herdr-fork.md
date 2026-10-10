@@ -15,11 +15,11 @@
 ### Task 1.1: Use a local PTY through the Rust client
 <!-- estimate: ~30000 reviewable lines | feature-files: features/session.feature | demoable: yes | confidence: low | OVER SOFT CAP: scenario-atomic; use slice-split after implementation -->
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session.feature::Use a local PTY through the Rust client
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: Use a local PTY through the Rust client
   Given a named local session is started by the vendored core with one shell pane
   When I attach the Rust client with the default workspace focused and type "printf spike-ready" into its primary working pane

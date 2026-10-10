@@ -1,1 +1,4 @@
 plans/*.prd-coverage.md
+target/
+vendor/**/.zig-cache/
+vendor/**/zig-out/
