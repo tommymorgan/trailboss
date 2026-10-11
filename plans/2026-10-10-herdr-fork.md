@@ -70,11 +70,11 @@ Scenario: Expand and collapse workspace declarations
   When I collapse the workspace and expand it again
   Then its tabs disappear and reappear under that workspace and the collapsed header shows the hidden-tab count
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/agent-tree.feature::Refresh the tree from session events
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: Refresh the tree from session events
   Given the agent-tree producer has subscribed through the carried-over TanStack DB store and the tree shows the current session
   When the session emits <event> with the corresponding updated topology or status

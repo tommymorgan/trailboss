@@ -20,6 +20,20 @@ struct Core {
 }
 impl Drop for Core {
     fn drop(&mut self) {
+        // Let Core tear down its supervised producer before a forced fallback.
+        let request: Request = serde_json::from_value(
+            json!({"id":"fixture-stop", "method":"server.stop", "params":{}}),
+        )
+        .unwrap();
+        let _ = self
+            .api
+            .request_value_with_timeout(&request, Duration::from_secs(2));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while self.child.try_wait().is_ok_and(|status| status.is_none())
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_dir_all(&self.home);
@@ -584,7 +598,7 @@ fn living_expand_and_collapse_workspace_declarations() {
 }
 struct LiveConsole {
     child: Console,
-    master: Box<dyn portable_pty::MasterPty + Send>,
+    _master: Box<dyn portable_pty::MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     rx: std::sync::mpsc::Receiver<Vec<u8>>,
     screen: ghostty_vt::Terminal,
@@ -627,7 +641,7 @@ impl LiveConsole {
         });
         Self {
             child,
-            master: pair.master,
+            _master: pair.master,
             writer,
             rx,
             screen: ghostty_vt::Terminal::new(120, 25, 0).unwrap(),
@@ -678,7 +692,6 @@ impl Drop for LiveConsole {
     fn drop(&mut self) {
         let _ = self.writer.write_all(b"\x11");
         let _ = self.writer.flush();
-        let _ = self.master.get_size();
     }
 }
 #[test]
@@ -723,4 +736,206 @@ fn assert_living_scenario(title: &str, lines: usize) {
         extract(include_str!("../plans/2026-10-10-herdr-fork.md")),
         "living GWT/examples drift"
     );
+}
+fn producer_identity(core: &Core) -> (u32, String) {
+    fn find(pid: u32) -> Option<u32> {
+        let command = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        if String::from_utf8_lossy(&command).contains("agent_tree.ts") {
+            return Some(pid);
+        }
+        let children = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).ok()?;
+        children
+            .split_whitespace()
+            .filter_map(|pid| pid.parse().ok())
+            .find_map(find)
+    }
+    let pid = find(core.child.id()).expect("live producer missing");
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let start = stat
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .to_owned();
+    (pid, start)
+}
+fn event_request(core: &Core, event: &str, method: &str, params: Value) -> Value {
+    use std::{
+        io::{BufRead, BufReader},
+        os::unix::net::UnixStream,
+    };
+    let stream = UnixStream::connect(
+        core.home
+            .join(format!("herdr-fork/sessions/{}/herdr.sock", core.name)),
+    )
+    .unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut reader = BufReader::new(stream);
+    let request: Request = serde_json::from_value(json!({"id":"event-observer", "method":"events.subscribe", "params":{"subscriptions":[{"type":event}]}})).unwrap();
+    serde_json::to_writer(reader.get_mut(), &request).unwrap();
+    reader.get_mut().write_all(b"\n").unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&line).unwrap()["result"]["type"],
+        "subscription_started"
+    );
+    let result = core.request(method, params);
+    line.clear();
+    reader
+        .read_line(&mut line)
+        .unwrap_or_else(|error| panic!("{method} did not emit {event}: {error}"));
+    let observed: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        observed["event"],
+        event.replace('.', "_"),
+        "wrong real core event: {observed}"
+    );
+    result
+}
+fn refresh_tree_from_session_events(executable: bool) {
+    crossterm::style::force_color_output(true);
+    let mut fixture = enable_first_consumer();
+    let producer = producer_identity(&fixture.core);
+    let boot = fixture.client.boot_id.clone();
+    let mut console = executable.then(|| LiveConsole::new(&fixture.core));
+    if let Some(console) = &mut console {
+        console.wait(|rows, _| rows.iter().any(|row| row.contains("Review")));
+    }
+    let created = event_request(
+        &fixture.core,
+        "workspace.created",
+        "workspace.create",
+        json!({"label":"EventDelta", "cwd":fixture.core.home, "focus":false}),
+    );
+    let workspace = created["workspace"]["workspace_id"].clone();
+    let observe =
+        |fixture: &mut Fixture, console: &mut Option<LiveConsole>, label: &str, present: bool| {
+            wait_sidebar(&mut fixture.client, |rows| {
+                rows.iter().any(|row| row.contains(label)) == present
+            });
+            if let Some(console) = console {
+                console.wait(|rows, _| rows.iter().any(|row| row.contains(label)) == present);
+            }
+            assert_eq!(
+                producer_identity(&fixture.core),
+                producer,
+                "producer restarted"
+            );
+            assert_eq!(fixture.client.boot_id, boot, "client/core restarted");
+        };
+    observe(&mut fixture, &mut console, "EventDelta", true);
+    event_request(
+        &fixture.core,
+        "workspace.renamed",
+        "workspace.rename",
+        json!({"workspace_id":workspace,"label":"EventRenamed"}),
+    );
+    observe(&mut fixture, &mut console, "EventRenamed", true);
+    assert!(!rendered_sidebar(&fixture.client)
+        .iter()
+        .any(|row| row.contains("EventDelta")));
+    let tab = event_request(
+        &fixture.core,
+        "tab.created",
+        "tab.create",
+        json!({"workspace_id":workspace,"label":"EventTab", "cwd":fixture.core.home,"focus":false}),
+    );
+    observe(&mut fixture, &mut console, "○ EventTab", true);
+    let tab_id = tab["tab"]["tab_id"].clone();
+    let pane_id = tab["root_pane"]["pane_id"].clone();
+    event_request(
+        &fixture.core,
+        "tab.focused",
+        "tab.focus",
+        json!({"tab_id":tab_id}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while fixture.client.focused_tab_id.as_deref() != tab_id.as_str() {
+        assert!(Instant::now() < deadline);
+        fixture.client.receive().unwrap();
+    }
+    let rows = rendered_sidebar(&fixture.client);
+    let y = rows
+        .iter()
+        .position(|row| row.contains("EventTab"))
+        .unwrap();
+    let mut bytes = Vec::new();
+    sidebar::draw(
+        &mut bytes,
+        fixture.client.declarations.as_ref().unwrap(),
+        terminal::Rect {
+            x: 0,
+            y: 0,
+            width: 34,
+            height: 24,
+        },
+        fixture.client.focused_tab_id.as_deref(),
+    )
+    .unwrap();
+    let mut focused_screen = ghostty_vt::Terminal::new(34, 24, 0).unwrap();
+    focused_screen.write(&bytes);
+    assert!(
+        cell_style(&focused_screen, y, 4).0.bold,
+        "selected tab not visibly focused"
+    );
+    if let Some(console) = &mut console {
+        console.wait(|rows, screen| {
+            rows.iter()
+                .position(|row| row.contains("EventTab"))
+                .is_some_and(|y| cell_style(screen, y, 4).0.bold)
+        });
+    }
+    event_request(
+        &fixture.core,
+        "pane.agent_detected",
+        "pane.report_agent",
+        json!({"pane_id":pane_id,"source":"event-fixture","agent":"codex","state":"working"}),
+    );
+    observe(&mut fixture, &mut console, "● EventTab", true);
+    // Changing agent ownership clears its assigned name and emits pane.updated
+    // with the new status, in addition to the retained status/detection events.
+    fixture.core.request(
+        "agent.rename",
+        json!({"target":pane_id,"name":"event-agent"}),
+    );
+    event_request(
+        &fixture.core,
+        "pane.updated",
+        "pane.report_agent",
+        json!({"pane_id":pane_id,"source":"event-fixture","agent":"claude","state":"blocked"}),
+    );
+    observe(&mut fixture, &mut console, "◉ EventTab", true);
+    event_request(
+        &fixture.core,
+        "tab.closed",
+        "tab.close",
+        json!({"tab_id":tab_id}),
+    );
+    observe(&mut fixture, &mut console, "EventTab", false);
+    event_request(
+        &fixture.core,
+        "workspace.closed",
+        "workspace.close",
+        json!({"workspace_id":workspace}),
+    );
+    observe(&mut fixture, &mut console, "EventRenamed", false);
+    eprintln!("LIVE EVENTS: all eight outline examples changed rendered tree; same producer {producer:?}, same attached client");
+}
+#[test]
+fn refresh_the_tree_from_all_eight_session_events() {
+    refresh_tree_from_session_events(false);
+}
+#[test]
+fn living_refresh_the_tree_from_all_eight_session_events() {
+    assert_living_scenario("Scenario Outline: Refresh the tree from session events", 15);
+    refresh_tree_from_session_events(false);
+}
+#[test]
+fn executable_pty_refreshes_all_eight_session_events_without_restart() {
+    refresh_tree_from_session_events(true);
 }

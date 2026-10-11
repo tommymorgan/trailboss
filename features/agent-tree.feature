@@ -9,3 +9,19 @@ Feature: Agent-tree declarations
     Given a workspace in the agent tree contains three tabs
     When I collapse the workspace and expand it again
     Then its tabs disappear and reappear under that workspace and the collapsed header shows the hidden-tab count
+
+  Scenario Outline: Refresh the tree from session events
+    Given the agent-tree producer has subscribed through the carried-over TanStack DB store and the tree shows the current session
+    When the session emits <event> with the corresponding updated topology or status
+    Then the visible widget tree reflects <change> without restarting the producer or client
+
+    Examples:
+      | event | change |
+      | workspace.created | new workspace |
+      | workspace.renamed | changed workspace name |
+      | workspace.closed | removed workspace |
+      | tab.created | new tab |
+      | tab.closed | removed tab |
+      | tab.focused | selected tab |
+      | pane.agent_detected | detected agent |
+      | pane.updated | changed agent status |
