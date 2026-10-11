@@ -225,11 +225,11 @@ Scenario: Disconnect without losing the running session
 ### Task 4.2: Restore persisted session topology after relaunch
 <!-- estimate: ~350 reviewable lines | feature-files: features/session.feature | demoable: yes -->
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session.feature::Restore persisted session topology after relaunch
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: Restore persisted session topology after relaunch
   Given a named session has persisted workspaces, tab layouts and pane working directories
   When the core stops and relaunches using that persistence

@@ -9,3 +9,8 @@ Feature: Local session compatibility
     Given a named session has workspaces, tabs and panes including a running shell command
     When I disconnect the client and attach a new client to that session
     Then the workspaces, tabs and live panes remain and the command continues in the same PTY
+
+  Scenario: Restore persisted session topology after relaunch
+    Given a named session has persisted workspaces, tab layouts and pane working directories
+    When the core stops and relaunches using that persistence
+    Then the restored session contains those workspaces, tabs and pane layouts with usable replacement PTYs in their restored working directories
