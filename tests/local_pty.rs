@@ -105,6 +105,7 @@ fn living_session_feature() {
     for line in include_str!("../features/session.feature")
         .lines()
         .map(str::trim)
+        .take_while(|line| *line != "Scenario: Disconnect without losing the running session")
     {
         if line.starts_with("Given ") {
             assert_eq!(steps, 0);

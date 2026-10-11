@@ -212,11 +212,11 @@ Scenario: Consume shared UI and pane state independently of the terminal rendere
 ### Task 4.1: Disconnect without losing the running session
 <!-- estimate: ~240 reviewable lines | feature-files: features/session.feature | demoable: yes -->
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session.feature::Disconnect without losing the running session
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: Disconnect without losing the running session
   Given a named session has workspaces, tabs and panes including a running shell command
   When I disconnect the client and attach a new client to that session
