@@ -142,11 +142,11 @@ Scenario Outline: Compose each supported widget node
 ### Task 3.3: Pin styled declarations into zones
 <!-- estimate: ~440 reviewable lines | feature-files: features/declarations.feature | demoable: yes -->
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/declarations.feature::Pin styled declarations into zones
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: Pin styled declarations into zones
   Given a plugin declares label, muted, leader and status-role segments with named tones in the list, footer and footer-right zones
   When the client projects those declarations into the terminal

@@ -88,7 +88,7 @@ fn assert_sidebar(fixture: &mut Fixture) {
     assert_eq!(declarations[0].0, "tommymorgan.agent-tree");
     let rows: Vec<_> = sidebar::rows(declarations).map(|(_, row)| row).collect();
     assert!(
-        matches!(rows[0], Node::Row { children, .. } if matches!(&children[0], Node::Label { text, role } if text.ends_with(" · herdr") && role == "muted"))
+        matches!(rows[0], Node::Row { children, .. } if matches!(&children[0], Node::Label { text, role, .. } if text.ends_with(" · herdr") && role == "muted"))
     );
     let review = rows.iter().position(|row| matches!(row, Node::Row { context, .. } if context.tab_id.as_deref() == Some(&fixture.selected_tab))).unwrap();
     for width in [20, 34] {

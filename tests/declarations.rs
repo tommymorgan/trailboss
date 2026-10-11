@@ -1,3 +1,5 @@
+#[path = "support/styled_cases.rs"]
+mod styled_cases;
 #[path = "support/widget_cases.rs"]
 mod widget_cases;
 use herdr_fork::{
@@ -298,3 +300,60 @@ widget_test!(nested_widget_label, "label");
 widget_test!(nested_widget_leader, "leader");
 widget_test!(nested_widget_spacer, "spacer");
 widget_test!(nested_widget_list, "list");
+
+#[test]
+fn styled_declarations_stay_in_zones_with_client_palette() {
+    // Palette decoding must not depend on the runner's NO_COLOR policy.
+    crossterm::style::force_color_output(true);
+    let declaration: Declaration =
+        serde_json::from_value(styled_cases::declaration()).expect("styled public declaration");
+    assert!(declaration.validate(|_| false));
+    let declarations = vec![
+        ("stock".into(), stock_declaration(false)),
+        ("styles".into(), declaration),
+    ];
+    for (width, height, focused) in [
+        (80, 24, false),
+        (52, 11, false),
+        (80, 24, true),
+        (52, 11, true),
+    ] {
+        let mut core = Core::default();
+        core.update_session(None, focused.then(|| "padding-focus".into()), false);
+        let mut bytes = Vec::new();
+        terminal::draw_frame(
+            &mut bytes,
+            None,
+            &declarations,
+            &core,
+            Rect::viewport(width, height),
+        )
+        .unwrap();
+        let mut screen = ghostty_vt::Terminal::new(width, height, 0).unwrap();
+        screen.write(&bytes);
+        styled_cases::assert_screen(&screen, width, height, focused);
+    }
+    let mut short = styled_cases::declaration();
+    short["zones"][2]["tree"] = json!({"type":"label","text":"R","role":"muted"});
+    let short: Declaration = serde_json::from_value(short).unwrap();
+    let mut root = stock_declaration(false);
+    root.zones = short.zones;
+    let rows = screen(&Core::default(), Some(root));
+    assert_eq!(
+        rows[23].chars().take(20).collect::<String>(),
+        format!("{}R", " ".repeat(19))
+    );
+    for field in ["x", "width", "pixels"] {
+        let mut invalid = styled_cases::declaration();
+        invalid["zones"][0]["tree"][field] = json!(12);
+        assert!(
+            serde_json::from_value::<Declaration>(invalid).is_err(),
+            "accepted plugin geometry: {field}"
+        );
+    }
+    let mut duplicate = styled_cases::declaration();
+    duplicate["zones"][2]["zone"] = json!("list");
+    assert!(!serde_json::from_value::<Declaration>(duplicate)
+        .unwrap()
+        .validate(|_| false));
+}

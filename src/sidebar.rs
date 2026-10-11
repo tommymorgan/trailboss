@@ -4,7 +4,7 @@ use crossterm::{
     cursor, queue,
     style::{Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor},
 };
-use herdr_runtime::protocol::widgets::{Context, Declaration, Node};
+use herdr_runtime::protocol::widgets::{Context, Declaration, Node, Tone};
 use std::io::{self, Write};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -37,12 +37,19 @@ pub fn action_at(declarations: &Declarations, row: usize) -> Option<(&str, &str,
 }
 pub(crate) fn role_color(role: &str) -> Color {
     match role {
-        "muted" | "rule" | "status-idle" => Color::DarkGrey,
+        "muted" | "rule" | "leader" | "status-idle" => Color::DarkGrey,
         "status-working" => Color::Yellow,
         "status-blocked" => Color::Red,
         "status-waiting" => Color::Cyan,
         "status-done" => Color::Green,
         _ => Color::Reset,
+    }
+}
+pub(crate) fn segment_colors(role: &str, tone: Option<Tone>, background: Color) -> (Color, Color) {
+    match tone {
+        Some(Tone::BgLime) => (role_color(role), Color::Green),
+        Some(Tone::FgCyan) => (Color::Cyan, background),
+        None => (role_color(role), background),
     }
 }
 fn width(node: &Node) -> usize {
@@ -105,15 +112,24 @@ pub(crate) fn draw_row(
     let fixed: usize = children.iter().map(width).sum();
     let leaders = children
         .iter()
-        .filter(|node| matches!(node, Node::Leader))
+        .filter(|node| matches!(node, Node::Leader { .. }))
         .count();
     let elastic = usize::from(rect.width).saturating_sub(fixed);
     let mut remaining = usize::from(rect.width);
     let mut leader_index = 0;
     for child in children {
         match child {
-            Node::Label { text, role } => {
-                queue!(out, SetForegroundColor(role_color(role)))?;
+            Node::Label { text, role, tone } => {
+                let (fg, bg) = segment_colors(
+                    role,
+                    *tone,
+                    if focused {
+                        Color::DarkBlue
+                    } else {
+                        Color::Reset
+                    },
+                );
+                queue!(out, SetForegroundColor(fg), SetBackgroundColor(bg))?;
                 for ch in text.chars() {
                     let width = ch.width().unwrap_or(0);
                     if width > remaining {
@@ -123,10 +139,19 @@ pub(crate) fn draw_row(
                     remaining -= width;
                 }
             }
-            Node::Leader => {
+            Node::Leader { tone } => {
                 let count = (elastic / leaders + usize::from(leader_index < elastic % leaders))
                     .min(remaining);
-                queue!(out, SetForegroundColor(Color::DarkGrey))?;
+                let (fg, bg) = segment_colors(
+                    "leader",
+                    *tone,
+                    if focused {
+                        Color::DarkBlue
+                    } else {
+                        Color::Reset
+                    },
+                );
+                queue!(out, SetForegroundColor(fg), SetBackgroundColor(bg))?;
                 for _ in 0..count {
                     queue!(out, Print('·'))?;
                 }
@@ -136,7 +161,15 @@ pub(crate) fn draw_row(
             _ => {}
         }
     }
-    queue!(out, SetForegroundColor(Color::Reset))?;
+    queue!(
+        out,
+        SetForegroundColor(Color::Reset),
+        SetBackgroundColor(if focused {
+            Color::DarkBlue
+        } else {
+            Color::Reset
+        })
+    )?;
     for _ in 0..remaining {
         queue!(out, Print(' '))?;
     }

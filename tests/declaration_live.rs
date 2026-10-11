@@ -1,3 +1,5 @@
+#[path = "support/styled_cases.rs"]
+mod styled_cases;
 mod support;
 #[path = "support/widget_cases.rs"]
 mod widget_cases;
@@ -416,3 +418,36 @@ living_widget_test!(living_nested_widget_label, "label");
 living_widget_test!(living_nested_widget_leader, "leader");
 living_widget_test!(living_nested_widget_spacer, "spacer");
 living_widget_test!(living_nested_widget_list, "list");
+
+#[test]
+fn living_pin_styled_declarations_into_zones() {
+    let feature = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/features/declarations.feature"
+    ))
+    .unwrap();
+    assert!(feature.contains("  Scenario: Pin styled declarations into zones\n    Given a plugin declares label, muted, leader and status-role segments with named tones in the list, footer and footer-right zones\n    When the client projects those declarations into the terminal\n    Then each declaration stays in its client-renderer-defined zone geometry and the client palette styles its roles and tones without plugin-supplied pixels"));
+    let core = Core::new();
+    core.request(
+        "plugin.link",
+        json!({"path":concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/stock-ui"),"enabled":true}),
+    );
+    let workspace = core.request(
+        "workspace.create",
+        json!({"label":"Padding focus","cwd":core.home,"focus":true}),
+    );
+    let mut declaration = styled_cases::declaration();
+    declaration["zones"][0]["tree"]["entries"][1]["context"]["tab_id"] =
+        workspace["tab"]["tab_id"].clone();
+    let plugin = core.home.join("styled-producer");
+    std::fs::create_dir_all(&plugin).unwrap();
+    let schema = concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/agent-tree/widgets.ts");
+    std::fs::write(plugin.join("producer.ts"), format!("import {{ WidgetDeclaration }} from {schema:?}; console.log(JSON.stringify(WidgetDeclaration.parse({declaration}))); await Bun.stdin.text();")).unwrap();
+    std::fs::write(plugin.join("herdr-plugin.toml"), "id = \"fixture.styled\"\nname = \"Styled zones\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[ui]]\nid = \"tree\"\nsurface = \"sidebar\"\ncommand = [\"bun\", \"producer.ts\"]\nstream = true\n").unwrap();
+    core.request("plugin.link", json!({"path":plugin,"enabled":true}));
+    let mut console = Console::new(&core);
+    console.wait(|rows| {
+        rows[1].starts_with("Lm") && rows[22].starts_with("Fm") && rows[23].starts_with("Rm")
+    });
+    styled_cases::assert_screen(&console.screen, 80, 24, true);
+}

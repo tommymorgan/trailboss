@@ -5,6 +5,14 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum Zone {
     List,
+    Footer,
+    FooterRight,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Tone {
+    BgLime,
+    FgCyan,
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Context {
@@ -39,8 +47,13 @@ pub enum Node {
     Label {
         text: String,
         role: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tone: Option<Tone>,
     },
-    Leader,
+    Leader {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tone: Option<Tone>,
+    },
     /// Empty logical spacing along the containing flow; clients choose its scale.
     Spacer {
         size: u16,
@@ -94,7 +107,12 @@ impl Declaration {
     pub fn validate(&self, actions: impl Fn(&str) -> bool) -> bool {
         self.herdr == "widget_tree"
             && self.version == 1
-            && self.zones.len() <= 1
+            && self.zones.len() <= 3
+            && self
+                .zones
+                .iter()
+                .enumerate()
+                .all(|(i, p)| self.zones[..i].iter().all(|other| other.zone != p.zone))
             && self.zones.iter().all(|p| valid_node(&p.tree, &actions, 0))
             && self
                 .composition
@@ -132,7 +150,7 @@ fn valid_node(node: &Node, actions: &impl Fn(&str) -> bool, depth: usize) -> boo
                     .iter()
                     .all(|child| valid_node(child, actions, depth + 1))
         }
-        Node::Label { text, role } => {
+        Node::Label { text, role, .. } => {
             text.chars().count() <= 200 && !role.is_empty() && !text.chars().any(char::is_control)
         }
         Node::Flex { weight, child } => *weight > 0 && valid_node(child, actions, depth + 1),
@@ -140,6 +158,6 @@ fn valid_node(node: &Node, actions: &impl Fn(&str) -> bool, depth: usize) -> boo
         Node::Zone { fallback, .. } => fallback
             .as_ref()
             .is_none_or(|child| valid_node(child, actions, depth + 1)),
-        Node::Leader | Node::Spacer { .. } | Node::Surface | Node::TabName => true,
+        Node::Leader { .. } | Node::Spacer { .. } | Node::Surface | Node::TabName => true,
     }
 }

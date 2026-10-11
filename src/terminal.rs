@@ -5,7 +5,7 @@ use crossterm::{
     style::{Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor},
     terminal::{Clear, ClearType},
 };
-use herdr_runtime::protocol::widgets::{Context, Node};
+use herdr_runtime::protocol::widgets::{Context, Node, Tone, Zone};
 use std::io::{self, Write};
 use unicode_width::UnicodeWidthStr;
 
@@ -73,7 +73,7 @@ pub fn draw(out: &mut impl Write, surface: &Surface, rect: Rect) -> io::Result<(
     Ok(())
 }
 fn leaf_row(node: &Node) -> bool {
-    matches!(node, Node::Row { children, .. } if !children.is_empty() && children.iter().all(|n| matches!(n, Node::Label { .. } | Node::Leader)))
+    matches!(node, Node::Row { children, .. } if !children.is_empty() && children.iter().all(|n| matches!(n, Node::Label { .. } | Node::Leader { .. })))
 }
 fn extent(core: &Core, node: &Node, horizontal: bool) -> (u16, u16) {
     let Some(node) = core.resolve(node) else {
@@ -126,13 +126,17 @@ fn extent(core: &Core, node: &Node, horizontal: bool) -> (u16, u16) {
             (fixed, 0)
         }
         Node::Spacer { size } => (*size, 0),
-        Node::Leader => {
+        Node::Leader { .. } => {
             if horizontal {
                 (0, 1)
             } else {
                 (1, 0)
             }
         }
+        Node::Zone {
+            zone: Zone::Footer | Zone::FooterRight,
+            ..
+        } if !horizontal => (1, 0),
         Node::Surface | Node::Zone { .. } => (0, 1),
         Node::When { .. } => unreachable!("Core resolves conditions"),
     }
@@ -183,10 +187,22 @@ fn walk<'a>(
                 let height = u64::from(size)
                     .saturating_add(allocated)
                     .min(u64::from(rect.height - offset)) as u16;
+                let (inline, elastic) = extent(core, tree, true);
+                let width = if *zone == Zone::FooterRight && elastic == 0 {
+                    inline.min(rect.width)
+                } else {
+                    rect.width
+                };
                 let placement = Rect {
+                    x: rect.x
+                        + if *zone == Zone::FooterRight {
+                            rect.width - width
+                        } else {
+                            0
+                        },
                     y: rect.y + offset,
+                    width,
                     height,
-                    ..rect
                 };
                 walk(core, declarations, id, tree, placement, depth + 1, visit);
                 offset += height;
@@ -319,9 +335,9 @@ pub fn draw_frame(
             Node::Row { .. } if leaf_row(node) => {
                 crate::sidebar::draw_row(out, node, rect, core.focused_tab_id.as_deref())
             }
-            Node::Label { text, role } => paint_text(out, text, role, rect),
-            Node::Leader => paint_leader(out, rect),
-            Node::TabName => paint_text(out, &core.tab_name, "label", rect),
+            Node::Label { text, role, tone } => paint_text(out, text, role, *tone, rect),
+            Node::Leader { tone } => paint_leader(out, *tone, rect),
+            Node::TabName => paint_text(out, &core.tab_name, "label", None, rect),
             _ => Ok(()),
         };
     });
@@ -337,13 +353,20 @@ pub fn draw_frame(
     )?;
     out.flush()
 }
-fn paint_text(out: &mut impl Write, text: &str, role: &str, rect: Rect) -> io::Result<()> {
+fn paint_text(
+    out: &mut impl Write,
+    text: &str,
+    role: &str,
+    tone: Option<Tone>,
+    rect: Rect,
+) -> io::Result<()> {
+    let (fg, bg) = crate::sidebar::segment_colors(role, tone, Color::Reset);
     queue!(
         out,
         cursor::MoveTo(rect.x, rect.y),
         SetAttribute(Attribute::Reset),
-        SetBackgroundColor(Color::Reset),
-        SetForegroundColor(crate::sidebar::role_color(role))
+        SetBackgroundColor(bg),
+        SetForegroundColor(fg)
     )?;
     let mut width = 0;
     for ch in text.chars() {
@@ -355,11 +378,14 @@ fn paint_text(out: &mut impl Write, text: &str, role: &str, rect: Rect) -> io::R
     }
     Ok(())
 }
-fn paint_leader(out: &mut impl Write, rect: Rect) -> io::Result<()> {
+fn paint_leader(out: &mut impl Write, tone: Option<Tone>, rect: Rect) -> io::Result<()> {
+    let (fg, bg) = crate::sidebar::segment_colors("leader", tone, Color::Reset);
     queue!(
         out,
         cursor::MoveTo(rect.x, rect.y),
-        SetForegroundColor(Color::DarkGrey)
+        SetAttribute(Attribute::Reset),
+        SetBackgroundColor(bg),
+        SetForegroundColor(fg)
     )?;
     for _ in 0..rect.width {
         queue!(out, Print('·'))?;

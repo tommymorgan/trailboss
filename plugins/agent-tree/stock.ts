@@ -23,8 +23,8 @@ export function declareStock(entities: EntityRow[]) {
     children: [
       row([label(' herdr · stock', 'muted')]),
       flex(1, { type: 'zone', zone: 'list', fallback }),
-      row([label(' + New tab ')], 'host:new'),
-      row([label(' Menu ')], 'host:menu'),
+      { type: 'zone', zone: 'footer', fallback: row([label(' + New tab ')], 'host:new') },
+      { type: 'zone', zone: 'footer_right', fallback: row([label(' Menu ')], 'host:menu') },
     ],
   }
   const focusedWorkspace = entities.find((entity) => entity.kind === 'workspace' && entity.focused)
