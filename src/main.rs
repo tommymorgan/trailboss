@@ -24,12 +24,35 @@ impl Drop for Terminal {
 fn main() -> io::Result<()> {
     let raw: Vec<String> = std::env::args().collect();
     let args = herdr_runtime::session::configure_from_args(&raw).map_err(io::Error::other)?;
+    if matches!(
+        args.get(1).map(String::as_str),
+        Some(
+            "api"
+                | "status"
+                | "server"
+                | "session"
+                | "workspace"
+                | "worktree"
+                | "tab"
+                | "pane"
+                | "agent"
+                | "notification"
+                | "integration"
+                | "plugin"
+        )
+    ) {
+        if let herdr_runtime::cli::CommandOutcome::Handled(code) =
+            herdr_runtime::cli::maybe_run(&args)?
+        {
+            std::process::exit(code);
+        }
+    }
     if args.get(1).is_some_and(|a| a == "server") {
         return herdr_runtime::run_server();
     }
     if args.len() > 1 {
         return Err(io::Error::other(
-            "usage: herdr-fork [server] [--session NAME]",
+            "usage: herdr-fork [SESSION_API_COMMAND | server] [--session NAME]",
         ));
     }
     let (cols, rows) = crossterm::terminal::size()?;

@@ -28,11 +28,11 @@ Scenario: Use a local PTY through the Rust client
 ### Task 1.2: Existing session automation works without protocol changes
 <!-- estimate: ~350 reviewable lines | feature-files: features/session-api.feature | demoable: yes -->
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session-api.feature::Existing session automation works without protocol changes
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: Existing session automation works without protocol changes
   Given the new core is built with the fork’s server-side session API reused verbatim and the fork’s unmodified session API client and compatibility fixtures are available
   When the client exercises the reference session methods, response schemas and event subscriptions against the new core

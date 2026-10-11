@@ -52,5 +52,6 @@ mod ui;
 mod update;
 mod workspace;
 mod worktree;
+pub use api::{client as api_client, schema as api_schema};
 pub use logging::help_log_paths_summary;
 pub use server::headless::run_server;
