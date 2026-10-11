@@ -1,3 +1,5 @@
+#[path = "support/replacement.rs"]
+mod replacement;
 #[path = "support/styled_cases.rs"]
 mod styled_cases;
 mod support;
@@ -450,4 +452,35 @@ fn living_pin_styled_declarations_into_zones() {
         rows[1].starts_with("Lm") && rows[22].starts_with("Fm") && rows[23].starts_with("Rm")
     });
     styled_cases::assert_screen(&console.screen, 80, 24, true);
+}
+
+#[test]
+fn living_hot_apply_a_new_widget_declaration() {
+    let feature = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/features/declarations.feature"
+    ))
+    .unwrap();
+    assert!(feature.contains("  Scenario: Hot-apply a new widget declaration\n    Given the running client displays a producer’s widget tree\n    When the producer emits new widget declarations by replacing its widget tree with changed text and nesting\n    Then the visible UI changes to the replacement tree without rebuilding or restarting the client"));
+    let core = Core::new();
+    let plugin = replacement::enable(&core);
+    let mut console = Console::new(&core);
+    let rows = console.wait(|rows| rows[0].starts_with("OLDTREE"));
+    assert_eq!(rows[0].trim_end(), "OLDTREE");
+    assert!(rows[1..].iter().all(|row| row.trim().is_empty()));
+    let process = console.child.process_id();
+    assert!(process.is_some());
+    let socket = core.home.join(format!(
+        "herdr-fork/sessions/{}/herdr-client.sock",
+        core.name
+    ));
+    use std::os::unix::fs::MetadataExt;
+    let inode = std::fs::metadata(&socket).unwrap().ino();
+    replacement::replace(&plugin);
+    let rows = console.wait(|rows| rows[0].starts_with("NEW") && rows[2].starts_with("ONLY"));
+    replacement::assert_replacement(&rows);
+    replacement::assert_same_producer_and_socket(&core, &plugin);
+    assert_eq!(console.child.process_id(), process);
+    assert!(console.child.try_wait().unwrap().is_none());
+    assert_eq!(std::fs::metadata(socket).unwrap().ino(), inode);
 }

@@ -30,3 +30,8 @@ Feature: Public declarations determine application composition
     Given a plugin declares label, muted, leader and status-role segments with named tones in the list, footer and footer-right zones
     When the client projects those declarations into the terminal
     Then each declaration stays in its client-renderer-defined zone geometry and the client palette styles its roles and tones without plugin-supplied pixels
+
+  Scenario: Hot-apply a new widget declaration
+    Given the running client displays a producer’s widget tree
+    When the producer emits new widget declarations by replacing its widget tree with changed text and nesting
+    Then the visible UI changes to the replacement tree without rebuilding or restarting the client
