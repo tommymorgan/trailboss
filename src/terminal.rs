@@ -73,7 +73,7 @@ pub fn draw(out: &mut impl Write, surface: &Surface, rect: Rect) -> io::Result<(
     Ok(())
 }
 fn leaf_row(node: &Node) -> bool {
-    matches!(node, Node::Row { children, .. } if children.iter().all(|n| matches!(n, Node::Label { .. } | Node::Leader)))
+    matches!(node, Node::Row { children, .. } if !children.is_empty() && children.iter().all(|n| matches!(n, Node::Label { .. } | Node::Leader)))
 }
 fn extent(core: &Core, node: &Node, horizontal: bool) -> (u16, u16) {
     let Some(node) = core.resolve(node) else {
@@ -103,11 +103,17 @@ fn extent(core: &Core, node: &Node, horizontal: bool) -> (u16, u16) {
                 (1, 0)
             }
         }
-        Node::Column { children } | Node::Row { children, .. } => {
-            let parallel = matches!(node, Node::Row { .. }) == horizontal;
+        Node::Column { .. } | Node::Row { .. } | Node::List { .. } => {
+            let (flow_horizontal, children) = core.flow(node).expect("flow node");
+            let parallel = flow_horizontal == horizontal;
             let mut fixed = 0u16;
             for child in children {
-                let (size, weight) = extent(core, child, horizontal);
+                let (size, weight) =
+                    if matches!(core.resolve(child), Some(Node::Spacer { .. })) && !parallel {
+                        (0, 0)
+                    } else {
+                        extent(core, child, horizontal)
+                    };
                 if weight > 0 {
                     return (0, 1);
                 }
@@ -117,9 +123,17 @@ fn extent(core: &Core, node: &Node, horizontal: bool) -> (u16, u16) {
                     fixed.max(size)
                 };
             }
-            (fixed.max(u16::from(!horizontal)), 0)
+            (fixed, 0)
         }
-        Node::Surface | Node::Zone { .. } | Node::Leader => (0, 1),
+        Node::Spacer { size } => (*size, 0),
+        Node::Leader => {
+            if horizontal {
+                (0, 1)
+            } else {
+                (1, 0)
+            }
+        }
+        Node::Surface | Node::Zone { .. } => (0, 1),
         Node::When { .. } => unreachable!("Core resolves conditions"),
     }
 }
@@ -183,8 +197,8 @@ fn walk<'a>(
                 }
             }
         }
-        Node::Row { children, .. } | Node::Column { children } if !leaf_row(node) => {
-            let horizontal = matches!(node, Node::Row { .. });
+        Node::Row { .. } | Node::Column { .. } | Node::List { .. } if !leaf_row(node) => {
+            let (horizontal, children) = core.flow(node).expect("flow node");
             let available = if horizontal { rect.width } else { rect.height };
             let (fixed, weights) = children
                 .iter()
@@ -306,6 +320,7 @@ pub fn draw_frame(
                 crate::sidebar::draw_row(out, node, rect, core.focused_tab_id.as_deref())
             }
             Node::Label { text, role } => paint_text(out, text, role, rect),
+            Node::Leader => paint_leader(out, rect),
             Node::TabName => paint_text(out, &core.tab_name, "label", rect),
             _ => Ok(()),
         };
@@ -337,6 +352,17 @@ fn paint_text(out: &mut impl Write, text: &str, role: &str, rect: Rect) -> io::R
             break;
         }
         queue!(out, Print(ch))?;
+    }
+    Ok(())
+}
+fn paint_leader(out: &mut impl Write, rect: Rect) -> io::Result<()> {
+    queue!(
+        out,
+        cursor::MoveTo(rect.x, rect.y),
+        SetForegroundColor(Color::DarkGrey)
+    )?;
+    for _ in 0..rect.width {
+        queue!(out, Print('·'))?;
     }
     Ok(())
 }

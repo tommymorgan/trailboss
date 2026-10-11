@@ -11,3 +11,17 @@ Feature: Public declarations determine application composition
       | live session |
       | new-tab interaction open |
       | menu open |
+
+  Scenario Outline: Compose each supported widget node
+    Given a producer declares a <node> inside a nested widget tree
+    When the client applies that declaration
+    Then the client displays the <observable> using its renderer under core-defined semantics
+
+    Examples:
+      | node | observable |
+      | row | children arranged horizontally |
+      | column | children arranged vertically |
+      | label | declared text |
+      | leader | elastic leader between neighboring labels |
+      | spacer | declared empty spacing |
+      | list | declared ordered entries |

@@ -41,6 +41,14 @@ pub enum Node {
         role: String,
     },
     Leader,
+    /// Empty logical spacing along the containing flow; clients choose its scale.
+    Spacer {
+        size: u16,
+    },
+    /// Ordered entries flowing vertically, without implicit markers or gaps.
+    List {
+        entries: Vec<Node>,
+    },
     /// Relative allocation, not terminal-cell geometry.
     Flex {
         weight: u16,
@@ -118,7 +126,7 @@ fn valid_node(node: &Node, actions: &impl Fn(&str) -> bool, depth: usize) -> boo
                     .iter()
                     .all(|child| valid_node(child, actions, depth + 1))
         }
-        Node::Column { children } => {
+        Node::Column { children } | Node::List { entries: children } => {
             children.len() <= 128
                 && children
                     .iter()
@@ -132,6 +140,6 @@ fn valid_node(node: &Node, actions: &impl Fn(&str) -> bool, depth: usize) -> boo
         Node::Zone { fallback, .. } => fallback
             .as_ref()
             .is_none_or(|child| valid_node(child, actions, depth + 1)),
-        Node::Leader | Node::Surface | Node::TabName => true,
+        Node::Leader | Node::Spacer { .. } | Node::Surface | Node::TabName => true,
     }
 }

@@ -111,6 +111,16 @@ impl Core {
             Condition::Menu => self.interaction == Interaction::Menu,
         }
     }
+    /// Structural semantics shared by every renderer: rows are horizontal;
+    /// columns and ordered lists are vertical. Empty flows consume no space.
+    pub fn flow<'a>(&self, node: &'a Node) -> Option<(bool, &'a [Node])> {
+        match self.resolve(node)? {
+            Node::Row { children, .. } => Some((true, children)),
+            Node::Column { children } => Some((false, children)),
+            Node::List { entries } => Some((false, entries)),
+            _ => None,
+        }
+    }
     pub fn resolve<'a>(&self, node: &'a Node) -> Option<&'a Node> {
         match node {
             Node::When { condition, child } => self

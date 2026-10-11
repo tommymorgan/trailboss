@@ -20,6 +20,12 @@ const Column = z.object({
     return z.array(Widget)
   },
 })
+const List = z.object({
+  type: z.literal('list'),
+  get entries() {
+    return z.array(Widget)
+  },
+})
 const Flex = z.object({
   type: z.literal('flex'),
   weight: z.number().int().positive(),
@@ -45,6 +51,8 @@ export const Widget = z.discriminatedUnion('type', [
   Row,
   Column,
   Label,
+  List,
+  z.object({ type: z.literal('spacer'), size: z.number().int().min(0).max(65535) }),
   Flex,
   When,
   Zone,

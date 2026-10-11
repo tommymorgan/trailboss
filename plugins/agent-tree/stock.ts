@@ -28,16 +28,14 @@ export function declareStock(entities: EntityRow[]) {
     ],
   }
   const focusedWorkspace = entities.find((entity) => entity.kind === 'workspace' && entity.focused)
-  const tabStrip = row(
-    tabs
-      .filter((tab) => tab.workspaceId === focusedWorkspace?.workspaceId)
-      .map((tab) =>
-        row([label(` ${tab.label} `)], 'host:focus', {
-          workspace_id: tab.workspaceId,
-          ...(tab.tabId ? { tab_id: tab.tabId } : {}),
-        }),
-      ),
-  )
+  const tabStrip = tabs
+    .filter((tab) => tab.workspaceId === focusedWorkspace?.workspaceId)
+    .map((tab) =>
+      row([label(` ${tab.label} `)], 'host:focus', {
+        workspace_id: tab.workspaceId,
+        ...(tab.tabId ? { tab_id: tab.tabId } : {}),
+      }),
+    )
   return WidgetDeclaration.parse({
     herdr: 'widget_tree',
     version: 1,
@@ -49,7 +47,7 @@ export function declareStock(entities: EntityRow[]) {
         flex(3, {
           type: 'column',
           children: [
-            tabStrip,
+            tabStrip.length ? row(tabStrip) : { type: 'spacer', size: 1 },
             when('no_pane', row([label(' No pane yet — choose New tab ')])),
             when('new_tab', {
               type: 'column',

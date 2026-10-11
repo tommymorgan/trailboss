@@ -1,4 +1,6 @@
 mod support;
+#[path = "support/widget_cases.rs"]
+mod widget_cases;
 use serde_json::json;
 use std::{
     io::{Read, Write},
@@ -154,6 +156,7 @@ fn living_stock_ui_uses_the_public_widget_declaration_path() {
     ]);
     let states: Vec<_> = lines[outline + 4..]
         .iter()
+        .take_while(|line| !line.starts_with("Scenario"))
         .filter_map(|line| {
             line.strip_prefix('|')
                 .and_then(|line| line.strip_suffix('|'))
@@ -355,3 +358,61 @@ fn assert_shared_list_producer_routing() {
     console.wait(expanded);
     eprintln!("OUTER PTY: both real list producers have separate visible rows; first/second clicks collapse only their own producer and restore independently");
 }
+
+fn assert_living_widget(node: &str) {
+    let feature = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/features/declarations.feature"
+    ))
+    .unwrap();
+    let lines: Vec<_> = feature.lines().map(str::trim).collect();
+    let start = lines
+        .iter()
+        .position(|line| *line == "Scenario Outline: Compose each supported widget node")
+        .unwrap();
+    assert_eq!(&lines[start+1..start+4], [
+        "Given a producer declares a <node> inside a nested widget tree",
+        "When the client applies that declaration",
+        "Then the client displays the <observable> using its renderer under core-defined semantics",
+    ]);
+    let examples: Vec<_> = lines[start + 4..]
+        .iter()
+        .take_while(|line| !line.starts_with("Scenario"))
+        .filter_map(|line| line.strip_prefix('|'))
+        .filter_map(|line| line.split('|').next())
+        .map(str::trim)
+        .filter(|node| *node != "node")
+        .collect();
+    assert_eq!(examples, widget_cases::NODES);
+    assert!(examples.contains(&node));
+    {
+        let core = Core::new();
+        let plugin = core.home.join("nested-producer");
+        std::fs::create_dir_all(&plugin).unwrap();
+        let schema = concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/agent-tree/widgets.ts");
+        std::fs::write(plugin.join("producer.ts"), format!("import {{ WidgetDeclaration }} from {schema:?}; console.log(JSON.stringify(WidgetDeclaration.parse({}))); await Bun.stdin.text();", widget_cases::declaration(node))).unwrap();
+        std::fs::write(plugin.join("herdr-plugin.toml"), "id = \"fixture.nested\"\nname = \"Nested widgets\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[ui]]\nid = \"tree\"\nsurface = \"sidebar\"\ncommand = [\"bun\", \"producer.ts\"]\nstream = true\n").unwrap();
+        core.request("plugin.link", json!({"path":plugin,"enabled":true}));
+        let mut console = Console::new(&core);
+        let rows = console.wait(|rows| rows.iter().any(|row| row.starts_with("END")));
+        widget_cases::assert_rows(node, &rows, 80);
+        eprintln!(
+            "nested {node}: {:?}",
+            &rows[..widget_cases::expected(node, 80).len()]
+        );
+    }
+}
+macro_rules! living_widget_test {
+    ($name:ident, $node:literal) => {
+        #[test]
+        fn $name() {
+            assert_living_widget($node);
+        }
+    };
+}
+living_widget_test!(living_nested_widget_row, "row");
+living_widget_test!(living_nested_widget_column, "column");
+living_widget_test!(living_nested_widget_label, "label");
+living_widget_test!(living_nested_widget_leader, "leader");
+living_widget_test!(living_nested_widget_spacer, "spacer");
+living_widget_test!(living_nested_widget_list, "list");

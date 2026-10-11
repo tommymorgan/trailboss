@@ -1,3 +1,5 @@
+#[path = "support/widget_cases.rs"]
+mod widget_cases;
 use herdr_fork::{
     core::Core,
     terminal::{self, Rect},
@@ -70,6 +72,9 @@ fn surface() -> Surface {
     }
 }
 fn screen(core: &Core, declaration: Option<Declaration>) -> Vec<String> {
+    screen_width(core, declaration, 80)
+}
+fn screen_width(core: &Core, declaration: Option<Declaration>, width: u16) -> Vec<String> {
     let declarations = declaration
         .into_iter()
         .map(|d| ("arbitrary.public-plugin".into(), d))
@@ -80,10 +85,10 @@ fn screen(core: &Core, declaration: Option<Declaration>) -> Vec<String> {
         Some(&surface()),
         &declarations,
         core,
-        Rect::viewport(80, 24),
+        Rect::viewport(width, 24),
     )
     .unwrap();
-    let mut screen = ghostty_vt::Terminal::new(80, 24, 0).unwrap();
+    let mut screen = ghostty_vt::Terminal::new(width, 24, 0).unwrap();
     screen.write(&bytes);
     screen
         .screen_text_rows()
@@ -262,3 +267,34 @@ fn shared_list_producers_keep_visible_rows_and_action_identity() {
         );
     }
 }
+
+fn assert_nested_widget(node: &str) {
+    assert!(widget_cases::NODES.contains(&node));
+    let declaration: Declaration = serde_json::from_value(widget_cases::declaration(node))
+        .unwrap_or_else(|error| panic!("{node}: {error}"));
+    assert!(
+        declaration.validate(|_| false),
+        "{node}: rejected declaration"
+    );
+    for width in [1, 2, 4, 13, 80] {
+        widget_cases::assert_rows(
+            node,
+            &screen_width(&Core::default(), Some(declaration.clone()), width),
+            usize::from(width),
+        );
+    }
+}
+macro_rules! widget_test {
+    ($name:ident, $node:literal) => {
+        #[test]
+        fn $name() {
+            assert_nested_widget($node);
+        }
+    };
+}
+widget_test!(nested_widget_row, "row");
+widget_test!(nested_widget_column, "column");
+widget_test!(nested_widget_label, "label");
+widget_test!(nested_widget_leader, "leader");
+widget_test!(nested_widget_spacer, "spacer");
+widget_test!(nested_widget_list, "list");

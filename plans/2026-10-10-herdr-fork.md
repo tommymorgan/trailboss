@@ -120,11 +120,11 @@ Scenario Outline: Stock UI uses the public widget declaration path
 ### Task 3.2: Compose each supported widget node
 <!-- estimate: ~400 reviewable lines | feature-files: features/declarations.feature | demoable: yes -->
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/declarations.feature::Compose each supported widget node
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: Compose each supported widget node
   Given a producer declares a <node> inside a nested widget tree
   When the client applies that declaration
