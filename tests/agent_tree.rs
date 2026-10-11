@@ -320,7 +320,7 @@ fn living_agent_tree_feature() {
     let scenario = "Scenario: Port the agent tree as the first widget-tree consumer";
     assert_eq!(
         feature.matches("Scenario:").count(),
-        1,
+        2,
         "unimplemented living scenarios"
     );
     let from_feature: Vec<_> = feature
@@ -495,4 +495,232 @@ fn cell_style(
     let mut cells = rows.populate_cells(&mut cell_storage).unwrap();
     cells.select(x).unwrap();
     (cells.style().unwrap(), cells.fg_color().unwrap())
+}
+
+fn rendered_sidebar(client: &Client) -> Vec<String> {
+    let mut bytes = Vec::new();
+    sidebar::draw(
+        &mut bytes,
+        client.declarations.as_ref().unwrap(),
+        terminal::Rect {
+            x: 0,
+            y: 0,
+            width: 34,
+            height: 24,
+        },
+        client.focused_tab_id.as_deref(),
+    )
+    .unwrap();
+    let mut screen = ghostty_vt::Terminal::new(34, 24, 0).unwrap();
+    screen.write(&bytes);
+    screen
+        .screen_text_rows()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            row.cells
+                .iter()
+                .flat_map(|cell| cell.graphemes.iter())
+                .filter_map(|ch| char::from_u32(*ch))
+                .collect()
+        })
+        .collect()
+}
+fn wait_sidebar(client: &mut Client, predicate: impl Fn(&[String]) -> bool) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let rows = rendered_sidebar(client);
+        if predicate(&rows) {
+            return rows;
+        }
+        assert!(Instant::now() < deadline, "tree did not update: {rows:?}");
+        client.receive().unwrap();
+    }
+}
+fn collapse_and_expand_workspace() {
+    let mut fixture = enable_first_consumer_with_active_tabs(1);
+    let before = wait_sidebar(&mut fixture.client, |rows| {
+        rows.iter().any(|row| row.contains("Activity03"))
+    });
+    let header = before
+        .iter()
+        .position(|row| row.starts_with("Alpha"))
+        .unwrap();
+    let mut input = fixture.client.input().unwrap();
+    for collapsed in [true, false] {
+        let (plugin, action, context) =
+            sidebar::action_at(fixture.client.declarations.as_ref().unwrap(), header).unwrap();
+        input
+            .invoke(&fixture.client.boot_id, plugin, action, context)
+            .unwrap();
+        let rows = wait_sidebar(&mut fixture.client, |rows| {
+            rows[header].contains("3 hidden") == collapsed
+        });
+        for tab in ["Build", "Review", "Activity03"] {
+            assert_eq!(
+                rows.iter().any(|row| row.contains(tab)),
+                !collapsed,
+                "{tab}: {rows:?}"
+            );
+        }
+        assert!(
+            rows.iter().any(|row| row.starts_with("Beta")),
+            "unrelated workspace disappeared"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("Idle")),
+            "unrelated tabs collapsed"
+        );
+    }
+}
+#[test]
+fn expand_and_collapse_workspace_declarations() {
+    collapse_and_expand_workspace();
+}
+#[test]
+fn living_expand_and_collapse_workspace_declarations() {
+    assert_living_scenario("Scenario: Expand and collapse workspace declarations", 4);
+    collapse_and_expand_workspace();
+}
+struct LiveConsole {
+    child: Console,
+    master: Box<dyn portable_pty::MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    screen: ghostty_vt::Terminal,
+}
+impl LiveConsole {
+    fn new(core: &Core) -> Self {
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 25,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_herdr-fork"));
+        command.args(["--session", &core.name]);
+        for key in HOMES {
+            command.env(key, &core.home);
+        }
+        for (key, _) in
+            std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("HERDR_"))
+        {
+            command.env_remove(key);
+        }
+        command.env("TERM", "xterm-256color");
+        command.env("SHELL", "/bin/sh");
+        command.env_remove("NO_COLOR");
+        let child = Console(pair.slave.spawn_command(command).unwrap());
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let writer = pair.master.take_writer().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = [0; 16384];
+            while let Ok(n) = reader.read(&mut bytes) {
+                if n == 0 || tx.send(bytes[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            child,
+            master: pair.master,
+            writer,
+            rx,
+            screen: ghostty_vt::Terminal::new(120, 25, 0).unwrap(),
+        }
+    }
+    fn wait(
+        &mut self,
+        predicate: impl Fn(&[String], &ghostty_vt::Terminal) -> bool,
+    ) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let rows: Vec<String> = self
+                .screen
+                .screen_text_rows()
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    row.cells
+                        .iter()
+                        .take(24)
+                        .flat_map(|cell| cell.graphemes.iter())
+                        .filter_map(|ch| char::from_u32(*ch))
+                        .collect()
+                })
+                .collect();
+            if predicate(&rows, &self.screen) {
+                return rows;
+            }
+            assert!(
+                self.child.0.try_wait().unwrap().is_none(),
+                "client restarted/exited"
+            );
+            let bytes = self
+                .rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|error| panic!("live PTY tree did not update: {error}; {rows:?}"));
+            self.screen.write(&bytes);
+        }
+    }
+    fn click(&mut self, row: usize) {
+        self.writer
+            .write_all(format!("\x1b[<0;5;{}M\x1b[<0;5;{}m", row + 1, row + 1).as_bytes())
+            .unwrap();
+        self.writer.flush().unwrap();
+    }
+}
+impl Drop for LiveConsole {
+    fn drop(&mut self) {
+        let _ = self.writer.write_all(b"\x11");
+        let _ = self.writer.flush();
+        let _ = self.master.get_size();
+    }
+}
+#[test]
+fn executable_pty_workspace_collapse_and_expand() {
+    let fixture = enable_first_consumer_with_active_tabs(1);
+    let mut console = LiveConsole::new(&fixture.core);
+    let rows = console.wait(|rows, _| rows.iter().any(|row| row.contains("Activity03")));
+    let header = rows
+        .iter()
+        .position(|row| row.starts_with("Alpha"))
+        .unwrap();
+    console.click(header);
+    let rows = console.wait(|rows, _| rows[header].contains("3 hidden"));
+    for tab in ["Build", "Review", "Activity03"] {
+        assert!(
+            !rows.iter().any(|row| row.contains(tab)),
+            "collapsed tab visible: {tab}"
+        );
+    }
+    assert!(rows.iter().any(|row| row.contains("Idle")));
+    console.click(header);
+    let rows = console.wait(|rows, _| rows.iter().any(|row| row.contains("Activity03")));
+    for tab in ["Build", "Review", "Activity03"] {
+        assert!(rows.iter().any(|row| row.contains(tab)));
+    }
+    assert!(!rows[header].contains("hidden"));
+    eprintln!("PTY SMOKE: three Alpha tabs disappear/reappear via actual header clicks; 3 hidden; Beta remains visible");
+}
+fn assert_living_scenario(title: &str, lines: usize) {
+    let extract = |source: &str| -> Vec<String> {
+        source
+            .lines()
+            .skip_while(|line| line.trim() != title)
+            .take(lines)
+            .map(|line| line.trim().to_owned())
+            .collect()
+    };
+    let feature = extract(include_str!("../features/agent-tree.feature"));
+    assert_eq!(feature.len(), lines, "living scenario missing");
+    assert_eq!(
+        feature,
+        extract(include_str!("../plans/2026-10-10-herdr-fork.md")),
+        "living GWT/examples drift"
+    );
 }

@@ -60,11 +60,11 @@ Scenario: Port the agent tree as the first widget-tree consumer
 ### Task 2.2: Expand and collapse workspace declarations
 <!-- estimate: ~500 reviewable lines | feature-files: features/agent-tree.feature | demoable: yes -->
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/agent-tree.feature::Expand and collapse workspace declarations
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: Expand and collapse workspace declarations
   Given a workspace in the agent tree contains three tabs
   When I collapse the workspace and expand it again
