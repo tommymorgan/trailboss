@@ -389,6 +389,7 @@ async fn handle_plugin_ui_control(
         return false;
     };
     match control.herdr.as_str() {
+        "widget_tree" => false,
         "action_result" => {
             let Some(id) = control.id.filter(|id| !id.is_empty()) else {
                 tracing::warn!("plugin UI action_result envelope missing id");
@@ -710,6 +711,23 @@ fn try_parse_plugin_ui_rows(
     stdout: &str,
     actions: &[PluginManifestAction],
 ) -> Result<Vec<EndpointPluginUiItem>, serde_json::Error> {
+    if stdout.trim_start().starts_with('{') {
+        let declaration: crate::protocol::widgets::Declaration = serde_json::from_str(stdout)?;
+        if !declaration.validate(|id| actions.iter().any(|action| action.id == id)) {
+            return Ok(Vec::new());
+        }
+        return Ok(vec![EndpointPluginUiItem {
+            plugin_id: plugin_id.to_owned(),
+            ui_id: ui_id.to_owned(),
+            declaration: Some(declaration),
+            title: String::new(),
+            action: None,
+            tab_id: None,
+            workspace_id: None,
+            pane_id: None,
+            segments: Vec::new(),
+        }]);
+    }
     let parsed: Vec<PluginUiRowJson> = serde_json::from_str(stdout)?;
     Ok(parsed
         .into_iter()
@@ -727,6 +745,7 @@ fn try_parse_plugin_ui_rows(
                 action.starts_with("host:") || actions.iter().any(|declared| &declared.id == action)
             });
             Some(EndpointPluginUiItem {
+                declaration: None,
                 plugin_id: plugin_id.to_string(),
                 ui_id: ui_id.to_string(),
                 title,

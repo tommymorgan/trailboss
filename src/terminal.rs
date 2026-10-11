@@ -70,7 +70,7 @@ fn color(v: u32) -> Color {
         },
     }
 }
-/// Draw only the PTY Surface. Reserved Zones remain empty until a plugin exists.
+/// Draw the PTY Surface; widget composition is applied by draw_frame.
 pub fn draw(out: &mut impl Write, surface: &Surface, layout: &Layout) -> io::Result<()> {
     queue!(
         out,
@@ -110,6 +110,24 @@ pub fn draw(out: &mut impl Write, surface: &Surface, layout: &Layout) -> io::Res
             queue!(out, Print(&c.symbol))?;
         }
     }
+    if let Some((x, y)) = surface.cursor {
+        queue!(
+            out,
+            cursor::MoveTo(layout.working.x + x, layout.working.y + y),
+            cursor::Show
+        )?;
+    }
+    out.flush()
+}
+pub fn draw_frame(
+    out: &mut impl Write,
+    surface: &Surface,
+    declarations: &crate::sidebar::Declarations,
+    focused_tab: Option<&str>,
+    layout: &Layout,
+) -> io::Result<()> {
+    draw(out, surface, layout)?;
+    crate::sidebar::draw(out, declarations, layout.list, focused_tab)?;
     if let Some((x, y)) = surface.cursor {
         queue!(
             out,

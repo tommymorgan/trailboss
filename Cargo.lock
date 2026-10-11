@@ -829,6 +829,7 @@ dependencies = [
  "jsonschema",
  "portable-pty",
  "serde_json",
+ "unicode-width",
 ]
 
 [[package]]

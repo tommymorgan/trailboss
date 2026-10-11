@@ -122,6 +122,8 @@ pub struct EndpointPluginUiItem {
     pub pane_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub segments: Vec<EndpointPluginUiSegment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declaration: Option<super::widgets::Declaration>,
 }
 
 /// Coherent plugin UI projection paired with the snapshot revision it accompanies.

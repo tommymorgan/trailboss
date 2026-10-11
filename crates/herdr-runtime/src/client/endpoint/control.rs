@@ -176,6 +176,7 @@ mod tests {
             "boot",
             3,
             &[crate::protocol::endpoint::EndpointPluginUiItem {
+                declaration: None,
                 plugin_id: "example.ui".into(),
                 ui_id: "review".into(),
                 title: "Review".into(),

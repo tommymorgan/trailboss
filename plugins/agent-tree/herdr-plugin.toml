@@ -1,0 +1,23 @@
+id = "tommymorgan.agent-tree"
+name = "Agent Tree"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Explorer-style workspace and tab tree rendered in the expanded sidebar."
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "focus-tab"
+title = "Focus tab"
+command = ["bun", "agent_tree.ts", "--focus-tab"]
+
+[[actions]]
+id = "open-workspace"
+title = "Focus or collapse workspace"
+command = ["bun", "agent_tree.ts", "--open-workspace"]
+
+[[ui]]
+id = "tree"
+surface = "sidebar"
+command = ["bun", "agent_tree.ts", "--watch"]
+stream = true
+stream_actions = true

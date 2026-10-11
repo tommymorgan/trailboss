@@ -1,0 +1,20 @@
+{
+  "name": "herdr-agent-tree",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "watch": "bun agent_tree.ts --watch",
+    "lint": "bunx @biomejs/biome@2.3.15 lint .",
+    "format:check": "bunx @biomejs/biome@2.3.15 format ."
+  },
+  "dependencies": {
+    "@herdr/store": "file:../../packages/herdr-store",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/bun": "1.4.2"
+  }
+}

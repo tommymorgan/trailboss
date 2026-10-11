@@ -1150,6 +1150,7 @@ async fn client_shell_receives_dynamic_plugin_ui_rows() {
         .insert(plugin.plugin_id.clone(), plugin);
     let rows = vec![
         crate::protocol::endpoint::EndpointPluginUiItem {
+            declaration: None,
             plugin_id: "tree.plugin".into(),
             ui_id: "tree".into(),
             title: "▾ ● main".into(),
@@ -1160,6 +1161,7 @@ async fn client_shell_receives_dynamic_plugin_ui_rows() {
             segments: Vec::new(),
         },
         crate::protocol::endpoint::EndpointPluginUiItem {
+            declaration: None,
             plugin_id: "tree.plugin".into(),
             ui_id: "tree".into(),
             title: "    ○ build".into(),

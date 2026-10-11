@@ -1,6 +1,9 @@
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseButton, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -18,7 +21,12 @@ struct Terminal;
 impl Drop for Terminal {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, cursor::Show);
+        let _ = execute!(
+            io::stdout(),
+            DisableMouseCapture,
+            LeaveAlternateScreen,
+            cursor::Show
+        );
     }
 }
 fn main() -> io::Result<()> {
@@ -104,32 +112,101 @@ fn main() -> io::Result<()> {
     client.blocking()?;
     enable_raw_mode()?;
     let _terminal = Terminal;
-    execute!(io::stdout(), EnterAlternateScreen)?;
-    if let Some(surface) = client.primary.take() {
-        terminal::draw(&mut io::stdout(), &surface, &layout)?;
-    }
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    let mut surface = client
+        .primary
+        .take()
+        .ok_or_else(|| io::Error::other("missing Surface"))?;
+    let mut declarations = client.declarations.take().unwrap_or_default();
+    let mut focused_tab = client.focused_tab_id.clone();
+    let mut boot_id = client.boot_id.clone();
+    terminal::draw_frame(
+        &mut io::stdout(),
+        &surface,
+        &declarations,
+        focused_tab.as_deref(),
+        &layout,
+    )?;
     let (tx, rx) = mpsc::sync_channel(1);
-    std::thread::spawn(move || loop {
-        let result = client.receive();
-        if let Err(e) = result {
-            let _ = tx.send(Err(e));
-            break;
-        }
-        if let Some(s) = client.primary.take() {
-            if tx.send(Ok(s)).is_err() {
+    std::thread::spawn(move || {
+        let mut last_focus = client.focused_tab_id.clone();
+        let mut last_pane = client.focused_pane_id.clone();
+        loop {
+            if let Err(e) = client.receive() {
+                let _ = tx.send(Err(e));
                 break;
+            }
+            let focus_update =
+                if last_focus != client.focused_tab_id || last_pane != client.focused_pane_id {
+                    last_focus.clone_from(&client.focused_tab_id);
+                    last_pane.clone_from(&client.focused_pane_id);
+                    Some((
+                        client.focused_tab_id.clone(),
+                        client.boot_id.clone(),
+                        client.focused_pane_id.clone(),
+                    ))
+                } else {
+                    None
+                };
+            if client.primary.is_some() || client.declarations.is_some() || focus_update.is_some() {
+                let update = (
+                    client.primary.take(),
+                    client.declarations.take(),
+                    focus_update,
+                );
+                if tx.send(Ok(update)).is_err() {
+                    break;
+                }
             }
         }
     });
     loop {
-        while let Ok(surface) = rx.try_recv() {
-            terminal::draw(&mut io::stdout(), &surface?, &layout)?;
+        while let Ok(update) = rx.try_recv() {
+            let (next_surface, next_declarations, focus_update) = update?;
+            if let Some(next) = next_surface {
+                surface = next;
+            }
+            if let Some(next) = next_declarations {
+                declarations = next;
+            }
+            if let Some((next_focus, next_boot, next_pane)) = focus_update {
+                if let Some(pane) = next_pane {
+                    input.focus_pane_target(&pane);
+                }
+                focused_tab = next_focus;
+                boot_id = next_boot;
+            }
+            terminal::draw_frame(
+                &mut io::stdout(),
+                &surface,
+                &declarations,
+                focused_tab.as_deref(),
+                &layout,
+            )?;
         }
         if event::poll(Duration::from_millis(16))? {
             match event::read()? {
                 Event::Resize(c, r) => {
                     layout = Layout::new(c, r)?;
                     input.resize(layout.working.width, layout.working.height)?;
+                    terminal::draw_frame(
+                        &mut io::stdout(),
+                        &surface,
+                        &declarations,
+                        focused_tab.as_deref(),
+                        &layout,
+                    )?;
+                }
+                Event::Mouse(mouse)
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                        && mouse.column < layout.list.width
+                        && mouse.row < layout.list.height =>
+                {
+                    if let Some((plugin, action, context)) =
+                        herdr_fork::sidebar::action_at(&declarations, usize::from(mouse.row))
+                    {
+                        input.invoke(&boot_id, plugin, action, context)?;
+                    }
                 }
                 Event::Key(k) if k.kind != KeyEventKind::Release => {
                     if k.code == KeyCode::Char('q') && k.modifiers.contains(KeyModifiers::CONTROL) {

@@ -2,6 +2,7 @@ use herdr_runtime::protocol::{
     self, ClientMessage, ClientPaneInputEvent, ClientSurfaceSize, ServerMessage,
 };
 use std::{io, os::unix::net::UnixStream, path::Path};
+pub mod sidebar;
 pub mod terminal;
 #[derive(Debug)]
 pub struct Cell {
@@ -33,7 +34,7 @@ impl Surface {
         text
     }
 }
-/// Unoccupied plugin slots; no widget protocol or plugin consumer exists yet.
+/// Reserved plugin Zones remain distinct from the PTY Surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Zone {
     List,
@@ -45,6 +46,9 @@ pub struct Client {
     raw: Option<protocol::PaneSurfaceFrame>,
     pub workspace_id: Option<String>,
     pub focused_pane_id: Option<String>,
+    pub focused_tab_id: Option<String>,
+    pub boot_id: String,
+    pub declarations: Option<Vec<(String, protocol::widgets::Declaration)>>,
     pub primary: Option<Surface>,
     pub reserved_zones: [Zone; 3],
 }
@@ -87,6 +91,9 @@ impl Client {
             raw: None,
             workspace_id: None,
             focused_pane_id: None,
+            focused_tab_id: None,
+            boot_id: String::new(),
+            declarations: None,
             primary: None,
             reserved_zones: [Zone::List, Zone::Footer, Zone::FooterRight],
         })
@@ -96,6 +103,8 @@ impl Client {
             protocol::read_message(&mut self.stream, protocol::MAX_FRAME_SIZE).map_err(error)?;
         match message {
             ServerMessage::ClientShellSnapshot(s) => {
+                self.boot_id = s.boot_id;
+                self.focused_tab_id = s.focused_tab_id;
                 self.workspace_id = s.focused_workspace_id;
                 self.focused_pane_id = s.focused_pane_id;
             }
@@ -134,10 +143,24 @@ impl Client {
                 self.project();
             }
             ServerMessage::EndpointControl { kind, data }
+                if kind == protocol::endpoint::PLUGIN_UI_KIND =>
+            {
+                let ui: protocol::endpoint::EndpointPluginUi =
+                    serde_json::from_str(&data).map_err(error)?;
+                self.declarations = Some(
+                    ui.ui
+                        .into_iter()
+                        .filter_map(|item| item.declaration.map(|tree| (item.plugin_id, tree)))
+                        .collect(),
+                );
+            }
+            ServerMessage::EndpointControl { kind, data }
                 if kind == protocol::endpoint::ENDPOINT_SNAPSHOT_KIND =>
             {
                 let s: protocol::ClientShellSnapshot =
                     serde_json::from_str(&data).map_err(error)?;
+                self.boot_id = s.boot_id;
+                self.focused_tab_id = s.focused_tab_id;
                 self.workspace_id = s.focused_workspace_id;
                 self.focused_pane_id = s.focused_pane_id;
             }
@@ -197,6 +220,7 @@ impl Client {
     pub fn input(&self) -> io::Result<Input> {
         Ok(Input {
             stream: self.stream.try_clone()?,
+            next_action_id: 0,
             pane_id: self
                 .focused_pane_id
                 .clone()
@@ -210,8 +234,37 @@ impl Client {
 pub struct Input {
     stream: UnixStream,
     pane_id: String,
+    next_action_id: u64,
 }
 impl Input {
+    pub fn focus_pane_target(&mut self, pane_id: &str) {
+        if self.pane_id != pane_id {
+            self.pane_id.clear();
+            self.pane_id.push_str(pane_id);
+        }
+    }
+    pub fn invoke(
+        &mut self,
+        boot_id: &str,
+        plugin_id: &str,
+        action: &str,
+        context: &protocol::widgets::Context,
+    ) -> io::Result<()> {
+        self.next_action_id += 1;
+        let request = serde_json::json!({ "id": format!("widget-action-{}", self.next_action_id), "method": "plugin.action.invoke", "params": {
+            "plugin_id": plugin_id, "action_id": action, "context": {
+                "workspace_id": context.workspace_id, "tab_id": context.tab_id, "pane_id": context.pane_id, "invocation_source": "plugin_ui"
+            }
+        }});
+        protocol::write_message(
+            &mut self.stream,
+            &ClientMessage::ClientShellEndpointRequest {
+                boot_id: boot_id.to_owned(),
+                request: request.to_string(),
+            },
+        )
+        .map_err(error)
+    }
     pub fn type_text(&mut self, text: &str) -> io::Result<()> {
         protocol::write_message(
             &mut self.stream,

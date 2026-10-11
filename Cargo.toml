@@ -12,6 +12,7 @@ resolver = "2"
 herdr-runtime = { path = "crates/herdr-runtime" }
 crossterm = "0.29"
 serde_json = "1"
+unicode-width = "0.2.2"
 
 [dev-dependencies]
 ghostty-vt = { path = "crates/ghostty-vt" }

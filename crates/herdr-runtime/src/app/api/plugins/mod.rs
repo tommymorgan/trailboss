@@ -852,6 +852,7 @@ pub(crate) fn sidebar_ui_rows(
                 continue;
             }
             rows.push(crate::protocol::endpoint::EndpointPluginUiItem {
+                declaration: None,
                 plugin_id: plugin.plugin_id.clone(),
                 ui_id: entry.id.clone(),
                 title: entry.title.clone(),

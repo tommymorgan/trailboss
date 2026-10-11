@@ -47,11 +47,11 @@ Scenario: Existing session automation works without protocol changes
 ### Task 2.1: Port the agent tree as the first widget-tree consumer
 <!-- estimate: ~1350 reviewable lines | feature-files: features/agent-tree.feature | demoable: yes | confidence: low | OVER SOFT CAP: scenario-atomic; use slice-split after implementation -->
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/agent-tree.feature::Port the agent tree as the first widget-tree consumer
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: Port the agent tree as the first widget-tree consumer
   Given no plugin has yet consumed the new widget-tree API, and the fork’s agent-tree producer and TanStack DB store are ported without replacing the store or stdin-envelope transport
   When I enable agent-tree as the first real plugin for a session with named workspaces and tabs
