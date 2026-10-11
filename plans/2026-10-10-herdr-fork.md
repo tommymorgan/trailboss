@@ -309,11 +309,11 @@ Scenario: Accept the spike only with complete daily-driver evidence
   When the exit report evaluates that evidence and the passing local and remote 15-pane latency results within the 2–3 week spike
   Then the report marks the spike passed only when every exit requirement has demonstrated results
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/spike-exit.feature::Keep the fork when the spike fails its exit test
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: Keep the fork when the spike fails its exit test
   Given at least one required daily-driver exit result is failing or absent
   When the exit report evaluates the spike
