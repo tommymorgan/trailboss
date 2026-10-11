@@ -99,6 +99,7 @@ use attach::direct_attach_pixel_mouse;
 use attach::AttachEscapeState;
 #[cfg(unix)]
 use attach::{write_attach_semantic_action, AttachInputAction};
+pub use clipboard_images::paste_clipboard_image;
 use clipboard_images::{
     client_remote_image_paste_key, endpoint_accepts_local_images, write_remote_image_to_server,
 };

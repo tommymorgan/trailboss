@@ -9,6 +9,27 @@ use crate::protocol::{ClientClipboardImageTarget, ClientMessage};
 
 use super::{write_to_server, ClientError};
 
+/// Bridge the client system clipboard to an explicit pane using the retained image path.
+/// Returns false when the clipboard has no supported image, leaving text paste to the caller.
+pub fn paste_clipboard_image(
+    stream: &mut impl std::io::Write,
+    target: ClientClipboardImageTarget,
+) -> std::io::Result<bool> {
+    let Some(image) = crate::platform::read_clipboard_image() else {
+        return Ok(false);
+    };
+    struct Sink<'a, W>(&'a mut W);
+    impl<W: std::io::Write> super::ClientMessageSink for Sink<'_, W> {
+        fn send_client_message(&mut self, message: &ClientMessage) -> std::io::Result<()> {
+            crate::protocol::write_message(self.0, message)
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        }
+    }
+    write_remote_image_to_server(&mut Sink(stream), target, image, "clipboard paste")
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok(true)
+}
+
 pub(super) fn write_remote_image_to_server(
     stream: &mut impl super::ClientMessageSink,
     target: ClientClipboardImageTarget,

@@ -253,6 +253,21 @@ impl Input {
             None => self.type_text(text),
         }
     }
+    pub fn paste(&mut self, core: &mut core::Core, boot_id: &str, text: &str) -> io::Result<()> {
+        if text.is_empty()
+            && core.visible(protocol::widgets::Condition::HasPane)
+            && !core.visible(protocol::widgets::Condition::NewTab)
+            && !core.visible(protocol::widgets::Condition::Menu)
+            && !self.pane_id.is_empty()
+            && herdr_runtime::client::paste_clipboard_image(
+                &mut self.stream,
+                protocol::ClientClipboardImageTarget::Pane(self.pane_id.clone()),
+            )?
+        {
+            return Ok(());
+        }
+        self.dispatch_text(core, boot_id, text)
+    }
     pub fn focus_pane_target(&mut self, pane_id: &str) {
         if self.pane_id != pane_id {
             self.pane_id.clear();

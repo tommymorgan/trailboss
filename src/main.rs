@@ -1,8 +1,8 @@
 use crossterm::{
     cursor,
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseButton, MouseEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -21,6 +21,7 @@ impl Drop for Terminal {
         let _ = execute!(
             io::stdout(),
             DisableMouseCapture,
+            DisableBracketedPaste,
             LeaveAlternateScreen,
             cursor::Show
         );
@@ -157,7 +158,12 @@ fn run_client(path: &std::path::Path, remote: bool) -> io::Result<()> {
     client.blocking()?;
     enable_raw_mode()?;
     let _terminal = Terminal;
-    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        io::stdout(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let mut core = herdr_fork::core::Core::default();
     core.update_session(
         client.workspace_id.clone(),
@@ -248,6 +254,10 @@ fn run_client(path: &std::path::Path, remote: bool) -> io::Result<()> {
             continue;
         }
         match event::read()? {
+            Event::Paste(text) => {
+                input.paste(&mut core, &boot_id, &text)?;
+                dirty = true;
+            }
             Event::Resize(cols, rows) => {
                 viewport = terminal::Rect::viewport(cols, rows);
                 dirty = true;

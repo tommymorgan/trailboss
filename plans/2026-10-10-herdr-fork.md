@@ -257,11 +257,11 @@ Scenario: Attach from achy to one remote session
 ### Task 5.2: Paste clipboard images into the focused pane
 <!-- estimate: ~450 reviewable lines | feature-files: features/clipboard-images.feature | demoable: yes -->
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/clipboard-images.feature::Paste clipboard images into the focused pane
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: Paste clipboard images into the focused pane
   Given I am attached in <mode> mode and an image is on the client clipboard
   When I paste into the focused pane
