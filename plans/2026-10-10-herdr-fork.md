@@ -165,11 +165,11 @@ Scenario: Hot-apply a new widget declaration
 ### Task 3.4: Dispatch plugin actions through stdin envelopes
 <!-- estimate: ~480 reviewable lines | feature-files: features/plugin-actions.feature | demoable: yes -->
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/plugin-actions.feature::Dispatch plugin actions through stdin envelopes
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: Dispatch plugin actions through stdin envelopes
   Given a long-lived producer declares a focus-tab action for an unfocused tab
   When I activate that declaration
