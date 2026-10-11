@@ -31,6 +31,11 @@ pub struct RemoteLaunch {
     pub(crate) keybindings: RemoteKeybindings,
     pub(crate) live_handoff: bool,
 }
+impl RemoteLaunch {
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+}
 
 pub fn extract_remote_args(args: &[String]) -> Result<(Vec<String>, Option<RemoteLaunch>), String> {
     let mut cleaned = Vec::with_capacity(args.len());

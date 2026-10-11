@@ -244,11 +244,11 @@ Scenario: Restore persisted session topology after relaunch
 ### Task 5.1: Attach from achy to one remote session
 <!-- estimate: ~450 reviewable lines | feature-files: features/remote-attach.feature | demoable: yes | confidence: low -->
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/remote-attach.feature::Attach from achy to one remote session
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: Attach from achy to one remote session
   Given the remote core owns a named session and achy has SSH access to it
   When I run the client with --remote on achy and it attaches over SSH to that session

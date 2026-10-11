@@ -38,6 +38,57 @@ const WINDOWS_REMOTE_PATH_MARKER: &str = "herdr-remote-path:1:";
 const WINDOWS_REMOTE_INSTALL_DIR_MARKER: &str = "herdr-remote-install-dir:1:";
 const WINDOWS_REMOTE_INSTALL_RESULT_MARKER: &str = "herdr-remote-install-result:1:";
 const SSH_CONTROL_SOCKET_NAME: &str = "ctl";
+
+/// Renderer-neutral owner of the existing SSH stdio transport.
+/// Keep it alive until the client detaches; dropping it reaps its owned bridge.
+pub struct RemoteConnection {
+    bridge: SshStdioBridge,
+}
+impl RemoteConnection {
+    pub fn connect(target: &str, session: &str, executable: Option<&str>) -> io::Result<Self> {
+        super::validate_remote_target(target).map_err(io::Error::other)?;
+        crate::session::validate_name(session).map_err(io::Error::other)?;
+        let mut ssh = RemoteSsh::new_noninteractive(target.to_owned());
+        ssh.session_name = session.to_owned();
+        let remote = if let Some(path) = executable {
+            let platform = detect_remote_platform(&ssh)?.platform;
+            let metadata = crate::client::endpoint::SshMachineMetadata {
+                os: platform.os.to_owned(),
+                executable: path.to_owned(),
+            };
+            if !metadata.is_valid() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid remote Herdr executable path",
+                ));
+            }
+            let mut remote = RemoteHerdr::for_platform(platform);
+            remote = if remote.platform.is_windows() {
+                remote.with_windows_path(path.to_owned())
+            } else {
+                remote.with_posix_path(path)
+            };
+            if !remote_binary_supports_endpoint_requirement(&ssh, &remote, true)? {
+                return Err(io::Error::new(io::ErrorKind::Unsupported, format!("remote executable {path} is missing or does not support the endpoint protocol")));
+            }
+            remote
+        } else {
+            find_installed_remote_herdr(&ssh)?
+        };
+        let bridge = SshStdioBridge::start(
+            target.to_owned(),
+            remote,
+            local_forward_socket_path(target, session),
+            session.to_owned(),
+            ssh.options(),
+            true,
+        )?;
+        Ok(Self { bridge })
+    }
+    pub fn socket_path(&self) -> &Path {
+        &self.bridge.local_socket
+    }
+}
 pub fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     let session_name = crate::session::active_name()
         .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());

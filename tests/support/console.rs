@@ -11,15 +11,8 @@ pub struct Console {
     pub screen: ghostty_vt::Terminal,
 }
 impl Console {
+    #[allow(dead_code)] // Shared harness: remote-only callers supply their own command.
     pub fn new(core: &Core) -> Self {
-        let pair = portable_pty::native_pty_system()
-            .openpty(portable_pty::PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .unwrap();
         let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_herdr-fork"));
         command.args(["--session", &core.name]);
         for key in HOMES {
@@ -34,6 +27,17 @@ impl Console {
         command.env("TERM", "xterm-256color");
         command.env("SHELL", "/bin/sh");
         command.env_remove("NO_COLOR");
+        Self::from_command(command)
+    }
+    pub fn from_command(command: portable_pty::CommandBuilder) -> Self {
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
         let child = pair.slave.spawn_command(command).unwrap();
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().unwrap();
@@ -100,6 +104,7 @@ impl Console {
             self.screen.write(&bytes);
         }
     }
+    #[allow(dead_code)] // Shared harness: keyboard-only scenarios do not click.
     pub fn click(&mut self, x: usize, y: usize) {
         self.writer
             .write_all(

@@ -28,7 +28,32 @@ impl Drop for Terminal {
 }
 fn main() -> io::Result<()> {
     let raw: Vec<String> = std::env::args().collect();
-    let args = herdr_runtime::session::configure_from_args(&raw).map_err(io::Error::other)?;
+    let (raw, remote) =
+        herdr_runtime::remote::extract_remote_args(&raw).map_err(io::Error::other)?;
+    let mut args = herdr_runtime::session::configure_from_args(&raw).map_err(io::Error::other)?;
+    let executable = if let Some(index) = args.iter().position(|arg| arg == "--remote-executable") {
+        if remote.is_none() {
+            return Err(io::Error::other("--remote-executable requires --remote"));
+        }
+        let path = args
+            .get(index + 1)
+            .cloned()
+            .ok_or_else(|| io::Error::other("missing value for --remote-executable"))?;
+        args.drain(index..=index + 1);
+        Some(path)
+    } else {
+        None
+    };
+    match args.get(1).map(String::as_str) {
+        Some("remote-client-bridge") => {
+            enable_default_producer()?;
+            return herdr_runtime::remote::run_remote_client_bridge(&args[2..]);
+        }
+        Some("remote-api-bridge") => {
+            return herdr_runtime::remote::run_remote_api_bridge(&args[2..])
+        }
+        _ => {}
+    }
     if matches!(
         args.get(1).map(String::as_str),
         Some(
@@ -57,21 +82,40 @@ fn main() -> io::Result<()> {
     }
     if args.len() > 1 {
         return Err(io::Error::other(
-            "usage: herdr-fork [SESSION_API_COMMAND | server] [--session NAME]",
+            "usage: herdr-fork [SESSION_API_COMMAND | server] [--session NAME] [--remote HOST [--remote-executable PATH]]",
         ));
     }
+    let remote = remote
+        .map(|remote| {
+            herdr_runtime::remote::RemoteConnection::connect(
+                remote.target(),
+                &herdr_runtime::session::active_name()
+                    .unwrap_or_else(|| herdr_runtime::session::DEFAULT_SESSION_NAME.into()),
+                executable.as_deref(),
+            )
+        })
+        .transpose()?;
+    let path = remote.as_ref().map_or_else(
+        || {
+            herdr_runtime::session::client_socket_path_for(
+                herdr_runtime::session::active_name().as_deref(),
+            )
+        },
+        |connection| connection.socket_path().to_owned(),
+    );
+    run_client(&path, remote.is_some())
+}
+fn run_client(path: &std::path::Path, remote: bool) -> io::Result<()> {
     let (cols, rows) = crossterm::terminal::size()?;
     let mut viewport = terminal::Rect::viewport(cols, rows);
-    let path = herdr_runtime::session::client_socket_path_for(
-        herdr_runtime::session::active_name().as_deref(),
-    );
-    let mut client = match Client::attach(&path, cols, rows) {
+    let mut client = match Client::attach(path, cols, rows) {
         Ok(client) => client,
         Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-            ) =>
+            if !remote
+                && matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) =>
         {
             let mut command = Command::new(std::env::current_exe()?);
             command.arg("server");
@@ -86,7 +130,7 @@ fn main() -> io::Result<()> {
                 .spawn()?;
             let deadline = Instant::now() + Duration::from_secs(15);
             loop {
-                if let Ok(client) = Client::attach(&path, cols, rows) {
+                if let Ok(client) = Client::attach(path, cols, rows) {
                     break client;
                 }
                 if let Some(status) = child.try_wait()? {
@@ -106,7 +150,9 @@ fn main() -> io::Result<()> {
     while client.boot_id.is_empty() {
         client.receive()?;
     }
-    enable_default_producer()?;
+    if !remote {
+        enable_default_producer()?;
+    }
     let mut input = client.input()?;
     client.blocking()?;
     enable_raw_mode()?;
