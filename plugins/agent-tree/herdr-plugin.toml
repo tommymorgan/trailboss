@@ -15,6 +15,11 @@ id = "open-workspace"
 title = "Focus or collapse workspace"
 command = ["bun", "agent_tree.ts", "--open-workspace"]
 
+[[actions]]
+id = "focus-pane"
+title = "Focus pane"
+command = ["bun", "agent_tree.ts", "--focus-pane"]
+
 [[ui]]
 id = "tree"
 surface = "sidebar"

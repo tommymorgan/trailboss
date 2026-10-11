@@ -1,6 +1,6 @@
 #[derive(Clone, Default)]
 pub struct EventHub {
-    inner: std::sync::Arc<std::sync::Mutex<EventHubState>>,
+    inner: std::sync::Arc<(std::sync::Mutex<EventHubState>, std::sync::Condvar)>,
 }
 
 #[derive(Default)]
@@ -19,7 +19,7 @@ impl EventHub {
     const MAX_EVENTS: usize = 512;
 
     pub fn push(&self, event: crate::api::schema::EventEnvelope) {
-        let Ok(mut state) = self.inner.lock() else {
+        let Ok(mut state) = self.inner.0.lock() else {
             return;
         };
         state.next_sequence += 1;
@@ -29,10 +29,12 @@ impl EventHub {
         if overflow > 0 {
             state.events.drain(0..overflow);
         }
+        drop(state);
+        self.inner.1.notify_all();
     }
 
     pub fn events_after(&self, sequence: u64) -> Vec<(u64, crate::api::schema::EventEnvelope)> {
-        let Ok(state) = self.inner.lock() else {
+        let Ok(state) = self.inner.0.lock() else {
             return Vec::new();
         };
         state
@@ -49,6 +51,7 @@ impl EventHub {
     ) -> Result<Vec<(u64, crate::api::schema::EventEnvelope)>, EventHistoryError> {
         let state = self
             .inner
+            .0
             .lock()
             .map_err(|_| EventHistoryError::Unavailable)?;
         if state
@@ -67,10 +70,23 @@ impl EventHub {
     }
 
     pub fn current_sequence(&self) -> u64 {
-        let Ok(state) = self.inner.lock() else {
+        let Ok(state) = self.inner.0.lock() else {
             return 0;
         };
         state.next_sequence
+    }
+
+    /// Wake on publication, retaining the timeout only for disconnects and
+    /// subscriptions that also probe live output without a topology event.
+    pub(super) fn wait_after(&self, sequence: u64, timeout: std::time::Duration) {
+        let Ok(state) = self.inner.0.lock() else {
+            return;
+        };
+        drop(
+            self.inner
+                .1
+                .wait_timeout_while(state, timeout, |state| state.next_sequence == sequence),
+        );
     }
 }
 
@@ -115,7 +131,7 @@ mod tests {
     fn checked_history_reports_unavailable_instead_of_empty_after_poison() {
         let hub = EventHub::default();
         assert!(std::panic::catch_unwind(|| {
-            let _guard = hub.inner.lock().unwrap();
+            let _guard = hub.inner.0.lock().unwrap();
             panic!("poison the test event history");
         })
         .is_err());

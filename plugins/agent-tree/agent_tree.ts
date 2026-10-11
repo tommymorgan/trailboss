@@ -101,6 +101,8 @@ async function runAction(mode: string, tabId?: string, workspaceId?: string) {
         .min(1)
         .parse(tabId ?? process.env.HERDR_TAB_ID),
     )
+  } else if (mode === '--focus-pane') {
+    await store.commands.focusPane(z.string().min(1).parse(process.env.HERDR_PANE_ID))
   } else {
     await openWorkspaceAction(
       z
@@ -111,7 +113,7 @@ async function runAction(mode: string, tabId?: string, workspaceId?: string) {
   }
 }
 
-if (mode === '--focus-tab' || mode === '--open-workspace') {
+if (mode === '--focus-tab' || mode === '--open-workspace' || mode === '--focus-pane') {
   try {
     await runAction(mode)
   } finally {
@@ -166,6 +168,13 @@ if (mode === '--focus-tab' || mode === '--open-workspace') {
               .string()
               .min(1)
               .parse(request.workspaceId ?? ''),
+          )
+        } else if (request.actionId === 'focus-pane') {
+          await store.commands.focusPane(
+            z
+              .string()
+              .min(1)
+              .parse(request.paneId ?? ''),
           )
         } else {
           throw new Error(`Unknown action: ${request.actionId}`)
@@ -242,5 +251,5 @@ if (mode === '--focus-tab' || mode === '--open-workspace') {
   }
 } else {
   await store.close()
-  throw new Error('Use --watch, --focus-tab, or --open-workspace')
+  throw new Error('Use --watch, --focus-tab, --focus-pane, or --open-workspace')
 }

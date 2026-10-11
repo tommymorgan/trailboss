@@ -117,3 +117,23 @@ test('retains request and result envelope identities and all context targets', (
   ])
     expect(parseControlLine(line)).toBeNull()
 })
+
+test('declares a real pane focus target beneath its tab', () => {
+  const pane = {
+    ...entities[1],
+    id: 'pane:p',
+    kind: 'pane' as const,
+    paneId: 'p',
+    label: 'Pane target',
+  }
+  const rows = projectTree(
+    [...entities, pane, { ...pane, id: 'pane:q', paneId: 'q' }],
+    new Set(),
+  ).children
+  expect(rows.find((item) => item.context?.pane_id === 'p')).toEqual({
+    type: 'row',
+    action: 'focus-pane',
+    context: { workspace_id: 'w', tab_id: 't', pane_id: 'p' },
+    children: [{ type: 'label', text: '    Pane target', role: 'label' }],
+  })
+})

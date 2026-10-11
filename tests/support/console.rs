@@ -6,14 +6,14 @@ use std::{
 pub struct Console {
     pub child: Box<dyn portable_pty::Child + Send + Sync>,
     _master: Box<dyn portable_pty::MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
-    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    pub(crate) writer: Box<dyn Write + Send>,
+    pub(crate) rx: std::sync::mpsc::Receiver<Vec<u8>>,
     pub screen: ghostty_vt::Terminal,
 }
 impl Console {
     #[allow(dead_code)] // Shared harness: remote-only callers supply their own command.
     pub fn new(core: &Core) -> Self {
-        let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_herdr-fork"));
+        let mut command = portable_pty::CommandBuilder::new(super::support::executable());
         command.args(["--session", &core.name]);
         for key in HOMES {
             command.env(key, &core.home);
@@ -30,10 +30,13 @@ impl Console {
         Self::from_command(command)
     }
     pub fn from_command(command: portable_pty::CommandBuilder) -> Self {
+        Self::sized(command, 80, 24)
+    }
+    pub fn sized(command: portable_pty::CommandBuilder, cols: u16, rows: u16) -> Self {
         let pair = portable_pty::native_pty_system()
             .openpty(portable_pty::PtySize {
-                rows: 24,
-                cols: 80,
+                rows,
+                cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
@@ -56,10 +59,10 @@ impl Console {
             _master: pair.master,
             writer,
             rx,
-            screen: ghostty_vt::Terminal::new(80, 24, 0).unwrap(),
+            screen: ghostty_vt::Terminal::new(cols, rows, 0).unwrap(),
         }
     }
-    fn rows(&self) -> Vec<String> {
+    pub(crate) fn rows(&self) -> Vec<String> {
         self.screen
             .screen_text_rows()
             .unwrap()

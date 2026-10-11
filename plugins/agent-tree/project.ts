@@ -22,7 +22,7 @@ export const Leader = z.object({ type: z.literal('leader') })
 export const Row = z.object({
   type: z.literal('row'),
   children: z.array(z.union([Label, Leader])),
-  action: z.enum(['open-workspace', 'focus-tab']).optional(),
+  action: z.enum(['open-workspace', 'focus-tab', 'focus-pane']).optional(),
   context: Context.optional(),
 })
 export type Row = z.infer<typeof Row>
@@ -89,6 +89,22 @@ export function projectTree(entities: EntityRow[], collapsed: Set<string>): z.in
           label(` ${tab.label}`, 'label'),
         ],
       })
+      const panes = entities.filter((pane) => pane.kind === 'pane' && pane.tabId === tab.tabId)
+      if (panes.length > 1) {
+        for (const pane of panes) {
+          if (pane.paneId === null) throw new Error('Pane entity has no pane identity')
+          rows.push({
+            type: 'row',
+            action: 'focus-pane',
+            context: {
+              workspace_id: workspace.workspaceId,
+              tab_id: tab.tabId,
+              pane_id: pane.paneId,
+            },
+            children: [label(`    ${pane.label || pane.paneId}`, 'label')],
+          })
+        }
+      }
     }
   }
   return { type: 'column', children: rows }

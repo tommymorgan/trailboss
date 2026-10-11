@@ -773,6 +773,23 @@ fn read_initial_request_line_with_limits(
                         "timed out reading api request",
                     ));
                 }
+                #[cfg(unix)]
+                {
+                    use std::os::fd::{AsFd as _, AsRawFd as _};
+                    let LocalStream::UdSocket(socket) = &*stream;
+                    let remaining = deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(CONNECTION_POLL_INTERVAL);
+                    let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+                    if let Err(error) =
+                        crate::platform::poll_fd_readable(socket.as_fd().as_raw_fd(), timeout_ms)
+                    {
+                        if error.kind() != io::ErrorKind::Interrupted {
+                            break Err(error);
+                        }
+                    }
+                }
+                #[cfg(windows)]
                 std::thread::sleep(CONNECTION_POLL_INTERVAL);
             }
         }
@@ -962,7 +979,7 @@ fn stream_subscriptions(
         if should_stop_connection(&mut stream, running)? {
             return Ok(());
         }
-
+        let observed_sequence = event_hub.current_sequence();
         for subscription in &mut subscriptions {
             let events = match subscription.poll_batch(api_tx, event_hub) {
                 Ok(events) => events,
@@ -989,7 +1006,7 @@ fn stream_subscriptions(
                 }
             }
         }
-        std::thread::sleep(CONNECTION_POLL_INTERVAL);
+        event_hub.wait_after(observed_sequence, CONNECTION_POLL_INTERVAL);
     }
 }
 

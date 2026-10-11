@@ -270,6 +270,38 @@ fn subscriptions_drain_retained_bursts_without_per_event_poll_delay() {
 }
 
 #[test]
+fn subscriptions_wake_promptly_when_an_event_arrives() {
+    let mut test = SocketTest::new();
+    let mut client = test.connect();
+    client.subscribe("latency", json!([{"type": "workspace.renamed"}]));
+    client.assert_started("latency");
+    for index in 0..5 {
+        // Publish while an otherwise idle subscription is waiting.
+        std::thread::sleep(Duration::from_millis(20));
+        let started = Instant::now();
+        test.hub.push(renamed_event(index));
+        let event = client
+            .next_line(started + Duration::from_millis(50))
+            .expect("published event did not wake its real socket consumer within 50ms");
+        assert_eq!(event["data"]["label"], format!("flood-{index}"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn initial_request_wakes_promptly_when_bytes_arrive_after_accept() {
+    let mut test = SocketTest::new();
+    let mut client = test.connect();
+    std::thread::sleep(Duration::from_millis(20));
+    let started = Instant::now();
+    client.subscribe("initial-latency", json!([{"type": "workspace.renamed"}]));
+    let response = client
+        .next_line(started + Duration::from_millis(50))
+        .expect("initial request bytes did not wake their real socket reader within 50ms");
+    assert_eq!(response["result"]["type"], "subscription_started");
+}
+
+#[test]
 fn subscriptions_report_history_loss_before_sending_a_partial_stream() {
     assert_subscription_history_loss(false);
 }

@@ -281,11 +281,11 @@ Scenario Outline: Paste clipboard images into the focused pane
 ### Task 6.1: Meet the local and remote click-to-repaint gate
 <!-- estimate: ~400 reviewable lines | feature-files: features/latency.feature | demoable: yes -->
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/latency.feature::Meet the local and remote click-to-repaint gate
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: Meet the local and remote click-to-repaint gate
   Given 15 populated panes are running in <mode> mode on the recorded acceptance setup
   When click-to-repaint-15-panes measures repeated workspace, tab and pane focus clicks through the completed visible repaint

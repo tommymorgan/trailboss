@@ -49,6 +49,19 @@ pub const HOMES: &[&str] = &[
     "XDG_CACHE_HOME",
     "XDG_RUNTIME_DIR",
 ];
+pub fn executable() -> PathBuf {
+    option_env!("CARGO_BIN_EXE_herdr-fork")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("herdr-fork")
+        })
+}
 impl Core {
     pub fn new() -> Self {
         let name = format!(
@@ -63,7 +76,7 @@ impl Core {
         Self::launch(home, name)
     }
     fn launch(home: PathBuf, name: String) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_herdr-fork"));
+        let mut command = Command::new(executable());
         command.args(["server", "--session", &name]);
         for key in HOMES {
             command.env(key, &home);

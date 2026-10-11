@@ -211,6 +211,9 @@ fn run_client(path: &std::path::Path, remote: bool) -> io::Result<()> {
     });
     let mut dirty = true;
     let mut pane_size = (cols, rows);
+    // Retain one output buffer: cell commands must not become thousands of
+    // individual PTY writes before the completed frame is flushed.
+    let mut output = io::BufWriter::with_capacity(128 * 1024, io::stdout());
     loop {
         while let Ok(update) = rx.try_recv() {
             let (next_surface, next_declarations, session, next_boot) = update?;
@@ -242,7 +245,7 @@ fn run_client(path: &std::path::Path, remote: bool) -> io::Result<()> {
                 }
             }
             terminal::draw_frame(
-                &mut io::stdout(),
+                &mut output,
                 surface.as_ref(),
                 &declarations,
                 &core,
