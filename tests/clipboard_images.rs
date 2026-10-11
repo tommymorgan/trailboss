@@ -41,7 +41,7 @@ impl Clipboard {
                 "-o",
                 "BatchMode=yes",
                 "achy",
-                "mktemp -d /tmp/herdr-task52.XXXXXXXX",
+                "mktemp -d /tmp/trailboss-task52.XXXXXXXX",
             ]))
             .trim()
             .to_owned();
@@ -54,8 +54,8 @@ impl Clipboard {
             };
             checked(Command::new("scp").args([
                 "-q",
-                env!("CARGO_BIN_EXE_herdr-fork"),
-                &format!("achy:{}/herdr-fork", cb.root),
+                env!("CARGO_BIN_EXE_trailboss"),
+                &format!("achy:{}/trailboss", cb.root),
             ]));
             cb.server = Some(
                 Command::new("ssh")
@@ -96,10 +96,11 @@ impl Clipboard {
             cb.display = format!(":{}", cb.display);
             cb
         } else {
-            let root = std::env::temp_dir().join(format!("herdr-task52-{}", std::process::id()));
+            let root =
+                std::env::temp_dir().join(format!("trailboss-task52-{}", std::process::id()));
             fs::create_dir(&root).unwrap();
             let file = fs::File::create(root.join("display")).unwrap();
-            let executable = std::env::var("HERDR_TEST_XVFB").unwrap_or_else(|_| "Xvfb".into());
+            let executable = std::env::var("TRAILBOSS_TEST_XVFB").unwrap_or_else(|_| "Xvfb".into());
             let mut cb = Self {
                 remote,
                 root: root.to_str().unwrap().into(),
@@ -170,17 +171,18 @@ impl Clipboard {
     }
     fn console(&self, core: &Core) -> Console {
         if !self.remote {
-            let mut c = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_herdr-fork"));
+            let mut c = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_trailboss"));
             c.args(["--session", &core.name]);
             for key in HOMES {
                 c.env(key, &core.home);
             }
-            for (key, _) in
-                std::env::vars_os().filter(|(k, _)| k.to_string_lossy().starts_with("HERDR_"))
-            {
+            for (key, _) in std::env::vars_os().filter(|(k, _)| {
+                let name = k.to_string_lossy();
+                name.starts_with("TRAILBOSS_") || name.starts_with("HERDR_")
+            }) {
                 c.env_remove(key);
             }
-            c.env("HERDR_CONFIG_PATH", core.home.join("config.toml"));
+            c.env("TRAILBOSS_CONFIG_PATH", core.home.join("config.toml"));
             c.env("DISPLAY", &self.display);
             c.env_remove("WAYLAND_DISPLAY");
             c.env("PATH", "/usr/bin:/bin");
@@ -196,15 +198,15 @@ impl Clipboard {
                 ));
             }
             script.push_str(&format!(
-                "export HERDR_CONFIG_PATH={}\nexec {} \"$@\"\n",
+                "export TRAILBOSS_CONFIG_PATH={}\nexec {} \"$@\"\n",
                 quote(core.home.join("config.toml").to_str().unwrap()),
-                quote(env!("CARGO_BIN_EXE_herdr-fork"))
+                quote(env!("CARGO_BIN_EXE_trailboss"))
             ));
             fs::write(&wrapper, script).unwrap();
             fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
             let mut c = portable_pty::CommandBuilder::new("ssh");
             c.args(["-tt", "-o", "BatchMode=yes", "achy"]);
-            c.arg(format!("env -u WAYLAND_DISPLAY DISPLAY={display} PATH=/usr/bin:/bin TERM=xterm-256color XDG_CONFIG_HOME={root} XDG_STATE_HOME={root} XDG_DATA_HOME={root} XDG_CACHE_HOME={root} XDG_RUNTIME_DIR={root} HERDR_CONFIG_PATH={root}/config.toml {root}/herdr-fork --remote junkman --remote-executable {wrapper} --session {name}",display=quote(&self.display),root=quote(&self.root),wrapper=quote(wrapper.to_str().unwrap()),name=quote(&core.name)));
+            c.arg(format!("env -u WAYLAND_DISPLAY DISPLAY={display} PATH=/usr/bin:/bin TERM=xterm-256color XDG_CONFIG_HOME={root} XDG_STATE_HOME={root} XDG_DATA_HOME={root} XDG_CACHE_HOME={root} XDG_RUNTIME_DIR={root} TRAILBOSS_CONFIG_PATH={root}/config.toml {root}/trailboss --remote junkman --remote-executable {wrapper} --session {name}",display=quote(&self.display),root=quote(&self.root),wrapper=quote(wrapper.to_str().unwrap()),name=quote(&core.name)));
             Console::from_command(c)
         }
     }
@@ -266,13 +268,24 @@ impl Proof {
         }
     }
     fn when(&mut self) {
+        self.when_pasting("\x1b[200~\x1b[201~");
+    }
+    fn when_pasting(&mut self, trigger: &str) {
         for pane in self.panes.clone() {
             self.core.request("pane.focus", json!({"pane_id":pane}));
             let marker = format!("ready-{pane}");
             self.core.request("pane.send_text",json!({"pane_id":pane,"text":format!("printf '\\033[2J\\033[H{marker}\\n'\n"),"submit":false}));
             self.console
                 .wait(|rows| rows.iter().any(|r| r.contains(&marker)));
-            self.console.text("\x1b[200~\x1b[201~");
+            let other_pane = self.panes.iter().find(|p| *p != &pane).unwrap();
+            let other_before = self.core.request(
+                "pane.read",
+                json!({"pane_id":other_pane,"source":"visible"}),
+            )["read"]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            self.console.text(trigger);
             let deadline = Instant::now() + Duration::from_secs(4);
             loop {
                 let text = self
@@ -282,13 +295,19 @@ impl Proof {
                     .as_str()
                     .unwrap()
                     .replace('\n', "");
-                if let Some(start) = text.find("/tmp/herdr-clipboard-images-") {
+                if let Some(start) = text.find("/tmp/trailboss-clipboard-images-") {
                     let path = text[start..].split_whitespace().next().unwrap();
                     self.files.push(PathBuf::from(path));
-                    let other=self.core.request("pane.read",json!({"pane_id":self.panes.iter().find(|p|*p!=&pane).unwrap(),"source":"visible"}))["read"]["text"].as_str().unwrap().replace('\n', "");
-                    assert!(
-                        !other.contains(path),
-                        "image leaked into nonfocused pane at paste time"
+                    let other = self.core.request(
+                        "pane.read",
+                        json!({"pane_id":other_pane,"source":"visible"}),
+                    )["read"]["text"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned();
+                    assert_eq!(
+                        other, other_before,
+                        "nonfocused pane changed during image paste"
                     );
                     break;
                 }
@@ -301,6 +320,14 @@ impl Proof {
             self.console.text("\x15");
         }
     }
+    fn assert_ctrl_v_passthrough(&mut self) {
+        self.console.text("saved=$(stty -g); stty raw -echo; printf '\\033[2J\\033[Hctrl-%s\\n' ready; byte=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]'); stty \"$saved\"; printf '\\nbyte-%s\\n' \"$byte\"\r");
+        self.console
+            .wait(|rows| rows.iter().any(|r| r.contains("ctrl-ready")));
+        self.console.text("\x16");
+        self.console
+            .wait(|rows| rows.iter().any(|r| r.contains("byte-16")));
+    }
     fn then(&mut self) {
         let uid = checked(Command::new("id").arg("-u"))
             .trim()
@@ -310,7 +337,7 @@ impl Proof {
         for (i, path) in self.files.iter().enumerate() {
             assert_eq!(
                 path.parent().unwrap(),
-                PathBuf::from(format!("/tmp/herdr-clipboard-images-{uid}"))
+                PathBuf::from(format!("/tmp/trailboss-clipboard-images-{uid}"))
             );
             assert_eq!(
                 fs::read(path).unwrap(),
@@ -364,7 +391,10 @@ impl Proof {
             .text("printf '\\033[2J\\033[Hfallback-%s\\n' okay\r");
         self.console
             .wait(|rows| rows.iter().any(|r| r.contains("fallback-okay")));
-        self.console.text("\x11");
+        self.clipboard
+            .publish("UTF8_STRING", b"plain clipboard text");
+        self.assert_ctrl_v_passthrough();
+        self.console.text("\x02q");
         let deadline = Instant::now() + Duration::from_secs(5);
         while self.console.child.try_wait().unwrap().is_none() {
             assert!(Instant::now() < deadline, "normal detach");
@@ -383,6 +413,7 @@ impl Drop for Proof {
 #[ignore = "requires isolated Xvfb and native xclip; never accesses human clipboard"]
 fn actual_local_clipboard_paste_stages_only_focused_pane() {
     let mut p = Proof::given(false);
+    p.assert_ctrl_v_passthrough();
     p.when();
     p.then();
 }
@@ -392,6 +423,14 @@ fn actual_achy_clipboard_paste_stages_only_focused_pane() {
     let mut p = Proof::given(true);
     p.when();
     p.then();
+}
+
+#[test]
+#[ignore = "requires isolated achy Xvfb clipboard and achy -> junkman SSH"]
+fn actual_achy_ctrl_v_stages_exact_image_only_in_focused_pane() {
+    let mut proof = Proof::given(true);
+    proof.when_pasting("\x16");
+    proof.then();
 }
 fn living_example(mode: &str) {
     let lines: Vec<_> = include_str!("../features/clipboard-images.feature")
@@ -414,7 +453,7 @@ fn living_example(mode: &str) {
             match (index,*line) {
                 (0,"Given I am attached in <mode> mode and an image is on the client clipboard") => proof=Some(Proof::given(mode=="remote from achy")),
                 (1,"When I paste into the focused pane") => proof.as_mut().unwrap().when(),
-                (2,"Then the client intercepts the image, the session core stages it in /tmp/herdr-clipboard-images-UID/ on the server host where UID is the server user’s UID, and the staged path is injected only into that focused pane") => proof.as_mut().unwrap().then(),
+                (2,"Then the client intercepts the image, the session core stages it in /tmp/trailboss-clipboard-images-UID/ on the server host where UID is the server user’s UID, and the staged path is injected only into that focused pane") => proof.as_mut().unwrap().then(),
                 _ => panic!("unbound clipboard living step: {line}"),
             }
         }
@@ -434,7 +473,7 @@ fn paste_clipboard_images_living_achy() {
 #[test]
 #[ignore = "requires an isolated Xvfb clipboard; subprocess keeps display variables private"]
 fn clipboard_input_seam_stages_bytes_and_captures_pane_target() {
-    if std::env::var_os("HERDR_CLIPBOARD_WORKER").is_none() {
+    if std::env::var_os("TRAILBOSS_CLIPBOARD_WORKER").is_none() {
         let mut clipboard = Clipboard::new(false);
         clipboard.publish("image/gif", IMAGE);
         checked(
@@ -445,7 +484,7 @@ fn clipboard_input_seam_stages_bytes_and_captures_pane_target() {
                     "--ignored",
                     "--nocapture",
                 ])
-                .env("HERDR_CLIPBOARD_WORKER", "1")
+                .env("TRAILBOSS_CLIPBOARD_WORKER", "1")
                 .env("DISPLAY", &clipboard.display)
                 .env_remove("WAYLAND_DISPLAY")
                 .env("PATH", "/usr/bin:/bin"),
@@ -469,11 +508,33 @@ fn clipboard_input_seam_stages_bytes_and_captures_pane_target() {
         client.receive().unwrap();
     }
     let mut input = client.input().unwrap();
-    let mut state = herdr_fork::core::Core::default();
+    let mut state = trailboss::core::Core::default();
+    assert!(
+        !input.paste_image(&state).unwrap(),
+        "no pane must preserve key dispatch"
+    );
     state.update_session(
         client.workspace_id.clone(),
         client.focused_tab_id.clone(),
         true,
+    );
+    let context = trailboss_runtime::protocol::widgets::Context {
+        workspace_id: client.workspace_id.clone(),
+        tab_id: client.focused_tab_id.clone(),
+        ..Default::default()
+    };
+    for action in ["host:rename-space", "host:rename-tab", "host:new"] {
+        state.invoke(action, &context, None);
+        assert!(
+            !input.paste_image(&state).unwrap(),
+            "host interactions must preserve key dispatch"
+        );
+        state.invoke("host:cancel", &context, None);
+    }
+    input.focus_pane_target("");
+    assert!(
+        !input.paste_image(&state).unwrap(),
+        "missing target must preserve key dispatch"
     );
     for pane in [&first, &second] {
         core.request("pane.focus", json!({"pane_id":pane}));
@@ -489,7 +550,7 @@ fn clipboard_input_seam_stages_bytes_and_captures_pane_target() {
                 .as_str()
                 .unwrap()
                 .replace('\n', "");
-            if let Some(start) = text.find("/tmp/herdr-clipboard-images-") {
+            if let Some(start) = text.find("/tmp/trailboss-clipboard-images-") {
                 break PathBuf::from(text[start..].split_whitespace().next().unwrap());
             }
             assert!(
@@ -510,4 +571,79 @@ fn clipboard_input_seam_stages_bytes_and_captures_pane_target() {
         input.type_text("\x15").unwrap();
     }
     input.detach().unwrap();
+}
+
+#[test]
+#[ignore = "requires isolated achy clipboard, SSH, and TRAILBOSS_TEST_OMP executable"]
+fn actual_achy_ctrl_v_attaches_image_in_isolated_omp() {
+    let executable =
+        std::env::var("TRAILBOSS_TEST_OMP").expect("set TRAILBOSS_TEST_OMP to the omp executable");
+    let mut proof = Proof::given(true);
+    let pane = proof.panes[0].clone();
+    for setting in ["startup.setupWizard", "startup.checkUpdate"] {
+        checked(
+            Command::new(&executable)
+                .env_clear()
+                .env("HOME", &proof.core.home)
+                .env("PATH", "/usr/bin:/bin")
+                .args(["config", "set", setting, "false"]),
+        );
+    }
+    let command = format!(
+        "env -i HOME={home} XDG_CONFIG_HOME={home} XDG_STATE_HOME={home} XDG_DATA_HOME={home} XDG_CACHE_HOME={home} PATH=/usr/bin:/bin TERM=xterm-256color {executable} --cwd {home} --no-session --no-tools --no-lsp --no-pty --no-extensions --no-skills --no-rules --no-title",
+        home = quote(proof.core.home.to_str().unwrap()),
+        executable = quote(&executable),
+    );
+    proof.core.request(
+        "pane.send_text",
+        json!({"pane_id":pane,"text":format!("{command}\n"),"submit":false}),
+    );
+    proof
+        .console
+        .wait(|rows| rows.iter().any(|r| r.contains("No default model")));
+    let other_before = proof.core.request(
+        "pane.read",
+        json!({"pane_id":proof.panes[1],"source":"visible"}),
+    )["read"]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let uid = checked(Command::new("id").arg("-u")).trim().to_owned();
+    let directory = PathBuf::from(format!("/tmp/trailboss-clipboard-images-{uid}"));
+    let staged_paths = || -> std::collections::BTreeSet<PathBuf> {
+        match fs::read_dir(&directory) {
+            Ok(entries) => entries.map(|entry| entry.unwrap().path()).collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+            Err(error) => panic!("cannot inspect staging directory: {error}"),
+        }
+    };
+    let before = staged_paths();
+    proof.console.text("\x16");
+    proof
+        .console
+        .wait(|rows| rows.iter().any(|r| r.contains("🖼 #1")));
+    let added: Vec<_> = staged_paths().difference(&before).cloned().collect();
+    assert_eq!(added.len(), 1, "one Ctrl-V must stage one image");
+    proof.files.push(added[0].clone());
+    assert_eq!(fs::read(&added[0]).unwrap(), IMAGE);
+    let received = proof
+        .core
+        .request("pane.read", json!({"pane_id":pane,"source":"visible"}))["read"]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        received.contains("🖼 #1"),
+        "omp must recognize the attachment"
+    );
+    assert!(!received.contains("Clipboard is empty"));
+    let other_after = proof.core.request(
+        "pane.read",
+        json!({"pane_id":proof.panes[1],"source":"visible"}),
+    )["read"]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(other_after, other_before);
+    println!("actual omp received attachment 🖼 #1; staged {} exact bytes at {}; nonfocused pane unchanged", IMAGE.len(), added[0].display());
 }

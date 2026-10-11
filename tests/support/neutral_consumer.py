@@ -147,7 +147,7 @@ def main():
                     for key in ('children', 'entries'):
                         for child in node.get(key, []):
                             visit(child, plugin)
-                    for key in ('child', 'fallback'):
+                    for key in ('child', 'fallback', 'menu'):
                         if key in node:
                             visit(node[key], plugin)
                 for item in value['ui']:
@@ -155,6 +155,10 @@ def main():
                     if declaration:
                         for placement in declaration['zones']:
                             visit(placement['tree'], item['plugin_id'])
+                        for fragment in declaration.get('fragments', []):
+                            visit(fragment['tree'], item['plugin_id'])
+                        if declaration.get('composition'):
+                            visit(declaration['composition']['tree'], item['plugin_id'])
             elif kind == 'shell.snapshot.v1':
                 state['snapshots'].append(value)
         elif tag == 13:

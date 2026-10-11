@@ -28,3 +28,44 @@ test('styled declarations carry named tones in every public zone without pixel d
     }).success,
   ).toBe(false)
 })
+
+test('nested row menus round-trip and reject non-column or retired editing nodes', () => {
+  const declaration = {
+    herdr: 'widget_tree',
+    version: 1,
+    zones: [
+      {
+        zone: 'footer',
+        tree: {
+          type: 'row',
+          children: [],
+          menu: {
+            type: 'column',
+            children: [
+              {
+                type: 'row',
+                action: 'host:rename-space',
+                context: { workspace_id: 'exact' },
+                children: [{ type: 'input' }],
+              },
+            ],
+          },
+        },
+      },
+    ],
+  }
+  expect<unknown>(WidgetDeclaration.parse(declaration)).toEqual(declaration)
+  const tree = declaration.zones[0].tree
+  for (const menu of [
+    { type: 'row', children: [] },
+    { type: 'column', children: [{ type: 'tab_name' }] },
+    { type: 'column', children: [{ type: 'when', condition: 'menu', child: { type: 'input' } }] },
+  ]) {
+    expect(
+      WidgetDeclaration.safeParse({
+        ...declaration,
+        zones: [{ zone: 'footer', tree: { ...tree, menu } }],
+      }).success,
+    ).toBe(false)
+  }
+})

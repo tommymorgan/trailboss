@@ -107,7 +107,7 @@ fn latency(v: &Value, mode: &str, start: u64, now: u64) -> Result<f64, String> {
             || !nonempty(target, "label")
             || visible != format!("{}-row0", text(target, "label"))
             || !nonempty(target, "tab_label")
-            || !text(last, "tab_strip").contains(text(target, "tab_label"))
+            || !text(last, "selected_tab").contains(text(target, "tab_label"))
             || frames.iter().any(|f| {
                 f["elapsed_ms"]
                     .as_f64()
@@ -248,7 +248,7 @@ fn main() -> ExitCode {
     }
     if !passed {
         println!(
-            "Continue plugin development on the existing herdr fork; keep it as the daily driver."
+            "Continue plugin development on the existing original Herdr fork; keep it as the daily driver."
         );
     }
     println!("No sessions, PTYs or configuration were changed.");

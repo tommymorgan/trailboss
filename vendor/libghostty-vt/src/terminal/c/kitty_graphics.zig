@@ -609,6 +609,8 @@ pub fn placement_render_info(
     return .success;
 }
 
+const PlacementPosition = struct { col: i32, row: i32, visible: bool };
+
 /// Compute viewport-relative position of a placement.
 ///
 /// Converts the placement's internal pin to viewport-relative column
@@ -625,7 +627,11 @@ fn computeViewportPos(
     p: *const kitty_storage.ImageStorage.Placement,
     image: *const Image,
     t: *Terminal,
-) struct { col: i32, row: i32, visible: bool } {
+) PlacementPosition {
+    const pages = &t.screens.active.pages;
+    const vp_tl = pages.getTopLeft(.viewport);
+    const vp_screen = pages.pointFromPin(.screen, vp_tl) orelse
+        return .{ .col = 0, .row = 0, .visible = false };
     // Virtual placements use unicode placeholders and don't have a
     // screen position — they are rendered inline by the text layout.
     // Relative placements are anchored at the root of their parent
@@ -659,35 +665,25 @@ fn computeViewportPos(
     const pin = origin.pin;
     if (pin.garbage) return .{ .col = 0, .row = 0, .visible = false };
 
-    // Convert both the placement's pin and the viewport's top-left
-    // corner to screen-absolute coordinates so we can subtract them
-    // to get viewport-relative coordinates.
-    const pages = &t.screens.active.pages;
     const pin_screen = pages.pointFromPin(.screen, pin.*) orelse
         return .{ .col = 0, .row = 0, .visible = false };
-    const vp_tl = pages.getTopLeft(.viewport);
-    const vp_screen = pages.pointFromPin(.screen, vp_tl) orelse
-        return .{ .col = 0, .row = 0, .visible = false };
-
-    // Subtracting viewport origin from the pin gives us viewport-
-    // relative coordinates. The row can be negative when the
-    // placement has partially scrolled above the viewport, and both
-    // can be negative for relative placements with negative offsets.
-    const vp_row: i32 = (@as(i32, @intCast(pin_screen.screen.y)) -
-        @as(i32, @intCast(vp_screen.screen.y))) +| origin.row_offset;
+    const row = @as(i64, pin_screen.screen.y) -
+        @as(i64, vp_screen.screen.y) + @as(i64, origin.row_offset);
+    const vp_row: i32 = @intCast(std.math.clamp(
+        row,
+        std.math.minInt(i32),
+        std.math.maxInt(i32),
+    ));
     const vp_col: i32 = @as(i32, @intCast(pin_screen.screen.x)) +|
         origin.col_offset;
 
-    // A placement is invisible if its bottom edge (row + height) is
-    // above the viewport, or its top edge is at or below the viewport's
-    // last row. The same applies horizontally: a pin's column is always
-    // in bounds, but a relative placement's offsets can push it fully
-    // off either side.
+    // Relative offsets can push placements off either edge of the viewport.
     const grid_size = p.gridSize(image.*, t);
-    const bottom_row = @as(i64, vp_row) + @as(i64, grid_size.rows);
+    const bottom_row = row + @as(i64, grid_size.rows);
     const right_col = @as(i64, vp_col) + @as(i64, grid_size.cols);
-    const visible = bottom_row > 0 and vp_row < @as(i32, t.rows) and
-        right_col > 0 and vp_col < @as(i32, t.cols);
+    const visible = t.rows > 0 and bottom_row > 0 and
+        row < @as(i64, t.rows) and right_col > 0 and
+        vp_col < @as(i32, t.cols);
 
     return .{ .col = vp_col, .row = vp_row, .visible = visible };
 }

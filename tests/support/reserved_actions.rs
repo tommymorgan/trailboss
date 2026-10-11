@@ -1,10 +1,10 @@
 use super::support::Core;
-use herdr_runtime::protocol::widgets::{Declaration, Zone};
 use serde_json::{json, Value};
 use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
+use trailboss_runtime::protocol::widgets::{Declaration, Zone};
 
 pub struct Adversary {
     pub core: Core,
@@ -20,16 +20,17 @@ impl Adversary {
             json!({"label":"Safe","cwd":core.home,"focus":true}),
         );
         let tab = created["tab"]["tab_id"].as_str().unwrap().to_owned();
+        let workspace = created["workspace"]["workspace_id"].as_str().unwrap();
         core.request("tab.rename", json!({"tab_id":tab,"label":"Safe"}));
         let plugin = core.home.join("adversary");
         std::fs::create_dir_all(&plugin).unwrap();
         let source = format!(
-            r#"import {{createHerdrStore}} from {store:?};
+            r#"import {{createTrailbossStore}} from {store:?};
 import {{appendFileSync}} from 'node:fs';
-const store=createHerdrStore(process.env.HERDR_SOCKET_PATH);
+const store=createTrailbossStore(process.env.HERDR_SOCKET_PATH);
 await store.ready();
 function emit(stage) {{
-  console.log(JSON.stringify({{herdr:'widget_tree',version:1,zones:[{{zone:stage==='before'?'list':'footer_right',tree:{{type:'row',action:{action:?},context:{{tab_id:{tab:?}}},children:[{{type:'label',role:'label',text:stage+' '+{short:?}}}]}}}}]}}));
+  console.log(JSON.stringify({{herdr:'widget_tree',version:1,zones:[{{zone:stage==='before'?'list':'footer_right',tree:{{type:'row',action:{action:?},context:{{tab_id:{tab:?},workspace_id:{workspace:?}}},children:[{{type:'label',role:'label',text:stage+' '+{short:?}}}]}}}}]}}));
   appendFileSync('emissions',JSON.stringify({{stage,pid:process.pid}})+'\n');
 }}
 let stage='before';emit(stage);
@@ -45,7 +46,10 @@ for await(const chunk of Bun.stdin.stream()) {{
   }}
 }}
 "#,
-            store = concat!(env!("CARGO_MANIFEST_DIR"), "/packages/herdr-store/index.ts"),
+            store = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/packages/trailboss-store/index.ts"
+            ),
             action = format!("host:{action}"),
             short = action
         );
@@ -71,7 +75,7 @@ stream = true
 stream_actions = true
 "#
         );
-        std::fs::write(plugin.join("herdr-plugin.toml"), manifest).unwrap();
+        std::fs::write(plugin.join("trailboss-plugin.toml"), manifest).unwrap();
         core.request("plugin.link", json!({"path":plugin,"enabled":true}));
         Self {
             core,
@@ -145,7 +149,7 @@ stream_actions = true
         assert_eq!(emissions.len(), 2);
         assert_eq!(emissions[0]["pid"], emissions[1]["pid"]);
     }
-    pub fn declaration(&self, client: &mut herdr_fork::Client, stage: &str) -> Declaration {
+    pub fn declaration(&self, client: &mut trailboss::Client, stage: &str) -> Declaration {
         let deadline = Instant::now() + Duration::from_secs(8);
         loop {
             client.receive().unwrap();

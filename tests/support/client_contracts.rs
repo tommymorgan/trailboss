@@ -30,15 +30,15 @@ fn consume_contract() {
     );
     let tone_plugin = core.home.join("semantic-tone");
     std::fs::create_dir_all(&tone_plugin).unwrap();
-    std::fs::write(tone_plugin.join("herdr-plugin.toml"), "id = \"fixture.semantic-tone\"\nname = \"Semantic tone\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[ui]]\nid = \"tone\"\nsurface = \"sidebar\"\ncommand = [\"sh\", \"producer.sh\"]\nstream = true\n").unwrap();
+    std::fs::write(tone_plugin.join("trailboss-plugin.toml"), "id = \"fixture.semantic-tone\"\nname = \"Semantic tone\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[ui]]\nid = \"tone\"\nsurface = \"sidebar\"\ncommand = [\"sh\", \"producer.sh\"]\nstream = true\n").unwrap();
     std::fs::write(tone_plugin.join("producer.sh"), "printf '%s\\n' '{\"herdr\":\"widget_tree\",\"version\":1,\"zones\":[{\"zone\":\"footer\",\"tree\":{\"type\":\"label\",\"text\":\"Neutral tone\",\"role\":\"muted\",\"tone\":\"fg-cyan\"}}]}'\nwhile read -r line; do :; done\n").unwrap();
     core.request("plugin.link", json!({"path":tone_plugin,"enabled":true}));
     let malicious = core.home.join("terminal-role");
     std::fs::create_dir_all(&malicious).unwrap();
-    let manifest = std::fs::read_to_string(tone_plugin.join("herdr-plugin.toml"))
+    let manifest = std::fs::read_to_string(tone_plugin.join("trailboss-plugin.toml"))
         .unwrap()
         .replace("fixture.semantic-tone", "fixture.terminal-role");
-    std::fs::write(malicious.join("herdr-plugin.toml"), manifest).unwrap();
+    std::fs::write(malicious.join("trailboss-plugin.toml"), manifest).unwrap();
     let bad = json!({"herdr":"widget_tree","version":1,"zones":[{"zone":"footer_right","tree":{"type":"label","text":"Reject terminal role","role":"\u{1b}[31m"}}]});
     std::fs::write(
         malicious.join("producer.sh"),
@@ -49,7 +49,7 @@ fn consume_contract() {
     core.request("pane.send_text", json!({"pane_id":pane,"text":"printf '\\033[2J\\033[H\\033[1;38;2;17;34;51mneutral-%s\\033[0m\\033[4;7H\\033[6 q' live; sleep 30\n"}));
     let output = core.home.join("neutral-wire.json");
     let socket = core.home.join(format!(
-        "herdr-fork/sessions/{}/herdr-client.sock",
+        "trailboss/sessions/{}/trailboss-client.sock",
         core.name
     ));
     let mut child = Command::new("python3")

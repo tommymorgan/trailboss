@@ -1,4 +1,4 @@
-# Reuse herdr’s session API
+# Reuse upstream Herdr’s session API
 
 Reuse the server-side session API verbatim and design only the UI/plugin protocol fresh. This preserves existing automation and the producer store integration while allowing widget-tree declarations to replace the fork’s flat-row UI contract.
 

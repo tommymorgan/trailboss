@@ -3,9 +3,9 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "herdr-agent-tree",
+      "name": "trailboss-agent-tree",
       "dependencies": {
-        "@herdr/store": "file:../../packages/herdr-store",
+        "@trailboss/store": "file:../../packages/trailboss-store",
         "zod": "4.6.5",
       },
       "devDependencies": {
@@ -15,7 +15,7 @@
     },
   },
   "packages": {
-    "@herdr/store": ["@herdr/store@file:../../packages/herdr-store", { "dependencies": { "@tanstack/db": "0.12.3", "zod": "4.6.5" }, "devDependencies": { "@types/bun": "1.4.2", "typescript": "5.9.3" } }],
+    "@trailboss/store": ["@trailboss/store@file:../../packages/trailboss-store", { "dependencies": { "@tanstack/db": "0.12.3", "zod": "4.6.5" }, "devDependencies": { "@types/bun": "1.4.2", "typescript": "5.9.3" } }],
 
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 

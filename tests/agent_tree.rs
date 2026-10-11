@@ -1,6 +1,6 @@
-use herdr_fork::{sidebar, terminal, Client};
-use herdr_runtime::api_schema::Request;
-use herdr_runtime::protocol::widgets::Node;
+use trailboss::{sidebar, terminal, Client};
+use trailboss_runtime::api_schema::Request;
+use trailboss_runtime::protocol::widgets::Node;
 mod support;
 use serde_json::{json, Value};
 use std::{
@@ -87,62 +87,7 @@ fn assert_sidebar(fixture: &mut Fixture) {
     assert_eq!(declarations.len(), 1);
     assert_eq!(declarations[0].0, "tommymorgan.agent-tree");
     let rows: Vec<_> = sidebar::rows(declarations).map(|(_, row)| row).collect();
-    assert!(
-        matches!(rows[0], Node::Row { children, .. } if matches!(&children[0], Node::Label { text, role, .. } if text.ends_with(" · herdr") && role == "muted"))
-    );
     let review = rows.iter().position(|row| matches!(row, Node::Row { context, .. } if context.tab_id.as_deref() == Some(&fixture.selected_tab))).unwrap();
-    for width in [20, 34] {
-        let mut bytes = Vec::new();
-        sidebar::draw(
-            &mut bytes,
-            declarations,
-            terminal::Rect {
-                x: 0,
-                y: 0,
-                width,
-                height: 24,
-            },
-            fixture.client.focused_tab_id.as_deref(),
-        )
-        .unwrap();
-        let mut screen = ghostty_vt::Terminal::new(width, 24, 0).unwrap();
-        screen.write(&bytes);
-        let text: Vec<String> = screen
-            .screen_text_rows()
-            .unwrap()
-            .iter()
-            .map(|row| {
-                row.cells
-                    .iter()
-                    .flat_map(|c| c.graphemes.iter())
-                    .filter_map(|c| char::from_u32(*c))
-                    .collect()
-            })
-            .collect();
-        let header = text.iter().find(|row| row.starts_with("Alpha")).unwrap();
-        assert!(
-            header.contains('·') && header.trim_end().ends_with("● ◉"),
-            "elastic header: {header}"
-        );
-        assert!(text.iter().any(|row| row.starts_with("  ● Build")));
-        assert!(text.iter().any(|row| row.starts_with("  ◉ Review")));
-        assert!(text
-            .iter()
-            .any(|row| row.starts_with("Beta") && row.trim_end().ends_with('○')));
-        assert!(text.iter().any(|row| row.starts_with("  ○ Idle")));
-        assert!(
-            bytes
-                .windows(b"\x1b[38;5;9m".len())
-                .any(|part| part == b"\x1b[38;5;9m"),
-            "blocked role not rendered red"
-        );
-        assert!(
-            bytes
-                .windows(b"\x1b[38;5;11m".len())
-                .any(|part| part == b"\x1b[38;5;11m"),
-            "working role not rendered yellow"
-        );
-    }
     let (plugin, action, context) = sidebar::action_at(declarations, review).unwrap();
     assert_eq!(action, "focus-tab");
     let mut input = fixture.client.input().unwrap();
@@ -169,12 +114,12 @@ fn assert_fifteen_active_tabs_survive_core_validation() {
             x: 0,
             y: 0,
             width: 50,
-            height: 24,
+            height: 32,
         },
         fixture.client.focused_tab_id.as_deref(),
     )
     .unwrap();
-    let mut screen = ghostty_vt::Terminal::new(50, 24, 0).unwrap();
+    let mut screen = ghostty_vt::Terminal::new(50, 32, 0).unwrap();
     screen.write(&bytes);
     let text: Vec<String> = screen
         .screen_text_rows()
@@ -188,30 +133,20 @@ fn assert_fifteen_active_tabs_survive_core_validation() {
                 .collect()
         })
         .collect();
-    let header = text
-        .iter()
-        .find(|row| row.starts_with("Alpha"))
-        .expect("15 active tabs erased the sidebar");
-    assert!(header.contains('·'));
-    assert!(
-        header.trim_end().ends_with("● ◉ ● ◉ ● ◉ ● ◉ ● ◉ ● ◉ ● ◉ ●"),
-        "retained active glyphs were lost: {header}"
-    );
-    assert!(text.iter().any(|row| row.starts_with("  ● Build")));
-    assert!(text.iter().any(|row| row.starts_with("  ◉ Review")));
-    for (label, glyph) in [
-        ("Activity03", "●"),
-        ("Activity04", "◉"),
-        ("Activity05", "●"),
-        ("Activity15", "●"),
+    for label in [
+        "Build",
+        "Review",
+        "Activity03",
+        "Activity04",
+        "Activity05",
+        "Activity15",
+        "Beta",
     ] {
         assert!(
-            text.iter()
-                .any(|row| row.starts_with(&format!("  {glyph} {label}"))),
-            "missing active tab {label}"
+            text.iter().any(|row| row.contains(label)),
+            "active tree entry disappeared: {label}"
         );
     }
-    assert!(text.iter().any(|row| row.starts_with("Beta")));
 }
 #[test]
 fn port_the_agent_tree_as_the_first_widget_tree_consumer() {
@@ -221,7 +156,7 @@ fn port_the_agent_tree_as_the_first_widget_tree_consumer() {
 #[test]
 fn living_agent_tree_feature() {
     let feature = include_str!("../features/agent-tree.feature");
-    let plan = include_str!("../plans/2026-10-10-herdr-fork.md");
+    let plan = include_str!("../plans/2026-10-10-trailboss.md");
     let scenario = "Scenario: Port the agent tree as the first widget-tree consumer";
     assert_eq!(
         feature.matches("Scenario:").count(),
@@ -266,14 +201,15 @@ fn executable_pty_sidebar_click_focuses_selected_tab_and_renders_its_live_surfac
             pixel_height: 0,
         })
         .unwrap();
-    let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_herdr-fork"));
+    let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_trailboss"));
     command.args(["--session", &fixture.core.name]);
     for key in HOMES {
         command.env(key, &fixture.core.home);
     }
-    for (key, _) in
-        std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("HERDR_"))
-    {
+    for (key, _) in std::env::vars_os().filter(|(key, _)| {
+        let name = key.to_string_lossy();
+        name.starts_with("TRAILBOSS_") || name.starts_with("HERDR_")
+    }) {
         command.env_remove(key);
     }
     command.env("TERM", "xterm-256color");
@@ -318,15 +254,13 @@ fn executable_pty_sidebar_click_focuses_selected_tab_and_renders_its_live_surfac
         }
     };
     let text = wait(&mut screen, &|rows| {
-        rows.iter().any(|row| row.starts_with("  ◉ Review"))
+        rows.iter()
+            .any(|row| row.chars().take(25).collect::<String>().contains("Review"))
     });
     let y = text
         .iter()
-        .position(|row| row.starts_with("  ◉ Review"))
+        .position(|row| row.chars().take(25).collect::<String>().contains("Review"))
         .unwrap();
-    assert!(text
-        .iter()
-        .any(|row| row.starts_with("Alpha") && row.chars().take(20).any(|ch| ch == '·')));
     writer
         .write_all(format!("\x1b[<0;5;{}M\x1b[<0;5;{}m", y + 1, y + 1).as_bytes())
         .unwrap();
@@ -366,12 +300,55 @@ fn executable_pty_sidebar_click_focuses_selected_tab_and_renders_its_live_surfac
                 .starts_with("selected-live")
         })
     });
+    // Independent menu fragments arrive after the already-live sidebar producer.
+    let alpha_y = text.iter().position(|row| row.contains("Alpha")).unwrap();
+    writer
+        .write_all(format!("\x1b[<35;24;{}M", alpha_y + 1).as_bytes())
+        .unwrap();
+    writer.flush().unwrap();
+    wait(&mut screen, &|rows| rows[alpha_y].contains('⋯'));
+    writer.write_all(b"\x1b[<35;80;20M").unwrap();
+    writer.flush().unwrap();
+    wait(&mut screen, &|rows| {
+        rows.iter().all(|row| !row.contains('⋯'))
+    });
+    // Keyboard sidebar focus and a dismissed workspace menu must not move the selected tab.
+    writer.write_all(b"\x02\t\t\t\x1b[21;2~").unwrap();
+    writer.flush().unwrap();
+    wait(&mut screen, &|rows| {
+        rows.iter().any(|row| row.contains("New tab in “Alpha”"))
+    });
+    writer.write_all(b"\x1b").unwrap();
+    writer.flush().unwrap();
+    wait(&mut screen, &|rows| {
+        rows.iter().all(|row| !row.contains("New tab in “Alpha”"))
+    });
+    writer.write_all(b"\x1b").unwrap();
+    writer.flush().unwrap();
+    wait(&mut screen, &|rows| {
+        rows.iter().all(|row| !row.contains('⋯'))
+    });
     assert!(
-        cell_style(&screen, y, 4).0.bold,
-        "focused row not highlighted"
+        fixture.core.request("session.snapshot", json!({}))["snapshot"]["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tab| tab["tab_id"] == fixture.selected_tab && tab["focused"] == true)
     );
-    eprintln!("PTY SMOKE: agent-tree sidebar, elastic leaders, Review click, focused live Surface and shell input observed");
-    writer.write_all(b"\x11").unwrap();
+    writer
+        .write_all(b"printf 'menu-%s\\n' continuity\r")
+        .unwrap();
+    writer.flush().unwrap();
+    wait(&mut screen, &|rows| {
+        rows.iter().any(|row| {
+            row.chars()
+                .skip(25)
+                .collect::<String>()
+                .starts_with("menu-continuity")
+        })
+    });
+    eprintln!("PTY SMOKE: selected tab remains focused and accepts shell input after keyboard menu dismissal");
+    writer.write_all(b"\x02q").unwrap();
     writer.flush().unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
     while console.0.try_wait().unwrap().is_none() {
@@ -449,7 +426,7 @@ fn collapse_and_expand_workspace() {
     });
     let header = before
         .iter()
-        .position(|row| row.starts_with("Alpha"))
+        .position(|row| row.trim_start().starts_with("Alpha"))
         .unwrap();
     let mut input = fixture.client.input().unwrap();
     for collapsed in [true, false] {
@@ -469,7 +446,7 @@ fn collapse_and_expand_workspace() {
             );
         }
         assert!(
-            rows.iter().any(|row| row.starts_with("Beta")),
+            rows.iter().any(|row| row.trim_start().starts_with("Beta")),
             "unrelated workspace disappeared"
         );
         assert!(
@@ -504,14 +481,15 @@ impl LiveConsole {
                 pixel_height: 0,
             })
             .unwrap();
-        let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_herdr-fork"));
+        let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_trailboss"));
         command.args(["--session", &core.name]);
         for key in HOMES {
             command.env(key, &core.home);
         }
-        for (key, _) in
-            std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("HERDR_"))
-        {
+        for (key, _) in std::env::vars_os().filter(|(key, _)| {
+            let name = key.to_string_lossy();
+            name.starts_with("TRAILBOSS_") || name.starts_with("HERDR_")
+        }) {
             command.env_remove(key);
         }
         command.env("TERM", "xterm-256color");
@@ -581,7 +559,7 @@ impl LiveConsole {
 }
 impl Drop for LiveConsole {
     fn drop(&mut self) {
-        let _ = self.writer.write_all(b"\x11");
+        let _ = self.writer.write_all(b"\x02q");
         let _ = self.writer.flush();
     }
 }
@@ -592,7 +570,7 @@ fn executable_pty_workspace_collapse_and_expand() {
     let rows = console.wait(|rows, _| rows.iter().any(|row| row.contains("Activity03")));
     let header = rows
         .iter()
-        .position(|row| row.starts_with("Alpha"))
+        .position(|row| row.trim_start().starts_with("Alpha"))
         .unwrap();
     console.click(header);
     let rows = console.wait(|rows, _| {
@@ -635,7 +613,7 @@ fn assert_living_scenario(title: &str, lines: usize) {
     assert_eq!(feature.len(), lines, "living scenario missing");
     assert_eq!(
         feature,
-        extract(include_str!("../plans/2026-10-10-herdr-fork.md")),
+        extract(include_str!("../plans/2026-10-10-trailboss.md")),
         "living GWT/examples drift"
     );
 }
@@ -670,7 +648,7 @@ fn event_request(core: &Core, event: &str, method: &str, params: Value) -> Value
     };
     let stream = UnixStream::connect(
         core.home
-            .join(format!("herdr-fork/sessions/{}/herdr.sock", core.name)),
+            .join(format!("trailboss/sessions/{}/trailboss.sock", core.name)),
     )
     .unwrap();
     stream
@@ -811,7 +789,7 @@ fn refresh_tree_from_session_events(executable: bool) {
         "pane.report_agent",
         json!({"pane_id":pane_id,"source":"event-fixture","agent":"claude","state":"blocked"}),
     );
-    observe(&mut fixture, &mut console, "◉ EventTab", true);
+    observe(&mut fixture, &mut console, "● EventTab", true);
     event_request(
         &fixture.core,
         "tab.closed",

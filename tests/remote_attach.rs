@@ -2,10 +2,6 @@
 mod console;
 mod support;
 use console::Console;
-use herdr_runtime::{
-    api_client::{ApiClient, ConnectionTarget},
-    api_schema::Request,
-};
 use serde_json::json;
 use std::{
     fs,
@@ -14,6 +10,10 @@ use std::{
     time::{Duration, Instant},
 };
 use support::{Core, HOMES};
+use trailboss_runtime::{
+    api_client::{ApiClient, ConnectionTarget},
+    api_schema::Request,
+};
 
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
@@ -36,15 +36,15 @@ impl Deployment {
             "-o",
             "BatchMode=yes",
             "achy",
-            "mktemp -d /tmp/herdr-task51.XXXXXXXX",
+            "mktemp -d /tmp/trailboss-task51.XXXXXXXX",
         ]))
         .trim()
         .to_owned();
         let deployment = Self { root };
         checked(Command::new("scp").args([
             "-q",
-            env!("CARGO_BIN_EXE_herdr-fork"),
-            &format!("achy:{}/herdr-fork", deployment.root),
+            env!("CARGO_BIN_EXE_trailboss"),
+            &format!("achy:{}/trailboss", deployment.root),
         ]));
         deployment
     }
@@ -67,22 +67,22 @@ struct Decoy {
 }
 impl Decoy {
     fn new(core: &Core) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_herdr-fork"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_trailboss"));
         command.args(["server", "--session", "decoy"]);
         for key in HOMES {
             command.env(key, &core.home);
         }
         let child = command
             .env("SHELL", "/bin/sh")
-            .env("HERDR_CONFIG_PATH", core.home.join("config.toml"))
-            .env("HERDR_STARTUP_CWD", &core.home)
+            .env("TRAILBOSS_CONFIG_PATH", core.home.join("config.toml"))
+            .env("TRAILBOSS_STARTUP_CWD", &core.home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
         let api = ApiClient::for_target(ConnectionTarget::SocketPath(
-            core.home.join("herdr-fork/sessions/decoy/herdr.sock"),
+            core.home.join("trailboss/sessions/decoy/trailboss.sock"),
         ));
         let result = Self { child, api };
         let deadline = Instant::now() + Duration::from_secs(8);
@@ -139,9 +139,9 @@ fn wrapper(core: &Core) -> PathBuf {
         ));
     }
     script.push_str(&format!(
-        "export HERDR_CONFIG_PATH={}\nexec {} \"$@\"\n",
+        "export TRAILBOSS_CONFIG_PATH={}\nexec {} \"$@\"\n",
         quote(core.home.join("config.toml").to_str().unwrap()),
-        quote(env!("CARGO_BIN_EXE_herdr-fork"))
+        quote(env!("CARGO_BIN_EXE_trailboss"))
     ));
     fs::write(&path, script).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
@@ -173,25 +173,25 @@ fn remote_transport_routes_live_surface_and_input_to_exact_session() {
     while local.boot_id.is_empty() {
         local.receive().unwrap();
     }
-    for path in ["/definitely-missing-herdr-task51", "/bin/true"] {
+    for path in ["/definitely-missing-trailboss-task51", "/bin/true"] {
         assert!(
-            herdr_runtime::remote::RemoteConnection::connect("junkman", &core.name, Some(path))
+            trailboss_runtime::remote::RemoteConnection::connect("junkman", &core.name, Some(path))
                 .is_err(),
             "missing/incompatible executable accepted: {path}"
         );
     }
-    let connection = herdr_runtime::remote::RemoteConnection::connect(
+    let connection = trailboss_runtime::remote::RemoteConnection::connect(
         "junkman",
         &core.name,
         Some(path.to_str().unwrap()),
     )
     .unwrap();
-    let mut remote = herdr_fork::Client::attach(connection.socket_path(), 80, 24).unwrap();
+    let mut remote = trailboss::Client::attach(connection.socket_path(), 80, 24).unwrap();
     wait_surface(&mut remote, "selected-live");
     assert_eq!(remote.boot_id, local.boot_id, "wrong Core boot identity");
     assert_eq!(remote.focused_pane_id.as_deref(), Some(pane.as_str()));
     let mut input = remote.input().unwrap();
-    input.type_text("printf '\\033[2J\\033[Htransport-%s:%s:%s\\n' executed \"$(hostname)\" \"$HERDR_SESSION\"\r").unwrap();
+    input.type_text("printf '\\033[2J\\033[Htransport-%s:%s:%s\\n' executed \"$(hostname)\" \"$TRAILBOSS_SESSION\"\r").unwrap();
     let expected = format!("transport-executed:junkman:{}", core.name);
     wait_surface(&mut remote, &expected);
     assert!(!remote
@@ -213,7 +213,50 @@ fn remote_transport_routes_live_surface_and_input_to_exact_session() {
         remote.boot_id
     );
 }
-fn wait_surface(client: &mut herdr_fork::Client, marker: &str) {
+
+#[test]
+#[ignore = "requires real SSH to junkman and a 70-second quiet native session"]
+fn quiet_native_session_survives_bridge_idle_deadline() {
+    let core = Core::new();
+    let pane = seed(&core);
+    let path = wrapper(&core);
+    let mut command = portable_pty::CommandBuilder::new(support::executable());
+    command.args([
+        "--remote",
+        "junkman",
+        "--remote-executable",
+        path.to_str().unwrap(),
+        "--session",
+        &core.name,
+    ]);
+    for key in HOMES {
+        command.env(key, &core.home);
+    }
+    command.env("TRAILBOSS_CONFIG_PATH", core.home.join("config.toml"));
+    command.env("TERM", "xterm-256color");
+    let mut console = Console::from_command(command);
+    console.wait(|rows| rows.iter().any(|row| row.contains("selected-live")));
+
+    // No terminal input or synthetic redraws: the client must preserve its
+    // connection beyond the real remote bridge's 60-second idle deadline.
+    let deadline = Instant::now() + Duration::from_secs(70);
+    while Instant::now() < deadline {
+        assert!(
+            console.child.try_wait().unwrap().is_none(),
+            "quiet native client exited before the bridge idle deadline"
+        );
+        if let Ok(bytes) = console.rx.recv_timeout(Duration::from_millis(100)) {
+            console.screen.write(&bytes);
+        }
+    }
+    console.text("printf '\\033[2J\\033[Hidle-%s\\n' survived\r");
+    console.wait(|rows| rows.iter().any(|row| row.contains("idle-survived")));
+    assert_eq!(
+        core.request("session.snapshot", json!({}))["snapshot"]["focused_pane_id"],
+        pane
+    );
+}
+fn wait_surface(client: &mut trailboss::Client, marker: &str) {
     let deadline = Instant::now() + Duration::from_secs(8);
     while !client
         .primary
@@ -254,7 +297,7 @@ fn attach_from_achy_to_one_remote_session() {
                 let session = session.as_ref().unwrap();
                 let mut command = portable_pty::CommandBuilder::new("ssh");
                 command.args(["-tt", "-o", "BatchMode=yes", "achy"]);
-                command.arg(format!("env TERM=xterm-256color XDG_CONFIG_HOME={root} XDG_STATE_HOME={root} XDG_DATA_HOME={root} XDG_CACHE_HOME={root} XDG_RUNTIME_DIR={root} HERDR_CONFIG_PATH={root}/config.toml {binary} --remote junkman --remote-executable {path} --session {name}", root=quote(&session.deployed.root), binary=quote(&format!("{}/herdr-fork", session.deployed.root)), path=quote(session.path.to_str().unwrap()), name=quote(&session.core.name)));
+                command.arg(format!("env TERM=xterm-256color XDG_CONFIG_HOME={root} XDG_STATE_HOME={root} XDG_DATA_HOME={root} XDG_CACHE_HOME={root} XDG_RUNTIME_DIR={root} TRAILBOSS_CONFIG_PATH={root}/config.toml {binary} --remote junkman --remote-executable {path} --session {name}", root=quote(&session.deployed.root), binary=quote(&format!("{}/trailboss", session.deployed.root)), path=quote(session.path.to_str().unwrap()), name=quote(&session.core.name)));
                 console = Some(Console::from_command(command));
                 steps += 1;
             }
@@ -280,7 +323,7 @@ fn prove_remote_input(session: &RemoteSession, console: &mut Console) {
     let core = &session.core;
     console.wait(|rows| rows.iter().any(|row| row.contains("selected-live")));
     console.text(
-        "printf '\\033[2J\\033[Hexecuted-%s:%s:%s\\n' remote \"$(hostname)\" \"$HERDR_SESSION\"\r",
+        "printf '\\033[2J\\033[Hexecuted-%s:%s:%s\\n' remote \"$(hostname)\" \"$TRAILBOSS_SESSION\"\r",
     );
     let expected = format!("executed-remote:junkman:{}", core.name);
     let rows = console.wait(|rows| rows.iter().any(|row| row.contains(&expected)));
@@ -296,11 +339,11 @@ fn prove_remote_input(session: &RemoteSession, console: &mut Console) {
         "actual achy client -> SSH junkman session {}; rendered {}",
         core.name, expected
     );
-    let mut decoy = herdr_fork::Client::attach(
+    let mut decoy = trailboss::Client::attach(
         &session
             .core
             .home
-            .join("herdr-fork/sessions/decoy/herdr-client.sock"),
+            .join("trailboss/sessions/decoy/trailboss-client.sock"),
         80,
         24,
     )
@@ -317,10 +360,102 @@ fn prove_remote_input(session: &RemoteSession, console: &mut Console) {
         .unwrap()
         .get("error")
         .is_none());
-    console.text("\x11");
+    console.text("\x02q");
     let deadline = Instant::now() + Duration::from_secs(5);
     while console.child.try_wait().unwrap().is_none() {
         assert!(Instant::now() < deadline, "normal detach");
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn cold_remote_bridge_starts_core_and_publishes_stock_composition() {
+    struct ColdBridge {
+        child: Child,
+        api: ApiClient,
+        home: PathBuf,
+    }
+    impl Drop for ColdBridge {
+        fn drop(&mut self) {
+            let _ = self.api.request_value_with_timeout(
+                &request("server.stop", json!({})),
+                Duration::from_secs(2),
+            );
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = fs::remove_dir_all(&self.home);
+        }
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let home = std::env::temp_dir().join(format!("remote-cold-{nonce:x}"));
+    fs::create_dir_all(&home).unwrap();
+    let mut command = Command::new(support::executable());
+    command.args(["remote-client-bridge", "--session", "cold"]);
+    for key in HOMES {
+        command.env(key, &home);
+    }
+    for (key, _) in std::env::vars_os().filter(|(key, _)| {
+        let name = key.to_string_lossy();
+        name.starts_with("TRAILBOSS_") || name.starts_with("HERDR_")
+    }) {
+        command.env_remove(key);
+    }
+    command
+        .env("TRAILBOSS_CONFIG_PATH", home.join("config.toml"))
+        .env("SHELL", "/bin/sh")
+        .current_dir(&home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let socket = home.join("trailboss/sessions/cold/trailboss.sock");
+    let bridge = ColdBridge {
+        child: command.spawn().unwrap(),
+        api: ApiClient::for_target(ConnectionTarget::SocketPath(socket)),
+        home,
+    };
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let reply = bridge.api.request_value_with_timeout(
+            &request("plugin.list", json!({})),
+            Duration::from_millis(200),
+        );
+        if reply.is_ok_and(|reply| {
+            reply["result"]["plugins"]
+                .as_array()
+                .is_some_and(|plugins| {
+                    plugins
+                        .iter()
+                        .any(|plugin| plugin["plugin_id"] == "tommymorgan.stock-ui")
+                })
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cold bridge did not start Core and register stock widgets"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut client = trailboss::Client::attach(
+        &bridge
+            .home
+            .join("trailboss/sessions/cold/trailboss-client.sock"),
+        80,
+        24,
+    )
+    .unwrap();
+    while client.declarations.as_ref().is_none_or(|declarations| {
+        !declarations.iter().any(|(plugin, declaration)| {
+            plugin == "tommymorgan.stock-ui" && declaration.composition.is_some()
+        })
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "cold Core did not publish its application composition"
+        );
+        client.receive().unwrap();
     }
 }

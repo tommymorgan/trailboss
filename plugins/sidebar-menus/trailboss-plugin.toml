@@ -1,0 +1,17 @@
+id = "tommymorgan.sidebar-menus"
+name = "Sidebar Menus"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Public named sidebar menu fragments, independently replaceable by other plugins."
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "close-space"
+title = "Close space"
+command = ["bun", "menus.ts", "--close-space"]
+
+[[ui]]
+id = "menus"
+surface = "sidebar"
+command = ["bun", "menus.ts"]
+stream = true

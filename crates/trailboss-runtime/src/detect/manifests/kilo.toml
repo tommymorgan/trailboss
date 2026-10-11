@@ -1,0 +1,24 @@
+id = "kilo"
+version = "2026.10.12.1"
+min_engine_version = 4
+updated_at = "2026-10-12T00:00:00Z"
+aliases = ["kilo-code", "kilo code", "herdr:kilo"]
+
+[[rules]]
+id = "opencode_permission"
+state = "waiting"
+priority = 300
+region = "whole_recent"
+visible_blocker = true
+any = [
+  { contains = ["△ Permission required"] },
+  { contains = ["esc dismiss"], any = [{ contains = ["enter confirm"] }, { contains = ["enter submit"] }, { contains = ["enter toggle"] }], all = [{ any = [{ contains = ["↑↓ select"] }, { contains = ["⇆ tab"] }] }] },
+]
+
+[[rules]]
+id = "esc_interrupt_working"
+state = "working"
+priority = 100
+region = "whole_recent"
+visible_working = true
+contains = ["esc interrupt"]

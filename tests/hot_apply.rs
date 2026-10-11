@@ -4,16 +4,17 @@ mod support;
 use std::time::{Duration, Instant};
 use support::Core;
 
-fn render(client: &herdr_fork::Client, screen: &mut ghostty_vt::Terminal) -> Vec<String> {
+fn render(client: &trailboss::Client, screen: &mut ghostty_vt::Terminal) -> Vec<String> {
     let mut bytes = Vec::new();
-    herdr_fork::terminal::draw_frame(
-        &mut bytes,
-        None,
-        client.declarations.as_ref().unwrap(),
-        &herdr_fork::core::Core::default(),
-        herdr_fork::terminal::Rect::viewport(80, 24),
-    )
-    .unwrap();
+    trailboss::terminal::FrameRenderer::default()
+        .draw_frame(
+            &mut bytes,
+            None,
+            client.declarations.as_ref().unwrap(),
+            &trailboss::core::Core::default(),
+            trailboss::terminal::Rect::viewport(80, 24),
+        )
+        .unwrap();
     screen.write(&bytes);
     screen
         .screen_text_rows()
@@ -33,7 +34,7 @@ fn render(client: &herdr_fork::Client, screen: &mut ghostty_vt::Terminal) -> Vec
         .collect()
 }
 fn wait(
-    client: &mut herdr_fork::Client,
+    client: &mut trailboss::Client,
     screen: &mut ghostty_vt::Terminal,
     marker: &str,
 ) -> Vec<String> {

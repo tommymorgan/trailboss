@@ -168,15 +168,15 @@ fn visible(console: &Console, target: &Value) -> bool {
     let rows = console.rows();
     // Every visible Surface cell is checked, including blank padding; the last row
     // is part of the completed frame, not an early text-prefix observation.
-    (1..45).all(|y| {
+    (0..45).all(|y| {
         let actual: String = rows[y].chars().skip(25).collect();
-        let expected = if y <= 4 {
-            format!("{label}-row{}", y - 1)
+        let expected = if y < 4 {
+            format!("{label}-row{y}")
         } else {
             String::new()
         };
         actual.trim_end() == expected
-    }) && rows[0].contains(target["tab_label"].as_str().unwrap())
+    })
 }
 fn observe(config: &Value) -> Value {
     let mut command = portable_pty::CommandBuilder::new(config["executable"].as_str().unwrap());
@@ -192,13 +192,18 @@ fn observe(config: &Value) -> Value {
     for key in HOMES {
         command.env(key, config["home"].as_str().unwrap());
     }
-    for (key, _) in
-        std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("HERDR_"))
-    {
+    for (key, _) in std::env::vars_os().filter(|(key, _)| {
+        let name = key.to_string_lossy();
+        name.starts_with("TRAILBOSS_") || name.starts_with("HERDR_")
+    }) {
         command.env_remove(key);
     }
+    let trace_path = format!("{}/client-timing.log", config["home"].as_str().unwrap());
+    if config["timing"] == true {
+        command.env("TRAILBOSS_RENDER_PROF_TRACE", &trace_path);
+    }
     command.env(
-        "HERDR_CONFIG_PATH",
+        "TRAILBOSS_CONFIG_PATH",
         format!("{}/config.toml", config["home"].as_str().unwrap()),
     );
     command.env("TERM", "xterm-256color");
@@ -208,9 +213,7 @@ fn observe(config: &Value) -> Value {
     let client_pid = console.child.process_id();
     let populations = config["populations"].as_array().unwrap();
     let mut pending = Vec::new();
-    console.wait(|rows| {
-        rows.iter().any(|row| row.contains("Pane000-row3")) && rows[0].contains("Tab00")
-    });
+    console.wait(|rows| rows.iter().any(|row| row.contains("Pane000-row3")));
     assert!(
         visible(&console, &populations[0]),
         "startup frame: {:?}",
@@ -242,23 +245,11 @@ fn observe(config: &Value) -> Value {
             ] {
                 let target = &populations[target_index];
                 let rows = console.rows();
-                let y = if kind == "tab" {
-                    0
-                } else {
-                    rows.iter()
-                        .position(|row| row.chars().take(25).collect::<String>().contains(&needle))
-                        .expect("click row absent")
-                };
-                let x = if kind == "tab" {
-                    25 + rows[0]
-                        .chars()
-                        .skip(25)
-                        .collect::<String>()
-                        .find(&needle)
-                        .unwrap()
-                } else {
-                    4
-                };
+                let y = rows
+                    .iter()
+                    .position(|row| row.chars().take(25).collect::<String>().contains(&needle))
+                    .expect("sidebar click row absent");
+                let x = 4;
                 let dispatch_epoch = epoch();
                 let started = Instant::now();
                 console.click(x, y);
@@ -266,7 +257,13 @@ fn observe(config: &Value) -> Value {
                 let mut matched = false;
                 let mut completed_frames_ms = Vec::new();
                 while frame(&mut console, &mut pending, deadline) {
-                    completed_frames_ms.push(json!({"elapsed_ms":started.elapsed().as_secs_f64() * 1000.0,"tab_strip":console.rows()[0],"surface_first_row":console.rows()[1].chars().skip(25).collect::<String>()}));
+                    let rows = console.rows();
+                    let selected_tab = rows
+                        .iter()
+                        .find(|row| row.starts_with('▏'))
+                        .map(|row| row.chars().take(25).collect::<String>())
+                        .unwrap_or_default();
+                    completed_frames_ms.push(json!({"elapsed_ms":started.elapsed().as_secs_f64() * 1000.0,"surface_first_row":rows[0].chars().skip(25).collect::<String>(),"selected_tab":selected_tab}));
                     if visible(&console, target) {
                         matched = true;
                         break;
@@ -305,7 +302,12 @@ fn observe(config: &Value) -> Value {
             tab_panes[w][tab] = pane_target;
         }
     }
-    json!({"machine":checked(&mut Command::new("hostname")).trim(),"observer_pid":std::process::id(),"client_pid":client_pid,"display":{"cols":100,"rows":45},"timestamp_ms":epoch(),"samples":samples})
+    let timing_trace = if config["timing"] == true {
+        Some(fs::read_to_string(trace_path).unwrap())
+    } else {
+        None
+    };
+    json!({"machine":checked(&mut Command::new("hostname")).trim(),"observer_pid":std::process::id(),"client_pid":client_pid,"display":{"cols":100,"rows":45},"timestamp_ms":epoch(),"samples":samples,"timing_trace":timing_trace})
 }
 #[allow(dead_code)] // Called by the deployed benchmark observer, not the test orchestrator.
 pub fn observer_file(path: &Path) {
@@ -331,7 +333,7 @@ pub fn run(remote: bool, observer: &Path, output: &Path) {
         ));
     }
     script.push_str(&format!(
-        "export HERDR_CONFIG_PATH={}\nexec {} \"$@\"\n",
+        "export TRAILBOSS_CONFIG_PATH={}\nexec {} \"$@\"\n",
         quote(core.home.join("config.toml").to_str().unwrap()),
         quote(binary.to_str().unwrap())
     ));
@@ -343,7 +345,7 @@ pub fn run(remote: bool, observer: &Path, output: &Path) {
                 "-o",
                 "BatchMode=yes",
                 "achy",
-                "mktemp -d /tmp/herdr-latency.XXXXXXXX",
+                "mktemp -d /tmp/trailboss-latency.XXXXXXXX",
             ]))
             .trim()
             .to_owned(),
@@ -354,16 +356,16 @@ pub fn run(remote: bool, observer: &Path, output: &Path) {
         .map_or_else(|| core.home.to_string_lossy().into_owned(), |r| r.0.clone());
     let executable = deployment.as_ref().map_or_else(
         || binary.to_string_lossy().into_owned(),
-        |r| format!("{}/herdr-fork", r.0),
+        |r| format!("{}/trailboss", r.0),
     );
-    let config = json!({"mode":if remote {"remote from achy"} else {"local"},"session":core.name,"home":home,"executable":executable,"wrapper":wrapper,"populations":populations,"core_pid":core.child.id(),"commit":checked(Command::new("jj").args(["log","-r","@","--no-graph","-T","commit_id"]))});
+    let config = json!({"mode":if remote {"remote from achy"} else {"local"},"timing":std::env::var_os("TRAILBOSS_LATENCY_CAPTURE").is_some(),"session":core.name,"home":home,"executable":executable,"wrapper":wrapper,"populations":populations,"core_pid":core.child.id(),"commit":checked(Command::new("jj").args(["log","-r","@","--no-graph","-T","commit_id"]))});
     let config_path = core.home.join("latency.json");
     fs::write(&config_path, config.to_string()).unwrap();
     let result = if let Some(deployment) = &deployment {
         checked(Command::new("scp").args([
             "-q",
             binary.to_str().unwrap(),
-            &format!("achy:{}/herdr-fork", deployment.0),
+            &format!("achy:{}/trailboss", deployment.0),
         ]));
         checked(Command::new("scp").args([
             "-q",
@@ -391,10 +393,15 @@ pub fn run(remote: bool, observer: &Path, output: &Path) {
     };
     let perf_log = fs::read_to_string(
         core.home
-            .join("herdr-fork/plugins/tommymorgan.agent-tree/perf/perf.log"),
+            .join("trailboss/plugins/tommymorgan.agent-tree/perf/perf.log"),
     )
     .unwrap();
-    let report = json!({"setup":config,"boot_id":boot_id,"observation":result,"perf_log":perf_log,"core_machine":checked(&mut Command::new("hostname")).trim(),"producer_processes":checked(Command::new("ps").args(["--ppid",&core.child.id().to_string(),"-o","pid,ppid,args"]))});
+    let core_timing_trace = if config["timing"] == true {
+        Some(fs::read_to_string(core.home.join("core-timing.log")).unwrap())
+    } else {
+        None
+    };
+    let report = json!({"setup":config,"boot_id":boot_id,"observation":result,"perf_log":perf_log,"core_timing_trace":core_timing_trace,"core_machine":checked(&mut Command::new("hostname")).trim(),"producer_processes":checked(Command::new("ps").args(["--ppid",&core.child.id().to_string(),"-o","pid,ppid,args"]))});
     fs::write(output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     let samples = report["observation"]["samples"].as_array().unwrap();
     assert_eq!(samples.len(), 36);

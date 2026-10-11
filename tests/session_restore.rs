@@ -2,7 +2,6 @@
 mod console;
 mod support;
 use console::Console;
-use herdr_fork::Client;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -10,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 use support::Core;
+use trailboss::Client;
 
 const SCENARIO: &str = "Restore persisted session topology after relaunch";
 const GIVEN: &str =
@@ -138,7 +138,7 @@ fn given() -> Session {
         .unwrap();
     let persistence = core
         .home
-        .join(format!("herdr-fork/sessions/{}/session.json", core.name));
+        .join(format!("trailboss/sessions/{}/session.json", core.name));
     Session {
         core,
         expected: topology(&s),
@@ -261,12 +261,12 @@ fn living_restore_persisted_session_topology_after_relaunch() {
     assert_eq!(steps, [GIVEN, WHEN, THEN], "unbound restore living steps");
     let mut session = given();
     let mut first = Console::new(&session.core);
-    first.wait(|rows| rows.iter().any(|r| r.contains("Restore Alpha")));
+    first.wait(|rows| rows.iter().any(|row| row.contains("Saved sibling")));
     session.expected = topology(&snapshot(&session.core));
     drop(first);
     relaunch(&mut session);
     let mut client = Console::new(&session.core);
-    client.wait(|rows| rows.iter().any(|r| r.contains("herdr · stock")));
+    client.wait(|rows| rows.iter().any(|row| row.contains("Saved sibling")));
     let s = restored(&session);
     for pane in s["panes"].as_array().unwrap() {
         let id = pane["pane_id"].as_str().unwrap();

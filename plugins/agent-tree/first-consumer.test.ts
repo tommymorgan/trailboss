@@ -1,15 +1,14 @@
 import { expect, test } from 'bun:test'
-import { snapshotRows } from '@herdr/store'
+import { snapshotRows } from '@trailboss/store'
 import { projectTree } from './project'
 
-// Unordered, nonempty session.snapshot-shaped data; expectations come from
-// the accepted sidebar behavior, not from the projection implementation.
+// Snapshot arrays specify visual order, independently of public number identity.
 const entities = snapshotRows({
   type: 'session_snapshot',
   snapshot: {
     workspaces: [
-      { workspace_id: 'beta', label: 'Beta', number: 2, focused: false, agent_status: 'idle' },
       { workspace_id: 'alpha', label: 'Alpha', number: 1, focused: true, agent_status: 'working' },
+      { workspace_id: 'beta', label: 'Beta', number: 2, focused: false, agent_status: 'idle' },
     ],
     tabs: [
       {
@@ -22,19 +21,19 @@ const entities = snapshotRows({
       },
       {
         workspace_id: 'alpha',
-        tab_id: 'a2',
-        label: 'Wait',
-        number: 2,
-        focused: false,
-        agent_status: 'waiting',
-      },
-      {
-        workspace_id: 'alpha',
         tab_id: 'a1',
         label: 'Build',
         number: 1,
         focused: true,
         agent_status: 'working',
+      },
+      {
+        workspace_id: 'alpha',
+        tab_id: 'a2',
+        label: 'Wait',
+        number: 2,
+        focused: false,
+        agent_status: 'waiting',
       },
       {
         workspace_id: 'beta',
@@ -66,9 +65,8 @@ const entities = snapshotRows({
   },
 })
 
-test('Port the agent tree as the first widget-tree consumer', () => {
+test('declares ordered flat tab sections with status clusters and spacing', () => {
   const tree = projectTree(entities, new Set())
-  expect(Array.isArray(tree)).toBe(false)
   expect(tree).toMatchObject({
     type: 'column',
     children: [
@@ -77,10 +75,10 @@ test('Port the agent tree as the first widget-tree consumer', () => {
         action: 'open-workspace',
         context: { workspace_id: 'alpha' },
         children: [
-          { type: 'label', text: 'Alpha', role: 'label' },
+          { type: 'label', text: 'Alpha', role: 'section' },
           { type: 'leader' },
           { type: 'label', text: '● ', role: 'status-working' },
-          { type: 'label', text: '◌ ', role: 'status-waiting' },
+          { type: 'label', text: '● ', role: 'status-waiting' },
         ],
       },
       {
@@ -88,16 +86,38 @@ test('Port the agent tree as the first widget-tree consumer', () => {
         action: 'focus-tab',
         context: { tab_id: 'a1' },
         children: [
-          { type: 'label', text: '  ', role: 'label' },
           { type: 'label', text: '●', role: 'status-working' },
           { type: 'label', text: ' Build', role: 'label' },
         ],
       },
       { type: 'row', action: 'focus-tab', context: { tab_id: 'a2' } },
-      { type: 'row', action: 'open-workspace', context: { workspace_id: 'beta' } },
+      { type: 'row', children: [{ type: 'label', text: '', role: 'muted' }] },
+      {
+        type: 'row',
+        action: 'open-workspace',
+        context: { workspace_id: 'beta' },
+        children: [
+          { type: 'label', text: 'Beta', role: 'section' },
+          { type: 'leader' },
+          { type: 'label', text: '● ', role: 'status-blocked' },
+          { type: 'label', text: '● ', role: 'status-done' },
+        ],
+      },
       { type: 'row', action: 'focus-tab', context: { tab_id: 'b1' } },
       { type: 'row', action: 'focus-tab', context: { tab_id: 'b2' } },
       { type: 'row', action: 'focus-tab', context: { tab_id: 'b3' } },
     ],
   })
+})
+
+test('empty sections show one hollow idle dot rather than a stale workspace status', () => {
+  const tree = projectTree(
+    entities.filter((entity) => entity.kind === 'workspace'),
+    new Set(),
+  )
+  expect(tree.children[0].children).toEqual([
+    { type: 'label', text: 'Alpha', role: 'section' },
+    { type: 'leader' },
+    { type: 'label', text: '○ ', role: 'status-idle' },
+  ])
 })

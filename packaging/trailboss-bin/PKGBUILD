@@ -1,0 +1,25 @@
+# Local binary snapshot; not published to the public AUR.
+pkgname=trailboss-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Trailboss terminal client and Core, with bundled widget producers'
+arch=('x86_64')
+license=('Apache-2.0' 'MIT')
+depends=('glibc' 'gcc-libs' 'openssh')
+optdepends=('xclip: clipboard images on X11' 'wl-clipboard: clipboard images on Wayland')
+options=('!strip' '!debug')
+source=("trailboss-${pkgver}-x86_64.tar.zst")
+sha256sums=('8597eaa0fec1ebdd2ebc7072f2aaf2d0b925d7d693994ec1a4c0b16766702f89')
+
+package() {
+  install -Dm755 "$srcdir/payload/trailboss" "$pkgdir/usr/bin/trailboss"
+  install -Dm755 "$srcdir/payload/trailboss-runtime" "$pkgdir/usr/lib/trailboss/trailboss"
+  install -Dm755 "$srcdir/payload/plugins/agent-tree/stock-ui" "$pkgdir/usr/lib/trailboss/plugins/agent-tree/stock-ui"
+  install -Dm755 "$srcdir/payload/plugins/agent-tree/agent-tree" "$pkgdir/usr/lib/trailboss/plugins/agent-tree/agent-tree"
+  install -Dm644 "$srcdir/payload/plugins/stock-ui/trailboss-plugin.toml" "$pkgdir/usr/lib/trailboss/plugins/stock-ui/trailboss-plugin.toml"
+  install -Dm644 "$srcdir/payload/plugins/agent-tree/trailboss-plugin.toml" "$pkgdir/usr/lib/trailboss/plugins/agent-tree/trailboss-plugin.toml"
+  install -Dm755 "$srcdir/payload/plugins/sidebar-menus/sidebar-menus" "$pkgdir/usr/lib/trailboss/plugins/sidebar-menus/sidebar-menus"
+  install -Dm644 "$srcdir/payload/plugins/sidebar-menus/trailboss-plugin.toml" "$pkgdir/usr/lib/trailboss/plugins/sidebar-menus/trailboss-plugin.toml"
+  install -Dm644 "$srcdir/payload/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "$srcdir/payload/BUN-LICENSE.md" "$pkgdir/usr/share/licenses/$pkgname/BUN-LICENSE.md"
+}

@@ -23,12 +23,12 @@ fn acceptance(remote: bool) {
         "Then every measured click-to-repaint sample is at most 100ms including producer and transport delays and the displayed Surface and focus state match the requested selection",
         "Examples:", "| mode |", "| local |", "| remote from achy |",
     ]);
-    let example = std::path::Path::new(env!("CARGO_BIN_EXE_herdr-fork"))
+    let example = std::path::Path::new(env!("CARGO_BIN_EXE_trailboss"))
         .parent()
         .unwrap()
         .join("examples/click-to-repaint-15-panes");
     let output = std::env::temp_dir().join(format!(
-        "herdr-latency-{}-{}.json",
+        "trailboss-latency-{}-{}.json",
         std::process::id(),
         if remote { "remote" } else { "local" }
     ));
@@ -45,28 +45,31 @@ fn living_meet_remote_from_achy_click_to_repaint_gate() {
     acceptance(true);
 }
 
-fn completed_selection(client: &herdr_fork::Client, target: &serde_json::Value) -> bool {
+fn completed_selection(client: &trailboss::Client, target: &serde_json::Value) -> bool {
     let Some(declarations) = &client.declarations else {
         return false;
     };
-    if client.focused_pane_id.as_deref() != target["pane"].as_str() {
+    if client.focused_pane_id.as_deref() != target["pane"].as_str()
+        || client.focused_tab_id.as_deref() != target["tab"].as_str()
+    {
         return false;
     }
-    let mut state = herdr_fork::core::Core::default();
+    let mut state = trailboss::core::Core::default();
     state.update_session(
         client.workspace_id.clone(),
         client.focused_tab_id.clone(),
         true,
     );
     let mut bytes = Vec::new();
-    herdr_fork::terminal::draw_frame(
-        &mut bytes,
-        client.primary.as_ref(),
-        declarations,
-        &state,
-        herdr_fork::terminal::Rect::viewport(80, 24),
-    )
-    .unwrap();
+    trailboss::terminal::FrameRenderer::default()
+        .draw_frame(
+            &mut bytes,
+            client.primary.as_ref(),
+            declarations,
+            &state,
+            trailboss::terminal::Rect::viewport(80, 24),
+        )
+        .unwrap();
     let mut screen = ghostty_vt::Terminal::new(80, 24, 0).unwrap();
     screen.write(&bytes);
     let rows: Vec<String> = screen
@@ -85,10 +88,10 @@ fn completed_selection(client: &herdr_fork::Client, target: &serde_json::Value) 
                 .collect()
         })
         .collect();
-    let Some(rect) = herdr_fork::terminal::surface_rect(
+    let Some(rect) = trailboss::terminal::surface_rect(
         &state,
         declarations,
-        herdr_fork::terminal::Rect::viewport(80, 24),
+        trailboss::terminal::Rect::viewport(80, 24),
     ) else {
         return false;
     };
@@ -105,7 +108,7 @@ fn completed_selection(client: &herdr_fork::Client, target: &serde_json::Value) 
             .collect::<String>()
             .trim_end()
             == expected
-    }) && rows[0].contains(target["tab_label"].as_str().unwrap())
+    })
 }
 
 #[test]
@@ -135,11 +138,10 @@ fn producer_dispatch_to_completed_selected_surface_meets_latency_gate() {
     for (action, index) in [("open-workspace", 5), ("focus-tab", 8), ("focus-pane", 9)] {
         let target = &populations[index];
         let declarations = client.declarations.as_ref().unwrap();
-        let (plugin, action_id, context) = herdr_fork::sidebar::rows(declarations)
+        let (plugin, action_id, context) = trailboss::sidebar::rows(declarations)
             .enumerate()
             .find_map(|(row, _)| {
-                let (plugin, declared, context) =
-                    herdr_fork::sidebar::action_at(declarations, row)?;
+                let (plugin, declared, context) = trailboss::sidebar::action_at(declarations, row)?;
                 (declared == action
                     && match action {
                         "open-workspace" => {
@@ -160,7 +162,7 @@ fn producer_dispatch_to_completed_selected_surface_meets_latency_gate() {
             .input()
             .unwrap()
             .dispatch(
-                &mut herdr_fork::core::Core::default(),
+                &mut trailboss::core::Core::default(),
                 &client.boot_id,
                 &plugin,
                 &action_id,

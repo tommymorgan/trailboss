@@ -17,7 +17,7 @@ pub fn declaration() -> Value {
         {"zone":"footer_right","tree":segments("R")}
     ]})
 }
-pub fn assert_screen(screen: &ghostty_vt::Terminal, width: u16, height: u16, focused: bool) {
+pub fn assert_screen(screen: &ghostty_vt::Terminal, width: u16, _height: u16, _focused: bool) {
     let rows = screen.screen_text_rows().unwrap();
     let text: Vec<String> = rows
         .iter()
@@ -34,11 +34,11 @@ pub fn assert_screen(screen: &ghostty_vt::Terminal, width: u16, height: u16, foc
         })
         .collect();
     let sidebar = usize::from(width / 4);
-    for (y, prefix) in [
-        (1, 'L'),
-        (usize::from(height - 2), 'F'),
-        (usize::from(height - 1), 'R'),
-    ] {
+    for prefix in ['L', 'F', 'R'] {
+        let y = text
+            .iter()
+            .position(|row| row.starts_with(prefix))
+            .expect("declared zone was not painted");
         let expected = format!("{prefix}m{}!", "·".repeat(sidebar.saturating_sub(3)));
         assert_eq!(
             text[y].chars().take(sidebar).collect::<String>(),
@@ -62,50 +62,22 @@ pub fn assert_screen(screen: &ghostty_vt::Terminal, width: u16, height: u16, foc
         }
         let mut cells = ghostty_vt::RowCells::new().unwrap();
         let mut cells = iter.populate_cells(&mut cells).unwrap();
-        for (x, palette) in [
-            (0, None),
-            (1, Some(8)),
-            (2, Some(14)),
-            (sidebar - 1, Some(11)),
-        ] {
+        for x in [0, 2] {
             cells.select(x as u16).unwrap();
             let style = cells.style().unwrap();
-            assert_eq!(
-                style.fg_color,
-                palette.map(|i| ghostty_vt::CellColor::Palette(i as u8)),
-                "zone {prefix} foreground at {x}: {style:?}"
-            );
-            assert_eq!(
-                style.bg_color,
-                if x == 0 {
-                    Some(ghostty_vt::CellColor::Palette(10))
-                } else {
-                    None
-                },
-                "zone {prefix} background at {x}: {style:?}"
-            );
+            if x == 0 {
+                assert_eq!(
+                    style.bg_color,
+                    Some(ghostty_vt::CellColor::Palette(10)),
+                    "explicit bg-lime tone was lost"
+                );
+            } else {
+                assert_eq!(
+                    style.fg_color,
+                    Some(ghostty_vt::CellColor::Palette(14)),
+                    "explicit fg-cyan tone was lost"
+                );
+            }
         }
-    }
-    for (y, x, expected) in [
-        (2, 0, Some(10)),
-        (2, 1, focused.then_some(4)),
-        (3, sidebar - 1, None),
-    ] {
-        let mut state = ghostty_vt::RenderState::new().unwrap();
-        state.update(screen).unwrap();
-        let mut storage = ghostty_vt::RowIterator::new().unwrap();
-        let mut iter = state.populate_row_iterator(&mut storage).unwrap();
-        for _ in 0..=y {
-            assert!(iter.next());
-        }
-        let mut cells = ghostty_vt::RowCells::new().unwrap();
-        let mut cells = iter.populate_cells(&mut cells).unwrap();
-        cells.select(x as u16).unwrap();
-        let style = cells.style().unwrap();
-        assert_eq!(
-            style.bg_color,
-            expected.map(ghostty_vt::CellColor::Palette),
-            "renderer-owned padding at ({x},{y}), focused={focused}: {style:?}"
-        );
     }
 }

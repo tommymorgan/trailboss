@@ -1,0 +1,19 @@
+{
+  "name": "trailboss-sidebar-menus",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "lint": "bunx @biomejs/biome@2.3.15 lint *.ts",
+    "format:check": "bunx @biomejs/biome@2.3.15 format *.ts"
+  },
+  "dependencies": {
+    "@trailboss/store": "file:../../packages/trailboss-store",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/bun": "1.4.2"
+  }
+}

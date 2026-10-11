@@ -1,8 +1,10 @@
 # Accepted planning source
 
+**Current identity: Trailboss.** The accepted source quotations and dated decisions below retain historical names where they identify upstream Herdr, the prior `herdr-fork` working name, the separate Herdr Web companion, or the original daily-driver fork. These are not current executable/install instructions. Current source-built commands use `trailboss` and clipboard staging uses `/tmp/trailboss-clipboard-images-<uid>/`; the physical checkout path remains unchanged. Historical names inside verbatim design criteria are retained for traceability.
+
 Snapshot of Kizn Item `01a12810-3a69-7f17-96f2-010ade0b85af`, revision 6, captured 2026-10-10. This is an accepted design record, not a separately authored PRD. The numbered decisions below are the source of verbatim coverage quotes. Glossary revision 5 supplies the current domain contract; see [CONTEXT.md](../CONTEXT.md).
 
-# Herdr-inspired app — confirmed design record
+# Trailboss — confirmed design record
 
 Accepted by Tommy on 2026-10-10 at the end of a structured grilling session. This is a standing decision set, not a proposal. Authority: Tommy answered every frontier round and confirmed the final record in one word ("I confirm").
 
@@ -19,6 +21,7 @@ Accepted by Tommy on 2026-10-10 at the end of a structured grilling session. Thi
 9. **Acceptance demo**: port the fork's agent-tree plugin onto the new widget-tree API as the first real consumer; the TanStack DB store and stdin-envelope producer transport carry over.
 10. **Spike**: 2-3 weeks. Exit test = runs Tommy's real session end-to-end with the stock UI fully plugin-declared, `herdr --remote`-style attach from achy, image paste working, latency gate met. Failing the exit test returns work to plugin development on the herdr fork.
 11. **Future-client compatibility** (Tommy approved 2026-10-10): Renderer-neutral shared contracts are a spike requirement. The shared Core owns session state and action semantics; each client owns its renderer. Shared declarations express structure, actions and semantic styling without ratatui types, terminal escape sequences or fixed terminal-cell geometry. Pane Surfaces remain terminal-state data consumable by any client renderer. GUI and web clients, browser transport and browser authentication are not implemented in this spike.
+12. **Terminal rendering** (Tommy selected 2026-10-14): Restore the original application-driven terminal rendering and PTY resizing. Withdraw the revision29 native-priority workaround and revision30 independent cell-reflow experiment; do not expand OMP/Core into semantic application-content integration. Native clients consume the original surface frames; the separate Herdr Web bridge uses ANSI terminal attachment. Connected clients share application geometry, so one client's resize can affect another. Renderer-neutral widget declarations and the other accepted UI improvements remain unchanged.
 
 ## Future client direction
 

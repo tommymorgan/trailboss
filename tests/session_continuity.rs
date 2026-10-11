@@ -2,13 +2,13 @@
 mod console;
 mod support;
 use console::Console;
-use herdr_fork::Client;
 use serde_json::{json, Value};
 use std::{
     fs,
     time::{Duration, Instant},
 };
 use support::Core;
+use trailboss::Client;
 
 const SCENARIO: &str = "Disconnect without losing the running session";
 const GIVEN: &str =
@@ -211,7 +211,7 @@ fn living_disconnect_without_losing_the_running_session() {
     });
     let original = identity(&session);
     let before = tick(&session);
-    first.text("\x11");
+    first.text("\x02q");
     wait_until(
         || first.child.try_wait().unwrap().is_some(),
         "normal client detach hung",

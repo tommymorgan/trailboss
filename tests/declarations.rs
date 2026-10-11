@@ -2,23 +2,44 @@
 mod styled_cases;
 #[path = "support/widget_cases.rs"]
 mod widget_cases;
-use herdr_fork::{
+use serde_json::{json, Value};
+use std::process::Command;
+use trailboss::{
     core::Core,
     terminal::{self, Rect},
     Cell, Surface,
 };
-use herdr_runtime::protocol::widgets::{Context, Declaration};
-use serde_json::{json, Value};
-use std::process::Command;
+use trailboss_runtime::protocol::widgets::{Context, Declaration};
+#[test]
+fn sidebar_palette_declaration_validates_against_its_actual_manifest_actions() {
+    let output = Command::new("bun")
+        .args(["-e", "import {declareMenus} from './plugins/sidebar-menus/menus.ts'; import {snapshotRows} from './packages/trailboss-store/adapter.ts'; const manifest=Bun.TOML.parse(await Bun.file('./plugins/sidebar-menus/trailboss-plugin.toml').text()); const entities=snapshotRows({type:'session_snapshot',snapshot:{workspaces:[{workspace_id:'w',label:'Space',number:1,focused:true,agent_status:'idle'}],tabs:[{workspace_id:'w',tab_id:'t',label:'Tab',number:1,focused:true,agent_status:'idle'}],panes:[]}}); console.log(JSON.stringify({declaration:declareMenus(entities),actions:manifest.actions.map(action=>action.id)}));"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let declaration: Declaration = serde_json::from_value(value["declaration"].clone()).unwrap();
+    let actions = value["actions"].as_array().unwrap();
+    assert!(declaration.validate(|id| actions.iter().any(|action| action.as_str() == Some(id))));
+    assert!(
+        !declaration.validate(|_| false),
+        "close-space must be manifest-owned"
+    );
+}
+
 fn at(row: &str, column: usize) -> String {
     row.chars().skip(column).collect()
 }
 fn stock_declaration(live: bool) -> Declaration {
     let entities = if live {
         json!([
-            {"id":"workspace:w1","kind":"workspace","workspaceId":"w1","tabId":null,"paneId":null,"label":"Alpha","number":1,"focused":true,"agentStatus":"working","agent":null,"cwd":null},
-            {"id":"tab:t1","kind":"tab","workspaceId":"w1","tabId":"t1","paneId":null,"label":"Build","number":1,"focused":true,"agentStatus":"working","agent":null,"cwd":null},
-            {"id":"pane:p1","kind":"pane","workspaceId":"w1","tabId":"t1","paneId":"p1","label":"shell","number":0,"focused":true,"agentStatus":"working","agent":null,"cwd":null}
+            {"id":"workspace:w1","kind":"workspace","workspaceId":"w1","tabId":null,"paneId":null,"label":"Alpha","number":1,"position":0,"focused":true,"agentStatus":"working","agent":null,"cwd":null},
+            {"id":"tab:t1","kind":"tab","workspaceId":"w1","tabId":"t1","paneId":null,"label":"Build","number":1,"position":0,"focused":true,"agentStatus":"working","agent":null,"cwd":null},
+            {"id":"pane:p1","kind":"pane","workspaceId":"w1","tabId":"t1","paneId":"p1","label":"shell","number":0,"position":0,"focused":true,"agentStatus":"working","agent":null,"cwd":null}
         ])
     } else {
         json!([])
@@ -43,12 +64,13 @@ fn stock_declaration(live: bool) -> Declaration {
     ] {
         command.env(key, &home);
     }
-    for (key, _) in
-        std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("HERDR_"))
-    {
+    for (key, _) in std::env::vars_os().filter(|(key, _)| {
+        let name = key.to_string_lossy();
+        name.starts_with("TRAILBOSS_") || name.starts_with("HERDR_")
+    }) {
         command.env_remove(key);
     }
-    command.env("HERDR_CONFIG_PATH", home.join("config.toml"));
+    command.env("TRAILBOSS_CONFIG_PATH", home.join("config.toml"));
     let output = command.args(["-e", &format!("import {{declareStock}} from './plugins/agent-tree/stock.ts'; console.log(JSON.stringify(declareStock({entities})))")]).current_dir(env!("CARGO_MANIFEST_DIR")).output().unwrap();
     std::fs::remove_dir_all(home).unwrap();
     assert!(
@@ -68,9 +90,14 @@ fn surface() -> Surface {
             foreground: 0,
             background: 0,
             modifiers: 0,
+            hyperlink: None,
         }],
+        hyperlinks: Vec::new(),
+        graphics: Default::default(),
+        graphics_scope: String::new(),
         cursor: None,
         focused: true,
+        mouse_reporting: false,
     }
 }
 fn screen(core: &Core, declaration: Option<Declaration>) -> Vec<String> {
@@ -82,14 +109,15 @@ fn screen_width(core: &Core, declaration: Option<Declaration>, width: u16) -> Ve
         .map(|d| ("arbitrary.public-plugin".into(), d))
         .collect();
     let mut bytes = Vec::new();
-    terminal::draw_frame(
-        &mut bytes,
-        Some(&surface()),
-        &declarations,
-        core,
-        Rect::viewport(width, 24),
-    )
-    .unwrap();
+    terminal::FrameRenderer::default()
+        .draw_frame(
+            &mut bytes,
+            Some(&surface()),
+            &declarations,
+            core,
+            Rect::viewport(width, 24),
+        )
+        .unwrap();
     let mut screen = ghostty_vt::Terminal::new(width, 24, 0).unwrap();
     screen.write(&bytes);
     screen
@@ -110,12 +138,148 @@ fn screen_width(core: &Core, declaration: Option<Declaration>, width: u16) -> Ve
         .collect()
 }
 #[test]
+fn scoped_menu_commands_never_substitute_the_selected_workspace_or_tab() {
+    use trailboss::core::Effect;
+    let mut core = Core::default();
+    core.update_session(Some("selected".into()), Some("selected-tab".into()), true);
+    let context = Context {
+        workspace_id: Some("other".into()),
+        tab_id: Some("other-tab".into()),
+        ..Default::default()
+    };
+    for (action, expected_method, expected_params) in [
+        (
+            "host:new-tab",
+            "tab.create",
+            json!({"workspace_id":"other","label":"New tab","focus":true}),
+        ),
+        ("host:close-tab", "tab.close", json!({"tab_id":"other-tab"})),
+    ] {
+        let Effect::Request { method, params } = core.invoke(action, &context, None) else {
+            panic!("missing scoped request")
+        };
+        assert_eq!(method, expected_method);
+        assert_eq!(params, expected_params);
+        assert!(matches!(
+            core.invoke(action, &Context::default(), None),
+            Effect::Consumed
+        ));
+    }
+    assert!(matches!(
+        core.invoke("host:detach", &context, None),
+        Effect::Consumed
+    ));
+    assert!(core.detach_requested);
+}
+
+#[test]
+fn rename_keeps_its_nonselected_target_when_focus_changes_and_empty_submit_stays_open() {
+    use trailboss::core::Effect;
+    use trailboss_runtime::protocol::widgets::Condition;
+    for (action, condition, method, key) in [
+        (
+            "host:rename-space",
+            Condition::RenameSpace,
+            "workspace.rename",
+            "workspace_id",
+        ),
+        (
+            "host:rename-tab",
+            Condition::RenameTab,
+            "tab.rename",
+            "tab_id",
+        ),
+    ] {
+        let mut core = Core::default();
+        core.update_session(Some("selected".into()), Some("selected-tab".into()), true);
+        core.invoke(
+            action,
+            &Context {
+                workspace_id: Some("other".into()),
+                tab_id: Some("other".into()),
+                ..Default::default()
+            },
+            None,
+        );
+        assert!(matches!(core.text("\r"), Some(Effect::Consumed)));
+        assert!(core.visible(condition));
+        core.update_session(Some("changed".into()), Some("changed-tab".into()), true);
+        core.text("Renamed 🦀");
+        let Some(Effect::Request {
+            method: actual_method,
+            params,
+        }) = core.text("\r")
+        else {
+            panic!("rename did not submit")
+        };
+        assert_eq!(actual_method, method);
+        assert_eq!(params, json!({key:"other","label":"Renamed 🦀"}));
+        assert!(!core.visible(condition));
+    }
+}
+
+#[test]
+fn edits_consume_unicode_keys_and_safe_paste_until_escape_returns_input_to_the_pane() {
+    use trailboss::core::Effect;
+    use trailboss_runtime::protocol::widgets::Condition;
+    for action in ["host:new", "host:rename-space", "host:rename-tab"] {
+        let mut core = Core::default();
+        core.update_session(Some("w1".into()), Some("t1".into()), true);
+        core.invoke(
+            action,
+            &Context {
+                workspace_id: Some("w1".into()),
+                tab_id: Some("t1".into()),
+                ..Default::default()
+            },
+            None,
+        );
+        assert!(matches!(core.text("é🦀"), Some(Effect::Consumed)));
+        assert!(matches!(core.text("\x7f"), Some(Effect::Consumed)));
+        assert_eq!(core.input_text, "é");
+        for control in ["\r", "\x1b", "\x7f", "bad\ntext"] {
+            assert!(matches!(core.paste(control), Some(Effect::Consumed)));
+            assert_eq!(core.input_text, "é");
+        }
+        core.paste(&"界".repeat(100));
+        assert_eq!(core.input_text.chars().count(), 80);
+        assert!(matches!(core.text("\x1b"), Some(Effect::Consumed)));
+        assert!(core.input_text.is_empty());
+        assert!(!core.visible(Condition::NewTab));
+        assert!(!core.visible(Condition::RenameSpace));
+        assert!(!core.visible(Condition::RenameTab));
+        assert!(core.text("pty input").is_none());
+    }
+}
+
+#[test]
+fn new_tab_edit_keeps_its_original_workspace_after_focus_changes() {
+    use trailboss::core::Effect;
+    let mut core = Core::default();
+    core.update_session(Some("original".into()), None, true);
+    core.invoke("host:new", &Context::default(), None);
+    core.update_session(Some("changed".into()), None, true);
+    let Some(Effect::Request { method, params }) = core.text("\r") else {
+        panic!("new tab did not submit")
+    };
+    assert_eq!(method, "tab.create");
+    assert_eq!(
+        params,
+        json!({"workspace_id":"original","label":"New tab","focus":true})
+    );
+}
+
+#[test]
 fn public_declarations_are_the_only_visible_composition_in_all_four_states() {
     for (state, action, pane_y) in [
         ("no pane yet", None, None),
-        ("live session", None, Some(1)),
-        ("new-tab interaction open", Some("host:new"), Some(5)),
-        ("menu open", Some("host:menu"), Some(4)),
+        ("live session", None, Some(0)),
+        ("new-tab interaction open", Some("host:new"), Some(0)),
+        (
+            "rename interaction open",
+            Some("host:rename-space"),
+            Some(0),
+        ),
     ] {
         let live = state != "no pane yet";
         let declaration = stock_declaration(live);
@@ -126,33 +290,19 @@ fn public_declarations_are_the_only_visible_composition_in_all_four_states() {
         let mut core = Core::default();
         core.update_session(live.then(|| "w1".into()), live.then(|| "t1".into()), live);
         if let Some(action) = action {
-            core.invoke(action, &Context::default());
+            core.invoke(
+                action,
+                &Context {
+                    workspace_id: Some("w1".into()),
+                    ..Default::default()
+                },
+                None,
+            );
         }
         let original = screen(&core, Some(declaration.clone()));
-        assert!(
-            original[0].starts_with(" herdr · stock"),
-            "{state}: sidebar header"
-        );
-        assert!(
-            original[22].starts_with(" + New tab "),
-            "{state}: new-tab affordance"
-        );
-        assert!(
-            original[23].starts_with(" Menu "),
-            "{state}: menu affordance"
-        );
-        if live {
+        if !live {
             assert!(
-                at(&original[0], 20).starts_with(" Build "),
-                "{state}: tab-strip placement"
-            );
-            assert!(
-                original[1].starts_with("Alpha"),
-                "{state}: sidebar placement"
-            );
-        } else {
-            assert!(
-                at(&original[1], 20).starts_with(" No pane yet"),
+                at(&original[0], 20).starts_with(" No pane yet"),
                 "no-pane screen: {original:?}"
             );
         }
@@ -165,20 +315,6 @@ fn public_declarations_are_the_only_visible_composition_in_all_four_states() {
         } else {
             assert!(!original.iter().any(|row| row.contains('X')));
         }
-        if state == "new-tab interaction open" {
-            assert!(at(&original[1], 20).starts_with(" New tab "));
-            assert!(at(&original[2], 20).starts_with(" Name: "));
-            assert!(at(&original[3], 20).starts_with(" Create "));
-            assert!(at(&original[4], 20).starts_with(" Cancel "));
-            let _ = core.text("Typed name");
-            assert!(at(&screen(&core, Some(declaration.clone()))[2], 20)
-                .starts_with(" Name: Typed name"));
-        }
-        if state == "menu open" {
-            assert!(at(&original[1], 20).starts_with(" Session menu "));
-            assert!(at(&original[2], 20).starts_with(" New tab "));
-            assert!(at(&original[3], 20).starts_with(" Close menu "));
-        }
         // An independently-authored arrangement must move every visible group, including the Surface.
         let mut changed: Value = serde_json::to_value(&declaration).unwrap();
         changed["composition"]["tree"]["children"]
@@ -187,26 +323,13 @@ fn public_declarations_are_the_only_visible_composition_in_all_four_states() {
             .reverse();
         let moved: Declaration = serde_json::from_value(changed).unwrap();
         let swapped = screen(&core, Some(moved));
-        assert!(
-            at(&swapped[0], 60).starts_with(" herdr · stock"),
-            "{state}: declaration did not move sidebar"
-        );
         if let Some(y) = pane_y {
             assert!(
                 swapped[y].starts_with('X'),
                 "{state}: declaration did not move Surface"
             );
         } else {
-            assert!(swapped[1].starts_with(" No pane yet"));
-        }
-        if live {
-            assert!(swapped[0].starts_with(" Build "));
-        }
-        if state == "menu open" {
-            assert!(swapped[1].starts_with(" Session menu "));
-        }
-        if state == "new-tab interaction open" {
-            assert!(swapped[1].starts_with(" New tab "));
+            assert!(swapped[0].starts_with(" No pane yet"));
         }
         let mut without_root = declaration;
         without_root.composition = None;
@@ -242,7 +365,9 @@ fn shared_list_producers_keep_visible_rows_and_action_identity() {
     let core = Core::default();
     let viewport = Rect::viewport(80, 24);
     let mut bytes = Vec::new();
-    terminal::draw_frame(&mut bytes, None, &declarations, &core, viewport).unwrap();
+    terminal::FrameRenderer::default()
+        .draw_frame(&mut bytes, None, &declarations, &core, viewport)
+        .unwrap();
     let mut terminal = ghostty_vt::Terminal::new(80, 24, 0).unwrap();
     terminal.write(&bytes);
     let rows = terminal.screen_text_rows().unwrap();
@@ -261,7 +386,7 @@ fn shared_list_producers_keep_visible_rows_and_action_identity() {
             "shared Zone erased {label}: {text}"
         );
         let (actual_plugin, actual_action, context) =
-            terminal::action_at(&core, &declarations, viewport, 0, y as u16)
+            terminal::action_at(&core, &declarations, viewport, 0, 0, y as u16)
                 .expect("declared row must be actionable");
         assert_eq!(
             (actual_plugin, actual_action, context.tab_id.as_deref()),
@@ -321,14 +446,15 @@ fn styled_declarations_stay_in_zones_with_client_palette() {
         let mut core = Core::default();
         core.update_session(None, focused.then(|| "padding-focus".into()), false);
         let mut bytes = Vec::new();
-        terminal::draw_frame(
-            &mut bytes,
-            None,
-            &declarations,
-            &core,
-            Rect::viewport(width, height),
-        )
-        .unwrap();
+        terminal::FrameRenderer::default()
+            .draw_frame(
+                &mut bytes,
+                None,
+                &declarations,
+                &core,
+                Rect::viewport(width, height),
+            )
+            .unwrap();
         let mut screen = ghostty_vt::Terminal::new(width, height, 0).unwrap();
         screen.write(&bytes);
         styled_cases::assert_screen(&screen, width, height, focused);

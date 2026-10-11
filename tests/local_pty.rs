@@ -1,4 +1,4 @@
-use herdr_fork::Client;
+use trailboss::Client;
 mod support;
 use std::time::{Duration, Instant};
 use support::{Core, HOMES};
@@ -41,14 +41,14 @@ fn then_live_primary_surface_and_reserved_zones(client: &mut Client) {
         .type_text("printf '\\033[2;5;9mstyled-%s\\033[0m\\n' live\r")
         .unwrap();
     wait_for(client, "styled-live");
-    let working = herdr_fork::terminal::Rect {
+    let working = trailboss::terminal::Rect {
         x: 20,
         y: 0,
         width: 80,
         height: 24,
     };
     let mut output = Vec::new();
-    herdr_fork::terminal::draw(&mut output, client.primary.as_ref().unwrap(), working).unwrap();
+    trailboss::terminal::draw(&mut output, client.primary.as_ref().unwrap(), working).unwrap();
     let mut screen = ghostty_vt::Terminal::new(100, 25, 0).unwrap();
     screen.write(&output);
     assert_rendered_shell_style(&screen, 20);
@@ -64,13 +64,13 @@ fn then_live_primary_surface_and_reserved_zones(client: &mut Client) {
         "renderer must show real subsequent output"
     );
     for zone in [
-        herdr_fork::terminal::Rect {
+        trailboss::terminal::Rect {
             x: 0,
             y: 0,
             width: 20,
             height: 24,
         },
-        herdr_fork::terminal::Rect {
+        trailboss::terminal::Rect {
             x: 0,
             y: 24,
             width: 100,
@@ -165,18 +165,19 @@ fn interactive_binary_uses_the_real_primary_pty_and_declared_plugin_ui() {
             pixel_height: 0,
         })
         .unwrap();
-    let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_herdr-fork"));
+    let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_trailboss"));
     command.args(["--session", &session.name]);
     for name in HOMES {
         command.env(name, &session.home);
     }
     command.env("TERM", "xterm-256color");
-    for (key, _) in
-        std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("HERDR_"))
-    {
+    for (key, _) in std::env::vars_os().filter(|(key, _)| {
+        let name = key.to_string_lossy();
+        name.starts_with("TRAILBOSS_") || name.starts_with("HERDR_")
+    }) {
         command.env_remove(key);
     }
-    command.env("HERDR_CONFIG_PATH", session.home.join("config.toml"));
+    command.env("TRAILBOSS_CONFIG_PATH", session.home.join("config.toml"));
     let mut console = Console(pair.slave.spawn_command(command).unwrap());
     drop(pair.slave);
     let mut reader = pair.master.try_clone_reader().unwrap();
@@ -223,7 +224,6 @@ fn interactive_binary_uses_the_real_primary_pty_and_declared_plugin_ui() {
             screen.write(&bytes);
         }
     };
-    wait_screen(&mut screen, " 1 ");
     writer.write_all(b"printf 'console-%s\\n' live\r").unwrap();
     writer.flush().unwrap();
     wait_screen(&mut screen, "console-live");
@@ -248,14 +248,30 @@ fn interactive_binary_uses_the_real_primary_pty_and_declared_plugin_ui() {
                 .collect()
         })
         .collect();
-    assert!(sidebar[0].starts_with(" herdr · stock"));
-    assert!(sidebar[23].starts_with(" + New tab "));
-    assert!(sidebar[24].starts_with(" Menu "));
     assert!(
         sidebar.iter().all(|row| !row.contains("console-live")),
         "PTY output escaped its declared Surface"
     );
-    writer.write_all(b"\x11").unwrap();
+    writer.write_all(b"stty raw -echo; printf '\\r\\nraw-ready\\r\\n'; od -An -tx1 -N 5; stty sane; printf '\\r\\nraw-done\\r\\n'\r").unwrap();
+    writer.flush().unwrap();
+    wait_screen(&mut screen, "raw-ready");
+    // Bare q and Ctrl-Q reach the pane; prefix twice sends one Ctrl-B.
+    // An unknown prefix command is consumed and returns to normal input.
+    writer.write_all(b"q\x11\x02\x02\x02xqQ").unwrap();
+    writer.flush().unwrap();
+    wait_screen(&mut screen, "raw-done");
+    assert!(
+        screen.screen_text_rows().unwrap().iter().any(|row| {
+            row.cells
+                .iter()
+                .flat_map(|cell| cell.graphemes.iter())
+                .filter_map(|cp| char::from_u32(*cp))
+                .collect::<String>()
+                .contains("71 11 02 71 51")
+        }),
+        "pane must receive literal q, Ctrl-Q, escaped prefix, q and Q"
+    );
+    writer.write_all(b"\x02q").unwrap();
     writer.flush().unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {

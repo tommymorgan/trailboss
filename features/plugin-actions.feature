@@ -13,5 +13,5 @@ Feature: Plugin action dispatch
     Examples:
       | action | behavior |
       | new | new-tab interaction |
-      | menu | menu interaction |
+      | rename-space | rename-space interaction |
 

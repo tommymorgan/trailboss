@@ -1,9 +1,3 @@
-use herdr_runtime::{
-    api_client::{ApiClient, ApiClientError, ConnectionTarget},
-    api_schema::{
-        EventEnvelope, Request, ResponseResult, SubscriptionEventEnvelope, SuccessResponse,
-    },
-};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
@@ -13,10 +7,17 @@ use std::{
     process::{Child, Command, Output, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use trailboss_runtime::{
+    api_client::{ApiClient, ApiClientError, ConnectionTarget},
+    api_schema::{
+        EventEnvelope, Request, ResponseResult, SubscriptionEventEnvelope, SuccessResponse,
+    },
+};
 
-const SCHEMA: &str = include_str!("../crates/herdr-runtime/docs/next/api/herdr-api.schema.json");
+const SCHEMA: &str =
+    include_str!("../crates/trailboss-runtime/docs/next/api/trailboss-api.schema.json");
 const LEGACY: &str =
-    include_str!("../crates/herdr-runtime/tests/fixtures/session/legacy-pre-tabs-v2.json");
+    include_str!("../crates/trailboss-runtime/tests/fixtures/session/legacy-pre-tabs-v2.json");
 
 struct Core {
     child: Child,
@@ -34,7 +35,7 @@ impl Drop for Core {
 }
 impl Core {
     fn command_at(home: &std::path::Path) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_herdr-fork"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_trailboss"));
         command
             .env("HOME", home)
             .env("XDG_CONFIG_HOME", home)
@@ -42,12 +43,12 @@ impl Core {
             .env("XDG_DATA_HOME", home)
             .env("XDG_CACHE_HOME", home)
             .env("XDG_RUNTIME_DIR", home)
-            .env("HERDR_STARTUP_CWD", home)
+            .env("TRAILBOSS_STARTUP_CWD", home)
             .env("SHELL", "/bin/sh")
             .env_remove("HERDR_SOCKET_PATH")
             .env_remove("HERDR_CLIENT_SOCKET_PATH")
-            .env_remove("HERDR_CONFIG_PATH")
-            .env_remove("HERDR_SESSION")
+            .env_remove("TRAILBOSS_CONFIG_PATH")
+            .env_remove("TRAILBOSS_SESSION")
             .env_remove("HERDR_PANE_ID")
             .current_dir(home)
             .stdin(Stdio::null());
@@ -82,7 +83,7 @@ impl Core {
         assert_eq!(response["id"], id, "request correlation changed");
         if response.get("error").is_some() {
             self.validate("error_response", response);
-            let error: herdr_runtime::api_schema::ErrorResponse =
+            let error: trailboss_runtime::api_schema::ErrorResponse =
                 serde_json::from_value(response.clone()).unwrap();
             assert!(!error.error.code.is_empty());
             assert!(!error.error.message.is_empty());
@@ -102,11 +103,11 @@ fn given_reference_client_and_core() -> Core {
             .unwrap()
             .as_nanos()
     ));
-    let session = home.join("herdr-fork/sessions/contract");
+    let session = home.join("trailboss/sessions/contract");
     std::fs::create_dir_all(&session).unwrap();
     // Restore the original compatibility fixture byte-for-byte, not a rewritten snapshot.
     std::fs::write(session.join("session.json"), LEGACY).unwrap();
-    let socket = session.join("herdr.sock");
+    let socket = session.join("trailboss.sock");
     let client = ApiClient::for_target(ConnectionTarget::SocketPath(socket.clone()));
     let mut core = Core {
         child: Core::command_at(&home)

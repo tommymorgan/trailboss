@@ -1,6 +1,6 @@
-# Herdr-inspired app — domain model
+# Trailboss — domain model
 
-Ubiquitous language for the app designed in the 2026-10-10 grilling session (see linked design record). Mirrored verbatim in `/home/tommy/src/agents/herdr-fork/CONTEXT.md`. All naming decisions are settled by Tommy as of 2026-10-10; nothing remains contested.
+Ubiquitous language for Trailboss, designed in the 2026-10-10 grilling session (see linked design record). Physical checkout: `/home/tommy/src/agents/herdr-fork/CONTEXT.md` (the directory name is unchanged by the product rename). Domain naming decisions were settled by Tommy on 2026-10-10; the product was renamed Trailboss on 2026-10-15.
 
 ## Sessions and terminals
 
@@ -58,13 +58,13 @@ _Avoid_: native UI, default chrome (implies privilege the design removes).
 
 ## Validation
 
-**Spike**: The 2–3 week build whose exit test runs Tommy's real session end-to-end with the stock UI fully plugin-declared, remote attach, image paste, and ≤100ms click-to-repaint at 15 panes. Failing it returns work to the herdr fork.
+**Spike**: The 2–3 week build whose exit test runs Tommy's real session end-to-end with the stock UI fully plugin-declared, remote attach, image paste, and ≤100ms click-to-repaint at 15 panes. Failing it returns work to the existing original Herdr fork.
 
 ## Architectural decisions (recorded in the repository’s docs/adr/)
 
-1. Reuse herdr's session API verbatim; design only the UI/plugin protocol fresh.
+1. Reuse upstream Herdr's session API verbatim; design only the UI/plugin protocol fresh.
 2. Widget tree as data, core-rendered; no plugin pixel access in v1 (cell-grid region node deferred).
-3. Rust client and server with vendored herdr runtime; performance is the top priority and drove the stack choice.
+3. Rust client and server with vendored upstream Herdr runtime; performance is the top priority and drove the stack choice.
 
 ## Naming provenance
 

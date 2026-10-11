@@ -36,7 +36,7 @@ await Bun.stdin.text();
         declaration(true)
     );
     std::fs::write(plugin.join("producer.ts"), source).unwrap();
-    std::fs::write(plugin.join("herdr-plugin.toml"), "id = \"fixture.replacement\"\nname = \"Whole tree replacement\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[ui]]\nid = \"tree\"\nsurface = \"sidebar\"\ncommand = [\"bun\", \"producer.ts\"]\nstream = true\n").unwrap();
+    std::fs::write(plugin.join("trailboss-plugin.toml"), "id = \"fixture.replacement\"\nname = \"Whole tree replacement\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[ui]]\nid = \"tree\"\nsurface = \"sidebar\"\ncommand = [\"bun\", \"producer.ts\"]\nstream = true\n").unwrap();
     core.request("plugin.link", json!({"path":plugin,"enabled":true}));
     plugin
 }
@@ -66,7 +66,7 @@ pub fn assert_same_producer_and_socket(core: &Core, plugin: &std::path::Path) {
     assert_eq!(
         socket,
         core.home
-            .join(format!("herdr-fork/sessions/{}/herdr.sock", core.name))
+            .join(format!("trailboss/sessions/{}/trailboss.sock", core.name))
             .to_str()
             .unwrap()
     );

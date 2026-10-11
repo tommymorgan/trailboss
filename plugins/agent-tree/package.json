@@ -1,5 +1,5 @@
 {
-  "name": "herdr-agent-tree",
+  "name": "trailboss-agent-tree",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,7 +10,7 @@
     "format:check": "bunx @biomejs/biome@2.3.15 format ."
   },
   "dependencies": {
-    "@herdr/store": "file:../../packages/herdr-store",
+    "@trailboss/store": "file:../../packages/trailboss-store",
     "zod": "4.6.5"
   },
   "devDependencies": {

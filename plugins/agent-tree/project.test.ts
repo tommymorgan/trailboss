@@ -1,7 +1,14 @@
 import { expect, test } from 'bun:test'
-import { snapshotRows } from '@herdr/store'
+import { type EntityRow, snapshotRows } from '@trailboss/store'
 import { actionResponseLine, parseControlLine } from './control'
-import { Declaration, declareTree, icon, projectTree, statusRole } from './project'
+import {
+  Declaration,
+  declareTree,
+  expandFocusedDestination,
+  icon,
+  projectTree,
+  statusRole,
+} from './project'
 
 const entities = snapshotRows({
   type: 'session_snapshot',
@@ -23,30 +30,18 @@ const entities = snapshotRows({
   },
 })
 
-test('preserves the hostname title as a muted declaration, including empty sessions', () => {
-  expect(declareTree('junkman', [], new Set())).toEqual({
-    herdr: 'widget_tree',
-    version: 1,
-    composition: {
-      priority: 0,
-      tree: {
-        type: 'row',
-        children: [
-          { type: 'flex', weight: 1, child: { type: 'zone', zone: 'list' } },
-          { type: 'flex', weight: 3, child: { type: 'surface' } },
-        ],
-      },
-    },
-    zones: [
-      {
-        zone: 'list',
-        tree: {
-          type: 'column',
-          children: [
-            { type: 'row', children: [{ type: 'label', text: ' junkman · herdr', role: 'muted' }] },
-          ],
-        },
-      },
+test('separates the session title from the first workspace section', () => {
+  const rows = declareTree('junkman', entities, new Set()).zones[0].tree.children
+  expect(rows[1]).toEqual({
+    type: 'row',
+    children: [{ type: 'label', text: '', role: 'muted' }],
+  })
+  expect(rows[2]).toMatchObject({
+    context: { workspace_id: 'w' },
+    children: [
+      { type: 'label', text: 'Workspace', role: 'section' },
+      { type: 'leader' },
+      { type: 'label', text: '○ ', role: 'status-idle' },
     ],
   })
 })
@@ -54,9 +49,9 @@ test('retained collapsed state projects a header and hidden count without a titl
   const tree = projectTree(entities, new Set(['w']))
   expect(tree.children).toHaveLength(1)
   expect(tree.children[0].children).toEqual([
-    { type: 'label', text: 'Workspace', role: 'label' },
+    { type: 'label', text: 'Workspace', role: 'section' },
     { type: 'leader' },
-    { type: 'label', text: '○ ', role: 'rule' },
+    { type: 'label', text: '○ ', role: 'status-idle' },
     { type: 'label', text: '1 hidden', role: 'muted' },
   ])
   expect(
@@ -64,13 +59,13 @@ test('retained collapsed state projects a header and hidden count without a titl
       .success,
   ).toBe(true)
 })
-test('preserves every fork status glyph and semantic role', () => {
+test('uses solid status dots for active tabs and hollow dots for idle tabs', () => {
   expect(['working', 'blocked', 'waiting', 'idle', 'done', 'unknown'].map(icon)).toEqual([
     '●',
-    '◉',
-    '◌',
+    '●',
+    '●',
     '○',
-    '○',
+    '●',
     '○',
   ])
   expect(['working', 'blocked', 'waiting', 'idle', 'done', 'unknown'].map(statusRole)).toEqual([
@@ -79,7 +74,7 @@ test('preserves every fork status glyph and semantic role', () => {
     'status-waiting',
     'status-idle',
     'status-done',
-    'label',
+    'status-idle',
   ])
 })
 test('requires tab identity before declaring a focus action', () => {
@@ -119,10 +114,10 @@ test('retains request and result envelope identities and all context targets', (
 })
 
 test('declares a real pane focus target beneath its tab', () => {
-  const pane = {
+  const pane: EntityRow = {
     ...entities[1],
     id: 'pane:p',
-    kind: 'pane' as const,
+    kind: 'pane',
     paneId: 'p',
     label: 'Pane target',
   }
@@ -134,6 +129,109 @@ test('declares a real pane focus target beneath its tab', () => {
     type: 'row',
     action: 'focus-pane',
     context: { workspace_id: 'w', tab_id: 't', pane_id: 'p' },
-    children: [{ type: 'label', text: '    Pane target', role: 'label' }],
+    children: [{ type: 'label', text: '  Pane target', role: 'muted' }],
   })
+})
+
+test('sidebar references independently supplied scoped menus without owning their content', () => {
+  const declaration = declareTree('host', entities, new Set())
+  const rows = declaration.zones[0].tree.children
+  expect(rows.find((item) => item.action === 'open-workspace')?.menu).toEqual({
+    type: 'use',
+    name: 'sidebar.space-menu:w',
+  })
+  expect(rows.find((item) => item.action === 'focus-tab')?.menu).toEqual({
+    type: 'use',
+    name: 'sidebar.tab-menu:t',
+  })
+  const footer = declaration.zones.find((zone) => zone.zone === 'footer')?.tree.children[0]
+  expect(footer?.children).toEqual([{ type: 'label', text: '', role: 'muted' }])
+  expect(footer?.menu).toEqual({ type: 'use', name: 'sidebar.session-menu' })
+  expect(declaration.fragments?.map((fragment) => fragment.name)).toEqual([
+    'commands.expand-space',
+    'commands.collapse-space',
+  ])
+})
+
+test('focus changes reveal a collapsed destination while refreshes respect manual collapse', () => {
+  const collapsed = new Set(['w', 'other'])
+  expect(expandFocusedDestination(entities, undefined, collapsed).expanded).toBe(false)
+  expect(expandFocusedDestination(entities, 't', collapsed).expanded).toBe(false)
+  expect(collapsed.has('w')).toBe(true)
+  expect(expandFocusedDestination(entities, 'old-tab', collapsed).expanded).toBe(true)
+  expect([...collapsed]).toEqual(['other'])
+  collapsed.add('w')
+  expect(expandFocusedDestination(entities, 't', collapsed).expanded).toBe(false)
+  expect(collapsed.has('w')).toBe(true)
+})
+
+test('expand and collapse commands address chosen spaces without requiring focused or expanded rows', () => {
+  const space = entities.find((entity) => entity.kind === 'workspace')
+  if (!space) throw new Error('Missing fixture space')
+  const source = [
+    ...entities,
+    { ...space, id: 'workspace:other', workspaceId: 'other', focused: false },
+  ]
+  const declaration = declareTree('host', source, new Set(['other']))
+  for (const [name, action] of [
+    ['commands.expand-space', 'expand-workspace'],
+    ['commands.collapse-space', 'collapse-workspace'],
+  ]) {
+    const tree = declaration.fragments?.find((fragment) => fragment.name === name)?.tree
+    if (tree?.type !== 'column') throw new Error('Missing workspace choices')
+    const choices = tree.children.filter((node) => node.type === 'row')
+    expect(choices.map((node) => node.context?.workspace_id)).toEqual(['w', 'other'])
+    expect(choices.map((node) => node.action)).toEqual([action, action])
+    expect(choices[1]?.children[0]).toEqual({
+      type: 'label',
+      text: 'Workspace · other',
+      role: 'label',
+    })
+  }
+  expect(source.find((entity) => entity.workspaceId === 'other')?.focused).toBe(false)
+  const empty = declareTree('host', [], new Set()).fragments?.[0]?.tree
+  expect(empty).toEqual({
+    type: 'column',
+    children: [{ type: 'label', text: 'No spaces available', role: 'muted' }],
+  })
+})
+
+test('reordered snapshot declares moved tabs first while public tab numbers remain stable', () => {
+  const source = {
+    type: 'session_snapshot',
+    snapshot: {
+      workspaces: [
+        { workspace_id: 'w', label: 'Space', number: 1, focused: true, agent_status: 'idle' },
+      ],
+      tabs: [
+        {
+          workspace_id: 'w',
+          tab_id: 'second',
+          label: 'Second',
+          number: 2,
+          focused: false,
+          agent_status: 'idle',
+        },
+        {
+          workspace_id: 'w',
+          tab_id: 'first',
+          label: 'First',
+          number: 1,
+          focused: true,
+          agent_status: 'idle',
+        },
+      ],
+      panes: [],
+    },
+  }
+  const rows = snapshotRows(source)
+  // Collections may enumerate retained identities rather than their latest positions.
+  const tree = projectTree([...rows].reverse(), new Set())
+  expect(
+    tree.children.filter((row) => row.action === 'focus-tab').map((row) => row.children[1]),
+  ).toEqual([
+    { type: 'label', text: ' Second', role: 'label' },
+    { type: 'label', text: ' First', role: 'label' },
+  ])
+  expect(rows.filter((row) => row.kind === 'tab').map((row) => row.number)).toEqual([2, 1])
 })

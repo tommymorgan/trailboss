@@ -1,10 +1,11 @@
-import { createHerdrStore, type EntityRow } from '@herdr/store'
+import { hostname } from 'node:os'
+import { createTrailbossStore, type EntityRow } from '@trailboss/store'
 import { z } from 'zod'
-import { projectTree } from './project'
+import { declareTree, sessionFooter } from './project'
 import { flex, label, row, type Widget, WidgetDeclaration, when } from './widgets'
 
 export function declareStock(entities: EntityRow[]) {
-  const tree = projectTree(entities, new Set())
+  const tree = declareTree(hostname(), entities, new Set()).zones[0].tree
   const tabs = entities.filter((entity) => entity.kind === 'tab')
   const fallback: Widget = {
     type: 'column',
@@ -12,30 +13,38 @@ export function declareStock(entities: EntityRow[]) {
       const tabId =
         item.context?.tab_id ??
         tabs.find((tab) => tab.workspaceId === item.context?.workspace_id)?.tabId
-      return row(item.children, tabId ? 'host:focus' : undefined, {
-        ...item.context,
-        ...(tabId ? { tab_id: tabId } : {}),
-      })
+      return row(
+        item.children,
+        tabId ? 'host:focus' : undefined,
+        {
+          ...item.context,
+          ...(tabId ? { tab_id: tabId } : {}),
+        },
+        item.menu,
+      )
     }),
   }
   const sidebar: Widget = {
     type: 'column',
     children: [
-      row([label(' herdr · stock', 'muted')]),
       flex(1, { type: 'zone', zone: 'list', fallback }),
-      { type: 'zone', zone: 'footer', fallback: row([label(' + New tab ')], 'host:new') },
-      { type: 'zone', zone: 'footer_right', fallback: row([label(' Menu ')], 'host:menu') },
+      { type: 'zone', zone: 'footer', fallback: sessionFooter() },
+      { type: 'zone', zone: 'footer_right' },
+      when('new_tab', {
+        type: 'column',
+        children: [
+          row([label(' New tab ')]),
+          row([label(' Name: ')]),
+          row([label(' ['), { type: 'input' }, label('] ')]),
+          row([label(' Type, then Enter ')]),
+          row([label(' Create ')], 'host:create'),
+          row([label(' Cancel ')], 'host:cancel'),
+        ],
+      }),
+      when('rename_space', renameModal('space')),
+      when('rename_tab', renameModal('tab')),
     ],
   }
-  const focusedWorkspace = entities.find((entity) => entity.kind === 'workspace' && entity.focused)
-  const tabStrip = tabs
-    .filter((tab) => tab.workspaceId === focusedWorkspace?.workspaceId)
-    .map((tab) =>
-      row([label(` ${tab.label} `)], 'host:focus', {
-        workspace_id: tab.workspaceId,
-        ...(tab.tabId ? { tab_id: tab.tabId } : {}),
-      }),
-    )
   return WidgetDeclaration.parse({
     herdr: 'widget_tree',
     version: 1,
@@ -47,25 +56,7 @@ export function declareStock(entities: EntityRow[]) {
         flex(3, {
           type: 'column',
           children: [
-            tabStrip.length ? row(tabStrip) : { type: 'spacer', size: 1 },
             when('no_pane', row([label(' No pane yet — choose New tab ')])),
-            when('new_tab', {
-              type: 'column',
-              children: [
-                row([label(' New tab ')]),
-                row([label(' Name: '), { type: 'tab_name' }]),
-                row([label(' Create ')], 'host:create'),
-                row([label(' Cancel ')], 'host:cancel'),
-              ],
-            }),
-            when('menu', {
-              type: 'column',
-              children: [
-                row([label(' Session menu ')]),
-                row([label(' New tab ')], 'host:new'),
-                row([label(' Close menu ')], 'host:cancel'),
-              ],
-            }),
             flex(1, when('has_pane', { type: 'surface' })),
           ],
         }),
@@ -74,9 +65,27 @@ export function declareStock(entities: EntityRow[]) {
   })
 }
 
+function renameModal(kind: 'space' | 'tab'): Widget {
+  return {
+    type: 'modal',
+    child: {
+      type: 'column',
+      children: [
+        row([label(` Rename ${kind} `, 'title')]),
+        { type: 'spacer', size: 1 },
+        row([label(' Name: ')]),
+        row([label(' ['), { type: 'input' }, label('] ')]),
+        { type: 'spacer', size: 1 },
+        row([label(' [ Save ] ')], 'host:create'),
+        row([label(' [ Cancel ] ')], 'host:cancel'),
+      ],
+    },
+  }
+}
+
 if (import.meta.main) {
   const socket = z.string().min(1).parse(process.env.HERDR_SOCKET_PATH)
-  const store = createHerdrStore(socket)
+  const store = createTrailbossStore(socket)
   let previous = ''
   function emit() {
     const next = JSON.stringify(declareStock(store.entities.toArray))

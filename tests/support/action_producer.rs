@@ -62,18 +62,23 @@ child.kill(); await child.exited;
         );
         std::fs::write(plugin.join("observe.ts"), source).unwrap();
         let manifest =
-            std::fs::read_to_string(format!("{root}/plugins/agent-tree/herdr-plugin.toml"))
+            std::fs::read_to_string(format!("{root}/plugins/agent-tree/trailboss-plugin.toml"))
                 .unwrap()
                 .replace("tommymorgan.agent-tree", "fixture.observed-focus")
                 .replace(
                     r#"command = ["bun", "agent_tree.ts", "--watch"]"#,
                     r#"command = ["bun", "observe.ts"]"#,
                 );
-        std::fs::write(plugin.join("herdr-plugin.toml"), manifest).unwrap();
+        std::fs::write(plugin.join("trailboss-plugin.toml"), manifest).unwrap();
         core.request("plugin.link", json!({"path":plugin,"enabled":true}));
         let mut observer = core.attach();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while observer.boot_id.is_empty() {
+        while observer.boot_id.is_empty()
+            || observer
+                .declarations
+                .as_ref()
+                .is_none_or(|trees| !trees.iter().any(|(id, _)| id == "fixture.observed-focus"))
+        {
             observer.receive().unwrap();
             assert!(Instant::now() < deadline, "Core boot identity missing");
         }
@@ -178,7 +183,10 @@ child.kill(); await child.exited;
                         started["socket"],
                         self.core
                             .home
-                            .join(format!("herdr-fork/sessions/{}/herdr.sock", self.core.name))
+                            .join(format!(
+                                "trailboss/sessions/{}/trailboss.sock",
+                                self.core.name
+                            ))
                             .to_str()
                             .unwrap()
                     );

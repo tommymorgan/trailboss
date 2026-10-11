@@ -286,7 +286,7 @@ struct KittyVirtualPlacementSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct KittyVirtualCell {
     x: u16,
-    y: u16,
+    y: u32,
     image_id_low: u32,
     image_id_high: Option<u32>,
     placement_id: Option<u32>,
@@ -297,7 +297,7 @@ struct KittyVirtualCell {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct KittyVirtualRun {
     x: u16,
-    y: u16,
+    y: u32,
     image_id_low: u32,
     image_id_high: Option<u32>,
     placement_id: Option<u32>,
@@ -883,7 +883,7 @@ impl Terminal {
         };
         let userdata = (&mut *terminal.callback_state as *mut TerminalCallbackState).cast();
         let glyph_protocol = false;
-        // libghostty enables image storage by default; Herdr opts in explicitly.
+        // libghostty enables image storage by default; Trailboss opts in explicitly.
         let kitty_storage_limit: u64 = 0;
         let terminfo_name = ffi::GhosttyString {
             ptr: TERM.as_ptr().cast(),
@@ -1351,14 +1351,8 @@ impl Terminal {
     fn viewport_graphemes_and_style(&self, x: u16, y: u32) -> Result<(Vec<u32>, CellStyle), Error> {
         let grid_ref = self.grid_ref(ghostty_viewport_point(x, y))?;
         let graphemes = grid_ref_graphemes(&grid_ref)?;
-        let mut style = ffi::GhosttyStyle {
-            size: mem::size_of::<ffi::GhosttyStyle>(),
-            ..Default::default()
-        };
-        unsafe {
-            ffi::ghostty_grid_ref_style(&grid_ref, &mut style).into_result()?;
-        }
-        Ok((graphemes, style.into()))
+        let style = grid_ref_style(&grid_ref, grid_ref_cell(&grid_ref)?)?;
+        Ok((graphemes, style))
     }
 
     pub fn viewport_hyperlink_uri(&self, x: u16, y: u32) -> Result<Option<String>, Error> {
@@ -1751,6 +1745,10 @@ impl Terminal {
 
     pub fn rows(&self) -> Result<u16, Error> {
         self.get_u16(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_ROWS)
+    }
+
+    pub fn cursor_x(&self) -> Result<u16, Error> {
+        self.get_u16(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_CURSOR_X)
     }
 
     pub fn cursor_y(&self) -> Result<u16, Error> {
@@ -2187,16 +2185,15 @@ impl Terminal {
         let cell_width = (self.width_px()? / u32::from(viewport_cols)).max(1);
         let cell_height = (self.height_px()? / u32::from(viewport_rows)).max(1);
         let mut runs = Vec::new();
-        for y in 0..viewport_rows {
+        for y in 0..u32::from(viewport_rows) {
             let mut current: Option<KittyVirtualRun> = None;
-            for x in 0..viewport_cols {
-                let (graphemes, style) = self.viewport_graphemes_and_style(x, u32::from(y))?;
-                let cell = kitty_virtual_cell(x, y, &graphemes, style);
+            let mut visit = |x, graphemes: &[u32], style| {
+                let cell = kitty_virtual_cell(x, y, graphemes, style);
                 match cell {
                     Some(cell) => {
                         if let Some(run) = current.as_mut() {
                             if run.append(cell) {
-                                continue;
+                                return;
                             }
                             runs.push(*run);
                         }
@@ -2208,6 +2205,10 @@ impl Terminal {
                         }
                     }
                 }
+            };
+            for x in 0..viewport_cols {
+                let (graphemes, style) = self.viewport_graphemes_and_style(x, y)?;
+                visit(x, &graphemes, style);
             }
             if let Some(run) = current {
                 runs.push(run);
@@ -2358,29 +2359,40 @@ fn grid_ref_graphemes_into(
     buffer: &mut Vec<u32>,
 ) -> Result<(), Error> {
     let mut required = 0usize;
-    let result =
-        unsafe { ffi::ghostty_grid_ref_graphemes(grid_ref, ptr::null_mut(), 0, &mut required) };
+    let result = unsafe {
+        ffi::ghostty_grid_ref_graphemes(grid_ref, buffer.as_mut_ptr(), buffer.len(), &mut required)
+    };
     if result != ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE {
         result.into_result()?;
-    }
-    buffer.resize(required, 0);
-    if required == 0 {
-        return Ok(());
-    }
-    unsafe {
-        ffi::ghostty_grid_ref_graphemes(grid_ref, buffer.as_mut_ptr(), buffer.len(), &mut required)
+    } else {
+        buffer.resize(required, 0);
+        unsafe {
+            ffi::ghostty_grid_ref_graphemes(
+                grid_ref,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut required,
+            )
             .into_result()?;
+        }
     }
     buffer.truncate(required);
     Ok(())
 }
 
-fn grid_ref_wide(grid_ref: &ffi::GhosttyGridRef) -> Result<CellWide, Error> {
+fn grid_ref_cell(grid_ref: &ffi::GhosttyGridRef) -> Result<ffi::GhosttyCell, Error> {
     let mut raw = ffi::GhosttyCell::default();
     unsafe {
         ffi::ghostty_grid_ref_cell(grid_ref, &mut raw).into_result()?;
     }
+    Ok(raw)
+}
 
+fn grid_ref_wide(grid_ref: &ffi::GhosttyGridRef) -> Result<CellWide, Error> {
+    cell_wide(grid_ref_cell(grid_ref)?)
+}
+
+fn cell_wide(raw: ffi::GhosttyCell) -> Result<CellWide, Error> {
     let mut wide = ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_NARROW;
     unsafe {
         ffi::ghostty_cell_get(
@@ -2391,6 +2403,63 @@ fn grid_ref_wide(grid_ref: &ffi::GhosttyGridRef) -> Result<CellWide, Error> {
         .into_result()?;
     }
     Ok(CellWide::from_raw(wide))
+}
+
+fn grid_ref_style(
+    grid_ref: &ffi::GhosttyGridRef,
+    raw: ffi::GhosttyCell,
+) -> Result<CellStyle, Error> {
+    let mut style = ffi::GhosttyStyle {
+        size: mem::size_of::<ffi::GhosttyStyle>(),
+        ..Default::default()
+    };
+    unsafe {
+        ffi::ghostty_grid_ref_style(grid_ref, &mut style).into_result()?;
+    }
+    let mut style = CellStyle::from(style);
+    if let Some(background) = cell_content_bg_color(raw)? {
+        style.bg_color = Some(background);
+    }
+    Ok(style)
+}
+
+fn cell_content_bg_color(raw: ffi::GhosttyCell) -> Result<Option<CellColor>, Error> {
+    let mut tag = ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_CODEPOINT;
+    unsafe {
+        ffi::ghostty_cell_get(
+            raw,
+            ffi::GhosttyCellData_GHOSTTY_CELL_DATA_CONTENT_TAG,
+            (&mut tag as *mut ffi::GhosttyCellContentTag).cast(),
+        )
+        .into_result()?;
+    }
+    match tag {
+        ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE => {
+            let mut index = 0u8;
+            unsafe {
+                ffi::ghostty_cell_get(
+                    raw,
+                    ffi::GhosttyCellData_GHOSTTY_CELL_DATA_COLOR_PALETTE,
+                    (&mut index as *mut u8).cast(),
+                )
+                .into_result()?;
+            }
+            Ok(Some(CellColor::Palette(index)))
+        }
+        ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_RGB => {
+            let mut color = ffi::GhosttyColorRgb::default();
+            unsafe {
+                ffi::ghostty_cell_get(
+                    raw,
+                    ffi::GhosttyCellData_GHOSTTY_CELL_DATA_COLOR_RGB,
+                    (&mut color as *mut ffi::GhosttyColorRgb).cast(),
+                )
+                .into_result()?;
+            }
+            Ok(Some(CellColor::Rgb(color.into())))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn grid_ref_wrap_state(grid_ref: &ffi::GhosttyGridRef) -> Result<(bool, bool), Error> {
@@ -2510,7 +2579,7 @@ fn find_virtual_placement_spec(
 
 fn kitty_virtual_cell(
     x: u16,
-    y: u16,
+    y: u32,
     graphemes: &[u32],
     style: CellStyle,
 ) -> Option<KittyVirtualCell> {
@@ -2558,7 +2627,7 @@ fn kitty_placeholder_color_to_id(color: CellColor) -> u32 {
 
 fn kitty_placeholder_diacritic_index(codepoint: u32) -> Option<u32> {
     let map = KITTY_PLACEHOLDER_DIACRITICS.get_or_init(|| {
-        // Reuse Ghostty's vendored table so Herdr decodes the same placeholder
+        // Reuse Ghostty's vendored table so Trailboss decodes the same placeholder
         // row/column diacritics that libghostty accepts.
         let source =
             include_str!("../../../vendor/libghostty-vt/src/terminal/kitty/graphics_unicode.zig");
@@ -2638,7 +2707,7 @@ fn kitty_virtual_placement_geometry(
             grid_cols: visible_cols,
             grid_rows: visible_rows,
             viewport_col: i32::from(run.x),
-            viewport_row: i32::from(run.y),
+            viewport_row: i32::try_from(run.y).ok()?,
             source_x,
             source_y,
             source_width,
@@ -2858,27 +2927,60 @@ fn kitty_image_fingerprint(
 }
 
 fn grid_ref_hyperlink_uri(grid_ref: &ffi::GhosttyGridRef) -> Result<Option<String>, Error> {
+    let mut buffer = Vec::new();
+    let mut lossy = String::new();
+    Ok(grid_ref_hyperlink_uri_into(grid_ref, &mut buffer, &mut lossy)?.map(str::to_owned))
+}
+
+fn grid_ref_hyperlink_uri_into<'a>(
+    grid_ref: &ffi::GhosttyGridRef,
+    buffer: &'a mut Vec<u8>,
+    lossy: &'a mut String,
+) -> Result<Option<&'a str>, Error> {
     let mut required = 0usize;
-    let result =
-        unsafe { ffi::ghostty_grid_ref_hyperlink_uri(grid_ref, ptr::null_mut(), 0, &mut required) };
-    if result != ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE {
-        result.into_result()?;
-    }
-    if required == 0 {
-        return Ok(None);
-    }
-    let mut buffer = vec![0u8; required];
-    unsafe {
+    let result = unsafe {
         ffi::ghostty_grid_ref_hyperlink_uri(
             grid_ref,
             buffer.as_mut_ptr(),
             buffer.len(),
             &mut required,
         )
-        .into_result()?;
+    };
+    if result != ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE {
+        result.into_result()?;
+    }
+    if required == 0 {
+        buffer.clear();
+        return Ok(None);
+    }
+    if result == ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE {
+        buffer.resize(required, 0);
+        unsafe {
+            ffi::ghostty_grid_ref_hyperlink_uri(
+                grid_ref,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut required,
+            )
+            .into_result()?;
+        }
     }
     buffer.truncate(required);
-    Ok(Some(String::from_utf8_lossy(&buffer).into_owned()))
+    match std::str::from_utf8(buffer) {
+        Ok(uri) => Ok(Some(uri)),
+        Err(_) => {
+            // Preserve the owned API's replacement semantics without allocating
+            // an owned lossy string for each linked cell.
+            lossy.clear();
+            for chunk in buffer.utf8_chunks() {
+                lossy.push_str(chunk.valid());
+                if !chunk.invalid().is_empty() {
+                    lossy.push('\u{fffd}');
+                }
+            }
+            Ok(Some(lossy.as_str()))
+        }
+    }
 }
 
 pub struct RenderState {
@@ -3603,44 +3705,7 @@ impl<'a> RowCellIter<'a> {
     }
 
     pub fn content_bg_color(&self) -> Result<Option<CellColor>, Error> {
-        let raw = self.raw_cell()?;
-        let mut tag = ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_CODEPOINT;
-        unsafe {
-            ffi::ghostty_cell_get(
-                raw,
-                ffi::GhosttyCellData_GHOSTTY_CELL_DATA_CONTENT_TAG,
-                (&mut tag as *mut ffi::GhosttyCellContentTag).cast(),
-            )
-            .into_result()?;
-        }
-
-        match tag {
-            ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE => {
-                let mut index = 0u8;
-                unsafe {
-                    ffi::ghostty_cell_get(
-                        raw,
-                        ffi::GhosttyCellData_GHOSTTY_CELL_DATA_COLOR_PALETTE,
-                        (&mut index as *mut u8).cast(),
-                    )
-                    .into_result()?;
-                }
-                Ok(Some(CellColor::Palette(index)))
-            }
-            ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_RGB => {
-                let mut color = ffi::GhosttyColorRgb::default();
-                unsafe {
-                    ffi::ghostty_cell_get(
-                        raw,
-                        ffi::GhosttyCellData_GHOSTTY_CELL_DATA_COLOR_RGB,
-                        (&mut color as *mut ffi::GhosttyColorRgb).cast(),
-                    )
-                    .into_result()?;
-                }
-                Ok(Some(CellColor::Rgb(color.into())))
-            }
-            _ => Ok(None),
-        }
+        cell_content_bg_color(self.raw_cell()?)
     }
 
     pub fn fg_color(&self) -> Result<Option<RgbColor>, Error> {
@@ -3901,7 +3966,7 @@ mod tests {
     fn kitty_file_image_survives_source_mutation_and_unlink() {
         use base64::Engine as _;
         let path = std::path::PathBuf::from(format!(
-            "/var/tmp/herdr-kitty-source-{}-{}",
+            "/var/tmp/trailboss-kitty-source-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -4185,7 +4250,7 @@ mod tests {
         use base64::Engine;
 
         let dir = std::env::temp_dir().join(format!(
-            "herdr-kitty-file-medium-test-{}",
+            "trailboss-kitty-file-medium-test-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -4222,7 +4287,7 @@ mod tests {
         use base64::Engine as _;
 
         let dir = std::env::temp_dir().join(format!(
-            "herdr-kitty-file-upload-test-{}",
+            "trailboss-kitty-file-upload-test-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -4321,12 +4386,15 @@ mod tests {
             .set_write_pty_callback(move |bytes| sink.lock().unwrap().extend_from_slice(bytes))
             .unwrap();
 
-        terminal.write(b"\x1b[6n\x1b]7;file:///tmp/herdr\x07");
+        terminal.write(b"\x1b[6n\x1b]7;file:///tmp/trailboss\x07");
 
         let output = responses.lock().unwrap().clone();
         assert!(!output.is_empty());
         assert!(String::from_utf8_lossy(&output).contains("R"));
-        assert_eq!(terminal.take_pwd_changes(), [b"file:///tmp/herdr".to_vec()]);
+        assert_eq!(
+            terminal.take_pwd_changes(),
+            [b"file:///tmp/trailboss".to_vec()]
+        );
     }
 
     #[test]

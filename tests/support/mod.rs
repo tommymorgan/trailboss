@@ -1,13 +1,13 @@
-use herdr_fork::Client;
-use herdr_runtime::{
-    api_client::{ApiClient, ConnectionTarget},
-    api_schema::Request,
-};
 use serde_json::{json, Value};
 use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+use trailboss::Client;
+use trailboss_runtime::{
+    api_client::{ApiClient, ConnectionTarget},
+    api_schema::Request,
 };
 
 pub struct Core {
@@ -50,7 +50,7 @@ pub const HOMES: &[&str] = &[
     "XDG_RUNTIME_DIR",
 ];
 pub fn executable() -> PathBuf {
-    option_env!("CARGO_BIN_EXE_herdr-fork")
+    option_env!("CARGO_BIN_EXE_trailboss")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             std::env::current_exe()
@@ -59,7 +59,7 @@ pub fn executable() -> PathBuf {
                 .unwrap()
                 .parent()
                 .unwrap()
-                .join("herdr-fork")
+                .join("trailboss")
         })
 }
 impl Core {
@@ -81,21 +81,25 @@ impl Core {
         for key in HOMES {
             command.env(key, &home);
         }
-        for (key, _) in
-            std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("HERDR_"))
-        {
+        for (key, _) in std::env::vars_os().filter(|(key, _)| {
+            let name = key.to_string_lossy();
+            name.starts_with("TRAILBOSS_") || name.starts_with("HERDR_")
+        }) {
             command.env_remove(key);
+        }
+        if std::env::var_os("TRAILBOSS_LATENCY_CAPTURE").is_some() {
+            command.env("TRAILBOSS_RENDER_PROF_TRACE", home.join("core-timing.log"));
         }
         command
             .env("SHELL", "/bin/sh")
-            .env("HERDR_CONFIG_PATH", home.join("config.toml"))
-            .env("HERDR_STARTUP_CWD", &home)
+            .env("TRAILBOSS_CONFIG_PATH", home.join("config.toml"))
+            .env("TRAILBOSS_STARTUP_CWD", &home)
             .current_dir(&home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
         let child = command.spawn().unwrap();
-        let socket = home.join(format!("herdr-fork/sessions/{name}/herdr.sock"));
+        let socket = home.join(format!("trailboss/sessions/{name}/trailboss.sock"));
         let api = ApiClient::for_target(ConnectionTarget::SocketPath(socket.clone()));
         let mut core = Self {
             child,
@@ -111,7 +115,7 @@ impl Core {
         while !core
             .home
             .join(format!(
-                "herdr-fork/sessions/{}/herdr-client.sock",
+                "trailboss/sessions/{}/trailboss-client.sock",
                 core.name
             ))
             .exists()
@@ -143,7 +147,7 @@ impl Core {
         }
         let saved = std::fs::read(
             self.home
-                .join(format!("herdr-fork/sessions/{}/session.json", self.name)),
+                .join(format!("trailboss/sessions/{}/session.json", self.name)),
         )
         .expect("Core stop did not retain its actual persistence");
         let mut replacement = Self::launch(self.home.clone(), self.name.clone());
@@ -169,7 +173,7 @@ impl Core {
     pub fn attach(&self) -> Client {
         Client::attach(
             &self.home.join(format!(
-                "herdr-fork/sessions/{}/herdr-client.sock",
+                "trailboss/sessions/{}/trailboss-client.sock",
                 self.name
             )),
             80,

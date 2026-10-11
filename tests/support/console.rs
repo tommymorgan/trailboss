@@ -18,12 +18,13 @@ impl Console {
         for key in HOMES {
             command.env(key, &core.home);
         }
-        for (key, _) in
-            std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("HERDR_"))
-        {
+        for (key, _) in std::env::vars_os().filter(|(key, _)| {
+            let name = key.to_string_lossy();
+            name.starts_with("TRAILBOSS_") || name.starts_with("HERDR_")
+        }) {
             command.env_remove(key);
         }
-        command.env("HERDR_CONFIG_PATH", core.home.join("config.toml"));
+        command.env("TRAILBOSS_CONFIG_PATH", core.home.join("config.toml"));
         command.env("TERM", "xterm-256color");
         command.env("SHELL", "/bin/sh");
         command.env_remove("NO_COLOR");
@@ -123,7 +124,7 @@ impl Console {
 }
 impl Drop for Console {
     fn drop(&mut self) {
-        let _ = self.writer.write_all(b"\x11");
+        let _ = self.writer.write_all(b"\x02q");
         let _ = self.writer.flush();
         let deadline = Instant::now() + Duration::from_secs(2);
         while self.child.try_wait().is_ok_and(|status| status.is_none())

@@ -482,11 +482,11 @@ typedef struct {
   uint32_t grid_cols;
   /** Number of grid rows the placement occupies. */
   uint32_t grid_rows;
-  /** Viewport-relative column (may be negative for partially visible placements). */
+  /** Column relative to the viewport or explicit source range (may be negative). */
   int32_t viewport_col;
-  /** Viewport-relative row (may be negative for partially visible placements). */
+  /** Row relative to the viewport or explicit source range (may be negative). */
   int32_t viewport_row;
-  /** False when the placement is fully off-screen or virtual. */
+  /** Whether the placement intersects the viewport or explicit source range. */
   bool viewport_visible;
   /** Resolved source rectangle x origin in pixels. */
   uint32_t source_x;
@@ -873,6 +873,7 @@ GHOSTTY_API GhosttyResult ghostty_kitty_graphics_placement_render_info(
     GhosttyKittyGraphicsImage image,
     GhosttyTerminal terminal,
     GhosttyKittyGraphicsPlacementRenderInfo* out_info);
+
 
 /** @} */
 

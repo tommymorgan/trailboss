@@ -1,7 +1,7 @@
 [
   {"id":"contract:ping","method":"ping","params":{}},
   {"id":"contract:server.stop","method":"server.stop","params":{}},
-  {"id":"contract:server.live_handoff","method":"server.live_handoff","params":{"import_exe":"/nonexistent/herdr-contract-import"}},
+  {"id":"contract:server.live_handoff","method":"server.live_handoff","params":{"import_exe":"/nonexistent/trailboss-contract-import"}},
   {"id":"contract:server.reload_config","method":"server.reload_config","params":{}},
   {"id":"contract:server.ssh_agent.register","method":"server.ssh_agent.register","params":{"socket_path":"missing"}},
   {"id":"contract:server.agent_manifests","method":"server.agent_manifests","params":{}},
@@ -90,7 +90,7 @@
   {"id":"contract:integration.list","method":"integration.list","params":{"target":"omp"}},
   {"id":"contract:integration.install","method":"integration.install","params":{"target":"omp"}},
   {"id":"contract:integration.uninstall","method":"integration.uninstall","params":{"target":"omp"}},
-  {"id":"contract:plugin.link","method":"plugin.link","params":{"path":"/nonexistent/herdr-contract-plugin"}},
+  {"id":"contract:plugin.link","method":"plugin.link","params":{"path":"/nonexistent/trailboss-contract-plugin"}},
   {"id":"contract:plugin.list","method":"plugin.list","params":{}},
   {"id":"contract:plugin.unlink","method":"plugin.unlink","params":{"plugin_id":"missing"}},
   {"id":"contract:plugin.enable","method":"plugin.enable","params":{"plugin_id":"missing"}},
