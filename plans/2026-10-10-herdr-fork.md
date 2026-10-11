@@ -100,11 +100,11 @@ Scenario Outline: Refresh the tree from session events
 ### Task 3.1: Stock UI uses the public widget declaration path
 <!-- estimate: ~300 reviewable lines | feature-files: features/declarations.feature | demoable: yes | confidence: low -->
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/declarations.feature::Stock UI uses the public widget declaration path
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: Stock UI uses the public widget declaration path
   Given the stock UI plugin is enabled in the <state> state
   When the client displays the application using the plugin’s public widget declarations

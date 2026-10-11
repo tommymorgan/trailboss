@@ -7,10 +7,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use herdr_fork::{
-    terminal::{self, Layout},
-    Client,
-};
+use herdr_fork::{terminal, Client};
 use std::{
     io,
     process::{Command, Stdio},
@@ -64,15 +61,15 @@ fn main() -> io::Result<()> {
         ));
     }
     let (cols, rows) = crossterm::terminal::size()?;
-    let mut layout = Layout::new(cols, rows)?;
+    let mut viewport = terminal::Rect::viewport(cols, rows);
     let path = herdr_runtime::session::client_socket_path_for(
         herdr_runtime::session::active_name().as_deref(),
     );
-    let mut client = match Client::attach(&path, layout.working.width, layout.working.height) {
-        Ok(c) => c,
-        Err(e)
+    let mut client = match Client::attach(&path, cols, rows) {
+        Ok(client) => client,
+        Err(error)
             if matches!(
-                e.kind(),
+                error.kind(),
                 io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
             ) =>
         {
@@ -89,8 +86,8 @@ fn main() -> io::Result<()> {
                 .spawn()?;
             let deadline = Instant::now() + Duration::from_secs(15);
             loop {
-                if let Ok(c) = Client::attach(&path, layout.working.width, layout.working.height) {
-                    break c;
+                if let Ok(client) = Client::attach(&path, cols, rows) {
+                    break client;
                 }
                 if let Some(status) = child.try_wait()? {
                     return Err(io::Error::other(format!("core exited: {status}")));
@@ -103,56 +100,56 @@ fn main() -> io::Result<()> {
                 std::thread::sleep(Duration::from_millis(20));
             }
         }
-        Err(e) => return Err(e),
+        Err(error) => return Err(error),
     };
-    while client.primary.is_none() || client.focused_pane_id.is_none() {
+    // Attaching without a pane is valid: a declaration can offer the first tab.
+    while client.boot_id.is_empty() {
         client.receive()?;
     }
+    enable_default_producer()?;
     let mut input = client.input()?;
     client.blocking()?;
     enable_raw_mode()?;
     let _terminal = Terminal;
     execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
-    let mut surface = client
-        .primary
-        .take()
-        .ok_or_else(|| io::Error::other("missing Surface"))?;
+    let mut core = herdr_fork::core::Core::default();
+    core.update_session(
+        client.workspace_id.clone(),
+        client.focused_tab_id.clone(),
+        client.focused_pane_id.is_some(),
+    );
+    let mut surface = client.primary.take();
     let mut declarations = client.declarations.take().unwrap_or_default();
-    let mut focused_tab = client.focused_tab_id.clone();
     let mut boot_id = client.boot_id.clone();
-    terminal::draw_frame(
-        &mut io::stdout(),
-        &surface,
-        &declarations,
-        focused_tab.as_deref(),
-        &layout,
-    )?;
     let (tx, rx) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let mut last_focus = client.focused_tab_id.clone();
-        let mut last_pane = client.focused_pane_id.clone();
+        let mut last_focus = (
+            client.workspace_id.clone(),
+            client.focused_tab_id.clone(),
+            client.focused_pane_id.clone(),
+        );
         loop {
-            if let Err(e) = client.receive() {
-                let _ = tx.send(Err(e));
+            if let Err(error) = client.receive() {
+                let _ = tx.send(Err(error));
                 break;
             }
-            let focus_update =
-                if last_focus != client.focused_tab_id || last_pane != client.focused_pane_id {
-                    last_focus.clone_from(&client.focused_tab_id);
-                    last_pane.clone_from(&client.focused_pane_id);
-                    Some((
-                        client.focused_tab_id.clone(),
-                        client.boot_id.clone(),
-                        client.focused_pane_id.clone(),
-                    ))
-                } else {
-                    None
-                };
+            let session = (
+                client.workspace_id.clone(),
+                client.focused_tab_id.clone(),
+                client.focused_pane_id.clone(),
+            );
+            let focus_update = if session != last_focus {
+                last_focus.clone_from(&session);
+                Some(session)
+            } else {
+                None
+            };
             if client.primary.is_some() || client.declarations.is_some() || focus_update.is_some() {
                 let update = (
                     client.primary.take(),
                     client.declarations.take(),
                     focus_update,
+                    client.boot_id.clone(),
                 );
                 if tx.send(Ok(update)).is_err() {
                     break;
@@ -160,80 +157,123 @@ fn main() -> io::Result<()> {
             }
         }
     });
+    let mut dirty = true;
+    let mut pane_size = (cols, rows);
     loop {
         while let Ok(update) = rx.try_recv() {
-            let (next_surface, next_declarations, focus_update) = update?;
+            let (next_surface, next_declarations, session, next_boot) = update?;
             if let Some(next) = next_surface {
-                surface = next;
+                surface = Some(next);
             }
             if let Some(next) = next_declarations {
                 declarations = next;
             }
-            if let Some((next_focus, next_boot, next_pane)) = focus_update {
-                if let Some(pane) = next_pane {
-                    input.focus_pane_target(&pane);
+            if let Some((workspace, tab, pane)) = session {
+                input.focus_pane_target(pane.as_deref().unwrap_or_default());
+                if surface
+                    .as_ref()
+                    .is_some_and(|s| Some(s.pane_id.as_str()) != pane.as_deref())
+                {
+                    surface = None;
                 }
-                focused_tab = next_focus;
-                boot_id = next_boot;
+                core.update_session(workspace, tab, pane.is_some());
+            }
+            boot_id = next_boot;
+            dirty = true;
+        }
+        if dirty {
+            if let Some(rect) = terminal::surface_rect(&core, &declarations, viewport) {
+                let size = (rect.width, rect.height);
+                if size != pane_size {
+                    input.resize(size.0, size.1)?;
+                    pane_size = size;
+                }
             }
             terminal::draw_frame(
                 &mut io::stdout(),
-                &surface,
+                surface.as_ref(),
                 &declarations,
-                focused_tab.as_deref(),
-                &layout,
+                &core,
+                viewport,
             )?;
+            dirty = false;
         }
-        if event::poll(Duration::from_millis(16))? {
-            match event::read()? {
-                Event::Resize(c, r) => {
-                    layout = Layout::new(c, r)?;
-                    input.resize(layout.working.width, layout.working.height)?;
-                    terminal::draw_frame(
-                        &mut io::stdout(),
-                        &surface,
-                        &declarations,
-                        focused_tab.as_deref(),
-                        &layout,
-                    )?;
-                }
-                Event::Mouse(mouse)
-                    if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-                        && mouse.column < layout.list.width
-                        && mouse.row < layout.list.height =>
-                {
-                    if let Some((plugin, action, context)) =
-                        herdr_fork::sidebar::action_at(&declarations, usize::from(mouse.row))
-                    {
-                        input.invoke(&boot_id, plugin, action, context)?;
-                    }
-                }
-                Event::Key(k) if k.kind != KeyEventKind::Release => {
-                    if k.code == KeyCode::Char('q') && k.modifiers.contains(KeyModifiers::CONTROL) {
-                        input.detach()?;
-                        return Ok(());
-                    }
-                    let text = match k.code {
-                        KeyCode::Char(c)
-                            if k.modifiers.contains(KeyModifiers::CONTROL) && c.is_ascii() =>
-                        {
-                            String::from((c as u8 & 0x1f) as char)
-                        }
-                        KeyCode::Char(c) => c.to_string(),
-                        KeyCode::Enter => "\r".into(),
-                        KeyCode::Backspace => "\x7f".into(),
-                        KeyCode::Tab => "\t".into(),
-                        KeyCode::Esc => "\x1b".into(),
-                        KeyCode::Up => "\x1b[A".into(),
-                        KeyCode::Down => "\x1b[B".into(),
-                        KeyCode::Right => "\x1b[C".into(),
-                        KeyCode::Left => "\x1b[D".into(),
-                        _ => continue,
-                    };
-                    input.type_text(&text)?;
-                }
-                _ => {}
+        if !event::poll(Duration::from_millis(16))? {
+            continue;
+        }
+        match event::read()? {
+            Event::Resize(cols, rows) => {
+                viewport = terminal::Rect::viewport(cols, rows);
+                dirty = true;
             }
+            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
+                if let Some((plugin, action, context)) =
+                    terminal::action_at(&core, &declarations, viewport, mouse.column, mouse.row)
+                {
+                    input.dispatch(&mut core, &boot_id, plugin, action, context)?;
+                    dirty = true;
+                }
+            }
+            Event::Key(key) if key.kind != KeyEventKind::Release => {
+                if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    input.detach()?;
+                    return Ok(());
+                }
+                let text = match key.code {
+                    KeyCode::Char(c)
+                        if key.modifiers.contains(KeyModifiers::CONTROL) && c.is_ascii() =>
+                    {
+                        String::from((c as u8 & 0x1f) as char)
+                    }
+                    KeyCode::Char(c) => c.to_string(),
+                    KeyCode::Enter => "\r".into(),
+                    KeyCode::Backspace => "\x7f".into(),
+                    KeyCode::Tab => "\t".into(),
+                    KeyCode::Esc => "\x1b".into(),
+                    KeyCode::Up => "\x1b[A".into(),
+                    KeyCode::Down => "\x1b[B".into(),
+                    KeyCode::Right => "\x1b[C".into(),
+                    KeyCode::Left => "\x1b[D".into(),
+                    _ => continue,
+                };
+                input.dispatch_text(&mut core, &boot_id, &text)?;
+                dirty = true;
+            }
+            _ => {}
         }
     }
+}
+fn enable_default_producer() -> io::Result<()> {
+    use herdr_runtime::{
+        api_client::{ApiClient, ConnectionTarget},
+        api_schema::Request,
+    };
+    let api = ApiClient::for_target(ConnectionTarget::SocketPath(
+        herdr_runtime::session::active_api_socket_path(),
+    ));
+    let request: Request = serde_json::from_value(
+        serde_json::json!({"id":"stock-registry","method":"plugin.list","params":{}}),
+    )
+    .map_err(io::Error::other)?;
+    let reply = api
+        .request_value_with_timeout(&request, Duration::from_secs(5))
+        .map_err(io::Error::other)?;
+    if reply["result"]["plugins"]
+        .as_array()
+        .is_some_and(|plugins| {
+            plugins
+                .iter()
+                .any(|plugin| plugin["plugin_id"] == "tommymorgan.stock-ui")
+        })
+    {
+        return Ok(());
+    }
+    let request: Request = serde_json::from_value(serde_json::json!({"id":"stock-producer","method":"plugin.link","params":{"path":concat!(env!("CARGO_MANIFEST_DIR"),"/plugins/stock-ui"),"enabled":true}})).map_err(io::Error::other)?;
+    let reply = api
+        .request_value_with_timeout(&request, Duration::from_secs(5))
+        .map_err(io::Error::other)?;
+    if let Some(error) = reply.get("error") {
+        return Err(io::Error::other(error.to_string()));
+    }
+    Ok(())
 }

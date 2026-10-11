@@ -1,0 +1,12 @@
+id = "tommymorgan.stock-ui"
+name = "Stock UI"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Public application composition, tabs and Core interaction views."
+platforms = ["linux", "macos"]
+
+[[ui]]
+id = "application"
+surface = "sidebar"
+command = ["bun", "../agent-tree/stock.ts"]
+stream = true

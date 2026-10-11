@@ -27,6 +27,16 @@ test('preserves the hostname title as a muted declaration, including empty sessi
   expect(declareTree('junkman', [], new Set())).toEqual({
     herdr: 'widget_tree',
     version: 1,
+    composition: {
+      priority: 0,
+      tree: {
+        type: 'row',
+        children: [
+          { type: 'flex', weight: 1, child: { type: 'zone', zone: 'list' } },
+          { type: 'flex', weight: 3, child: { type: 'surface' } },
+        ],
+      },
+    },
     zones: [
       {
         zone: 'list',

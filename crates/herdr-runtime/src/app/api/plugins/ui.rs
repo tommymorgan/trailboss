@@ -87,6 +87,15 @@ const PLUGIN_UI_STREAM_MAX_BYTES: usize = 64 * 1024;
 const PLUGIN_UI_MAX_STREAMS: usize = 32;
 
 impl App {
+    /// A public application composition can declare the empty-session interaction.
+    /// Legacy shell clients without one retain automatic initial workspace creation.
+    pub(crate) fn has_widget_composition(&self) -> bool {
+        self.state.plugin_ui_dynamic.values().flatten().any(|item| {
+            item.declaration
+                .as_ref()
+                .is_some_and(|declaration| declaration.composition.is_some())
+        })
+    }
     pub(super) fn invalidate_plugin_ui(&mut self, plugin_id: &str) {
         self.plugin_ui_streams.retain(|key, _| key.0 != plugin_id);
         self.state
@@ -442,7 +451,7 @@ impl App {
             return None;
         }
         let forward = self.plugin_ui_streams.values().find_map(|stream| {
-            if stream.running {
+            if stream.running && stream.plugin.plugin_id == plugin.plugin_id {
                 stream.forward.clone()
             } else {
                 None
@@ -738,9 +747,8 @@ fn try_parse_plugin_ui_rows(
                 return None;
             }
             let title = title.chars().take(PLUGIN_UI_TITLE_MAX_CHARS).collect();
-            // `host:` actions are the reserved namespace for client-local
-            // affordances (footer buttons and similar chrome a plugin owns
-            // visually); they are not declared in plugin manifests.
+            // Reserved affordances retain Core-defined semantics; plugins own
+            // their visible placement, not the action implementation.
             let action = row.action.filter(|action| {
                 action.starts_with("host:") || actions.iter().any(|declared| &declared.id == action)
             });

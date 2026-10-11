@@ -35,7 +35,7 @@ pub fn action_at(declarations: &Declarations, row: usize) -> Option<(&str, &str,
     };
     Some((plugin, action, context))
 }
-fn role_color(role: &str) -> Color {
+pub(crate) fn role_color(role: &str) -> Color {
     match role {
         "muted" | "rule" | "status-idle" => Color::DarkGrey,
         "status-working" => Color::Yellow,
@@ -61,73 +61,91 @@ pub fn draw(
         .take(usize::from(rect.height))
         .enumerate()
     {
-        let Node::Row {
-            children, context, ..
-        } = node
-        else {
-            continue;
-        };
-        let focused = context
-            .tab_id
-            .as_deref()
-            .is_some_and(|id| Some(id) == focused_tab);
-        queue!(
+        draw_row(
             out,
-            cursor::MoveTo(rect.x, rect.y + y as u16),
-            SetAttribute(Attribute::Reset),
-            SetBackgroundColor(if focused {
-                Color::DarkBlue
-            } else {
-                Color::Reset
-            })
+            node,
+            Rect {
+                y: rect.y + y as u16,
+                ..rect
+            },
+            focused_tab,
         )?;
-        if focused {
-            queue!(out, SetAttribute(Attribute::Bold))?;
-        }
-        let fixed: usize = children.iter().map(width).sum();
-        let leaders = children
-            .iter()
-            .filter(|node| matches!(node, Node::Leader))
-            .count();
-        let elastic = usize::from(rect.width).saturating_sub(fixed);
-        let mut remaining = usize::from(rect.width);
-        let mut leader_index = 0;
-        for child in children {
-            match child {
-                Node::Label { text, role } => {
-                    queue!(out, SetForegroundColor(role_color(role)))?;
-                    for ch in text.chars() {
-                        let width = ch.width().unwrap_or(0);
-                        if width > remaining {
-                            break;
-                        }
-                        queue!(out, Print(ch))?;
-                        remaining -= width;
+    }
+    out.flush()
+}
+pub(crate) fn draw_row(
+    out: &mut impl Write,
+    node: &Node,
+    rect: Rect,
+    focused_tab: Option<&str>,
+) -> io::Result<()> {
+    let Node::Row {
+        children, context, ..
+    } = node
+    else {
+        return Ok(());
+    };
+    let focused = context
+        .tab_id
+        .as_deref()
+        .is_some_and(|id| Some(id) == focused_tab);
+    queue!(
+        out,
+        cursor::MoveTo(rect.x, rect.y),
+        SetAttribute(Attribute::Reset),
+        SetBackgroundColor(if focused {
+            Color::DarkBlue
+        } else {
+            Color::Reset
+        })
+    )?;
+    if focused {
+        queue!(out, SetAttribute(Attribute::Bold))?;
+    }
+    let fixed: usize = children.iter().map(width).sum();
+    let leaders = children
+        .iter()
+        .filter(|node| matches!(node, Node::Leader))
+        .count();
+    let elastic = usize::from(rect.width).saturating_sub(fixed);
+    let mut remaining = usize::from(rect.width);
+    let mut leader_index = 0;
+    for child in children {
+        match child {
+            Node::Label { text, role } => {
+                queue!(out, SetForegroundColor(role_color(role)))?;
+                for ch in text.chars() {
+                    let width = ch.width().unwrap_or(0);
+                    if width > remaining {
+                        break;
                     }
+                    queue!(out, Print(ch))?;
+                    remaining -= width;
                 }
-                Node::Leader => {
-                    let count = (elastic / leaders + usize::from(leader_index < elastic % leaders))
-                        .min(remaining);
-                    queue!(out, SetForegroundColor(Color::DarkGrey))?;
-                    for _ in 0..count {
-                        queue!(out, Print('·'))?;
-                    }
-                    remaining -= count;
-                    leader_index += 1;
-                }
-                _ => {}
             }
-        }
-        queue!(out, SetForegroundColor(Color::Reset))?;
-        for _ in 0..remaining {
-            queue!(out, Print(' '))?;
+            Node::Leader => {
+                let count = (elastic / leaders + usize::from(leader_index < elastic % leaders))
+                    .min(remaining);
+                queue!(out, SetForegroundColor(Color::DarkGrey))?;
+                for _ in 0..count {
+                    queue!(out, Print('·'))?;
+                }
+                remaining -= count;
+                leader_index += 1;
+            }
+            _ => {}
         }
     }
+    queue!(out, SetForegroundColor(Color::Reset))?;
+    for _ in 0..remaining {
+        queue!(out, Print(' '))?;
+    }
+
     queue!(
         out,
         SetAttribute(Attribute::Reset),
         SetBackgroundColor(Color::Reset),
         SetForegroundColor(Color::Reset)
     )?;
-    out.flush()
+    Ok(())
 }

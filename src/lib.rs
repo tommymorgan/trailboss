@@ -2,6 +2,7 @@ use herdr_runtime::protocol::{
     self, ClientMessage, ClientPaneInputEvent, ClientSurfaceSize, ServerMessage,
 };
 use std::{io, os::unix::net::UnixStream, path::Path};
+pub mod core;
 pub mod sidebar;
 pub mod terminal;
 #[derive(Debug)]
@@ -34,13 +35,7 @@ impl Surface {
         text
     }
 }
-/// Reserved plugin Zones remain distinct from the PTY Surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Zone {
-    List,
-    Footer,
-    FooterRight,
-}
+
 pub struct Client {
     stream: UnixStream,
     raw: Option<protocol::PaneSurfaceFrame>,
@@ -50,7 +45,6 @@ pub struct Client {
     pub boot_id: String,
     pub declarations: Option<Vec<(String, protocol::widgets::Declaration)>>,
     pub primary: Option<Surface>,
-    pub reserved_zones: [Zone; 3],
 }
 fn error(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
@@ -95,7 +89,6 @@ impl Client {
             boot_id: String::new(),
             declarations: None,
             primary: None,
-            reserved_zones: [Zone::List, Zone::Footer, Zone::FooterRight],
         })
     }
     pub fn receive(&mut self) -> io::Result<()> {
@@ -221,10 +214,7 @@ impl Client {
         Ok(Input {
             stream: self.stream.try_clone()?,
             next_action_id: 0,
-            pane_id: self
-                .focused_pane_id
-                .clone()
-                .ok_or_else(|| error("no focused pane"))?,
+            pane_id: self.focused_pane_id.clone().unwrap_or_default(),
         })
     }
     pub fn blocking(&self) -> io::Result<()> {
@@ -237,6 +227,32 @@ pub struct Input {
     next_action_id: u64,
 }
 impl Input {
+    pub fn dispatch(
+        &mut self,
+        core: &mut core::Core,
+        boot_id: &str,
+        plugin: &str,
+        action: &str,
+        context: &protocol::widgets::Context,
+    ) -> io::Result<()> {
+        match core.invoke(action, context) {
+            core::Effect::Consumed => Ok(()),
+            core::Effect::Request { method, params } => self.request(boot_id, method, params),
+            core::Effect::Plugin => self.invoke(boot_id, plugin, action, context),
+        }
+    }
+    pub fn dispatch_text(
+        &mut self,
+        core: &mut core::Core,
+        boot_id: &str,
+        text: &str,
+    ) -> io::Result<()> {
+        match core.text(text) {
+            Some(core::Effect::Request { method, params }) => self.request(boot_id, method, params),
+            Some(_) => Ok(()),
+            None => self.type_text(text),
+        }
+    }
     pub fn focus_pane_target(&mut self, pane_id: &str) {
         if self.pane_id != pane_id {
             self.pane_id.clear();
@@ -265,7 +281,27 @@ impl Input {
         )
         .map_err(error)
     }
+    pub fn request(
+        &mut self,
+        boot_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> io::Result<()> {
+        self.next_action_id += 1;
+        let request = serde_json::json!({"id":format!("core-action-{}",self.next_action_id),"method":method,"params":params});
+        protocol::write_message(
+            &mut self.stream,
+            &ClientMessage::ClientShellEndpointRequest {
+                boot_id: boot_id.to_owned(),
+                request: request.to_string(),
+            },
+        )
+        .map_err(error)
+    }
     pub fn type_text(&mut self, text: &str) -> io::Result<()> {
+        if self.pane_id.is_empty() {
+            return Ok(());
+        }
         protocol::write_message(
             &mut self.stream,
             &ClientMessage::ClientShellPaneInput {

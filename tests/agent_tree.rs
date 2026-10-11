@@ -1,123 +1,14 @@
 use herdr_fork::{sidebar, terminal, Client};
+use herdr_runtime::api_schema::Request;
 use herdr_runtime::protocol::widgets::Node;
-use herdr_runtime::{
-    api_client::{ApiClient, ConnectionTarget},
-    api_schema::Request,
-};
+mod support;
 use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
-    path::PathBuf,
-    process::{Child, Command, Stdio},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
+use support::{Core, HOMES};
 
-struct Core {
-    child: Child,
-    home: PathBuf,
-    name: String,
-    api: ApiClient,
-}
-impl Drop for Core {
-    fn drop(&mut self) {
-        // Let Core tear down its supervised producer before a forced fallback.
-        let request: Request = serde_json::from_value(
-            json!({"id":"fixture-stop", "method":"server.stop", "params":{}}),
-        )
-        .unwrap();
-        let _ = self
-            .api
-            .request_value_with_timeout(&request, Duration::from_secs(2));
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while self.child.try_wait().is_ok_and(|status| status.is_none())
-            && Instant::now() < deadline
-        {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.home);
-    }
-}
-const HOMES: &[&str] = &[
-    "HOME",
-    "XDG_CONFIG_HOME",
-    "XDG_STATE_HOME",
-    "XDG_DATA_HOME",
-    "XDG_CACHE_HOME",
-    "XDG_RUNTIME_DIR",
-];
-impl Core {
-    fn new() -> Self {
-        let name = format!(
-            "at-{:x}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let home = std::env::temp_dir().join(&name);
-        std::fs::create_dir_all(&home).unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_herdr-fork"));
-        command.args(["server", "--session", &name]);
-        for key in HOMES {
-            command.env(key, &home);
-        }
-        for (key, _) in
-            std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("HERDR_"))
-        {
-            command.env_remove(key);
-        }
-        command
-            .env("SHELL", "/bin/sh")
-            .env("HERDR_STARTUP_CWD", &home)
-            .current_dir(&home)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit());
-        let child = command.spawn().unwrap();
-        let socket = home.join(format!("herdr-fork/sessions/{name}/herdr.sock"));
-        let api = ApiClient::for_target(ConnectionTarget::SocketPath(socket.clone()));
-        let mut core = Self {
-            child,
-            home,
-            name,
-            api,
-        };
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !socket.exists() {
-            assert!(
-                Instant::now() < deadline && core.child.try_wait().unwrap().is_none(),
-                "isolated core startup failed"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        core
-    }
-    fn request(&self, method: &str, params: Value) -> Value {
-        let request: Request = serde_json::from_value(
-            json!({"id":"agent-tree-fixture", "method":method, "params":params}),
-        )
-        .unwrap();
-        let reply = self
-            .api
-            .request_value_with_timeout(&request, Duration::from_secs(5))
-            .unwrap();
-        assert!(reply.get("error").is_none(), "{method}: {reply}");
-        reply["result"].clone()
-    }
-    fn attach(&self) -> Client {
-        Client::attach(
-            &self.home.join(format!(
-                "herdr-fork/sessions/{}/herdr-client.sock",
-                self.name
-            )),
-            80,
-            24,
-        )
-        .unwrap()
-    }
-}
 struct Fixture {
     core: Core,
     client: Client,
@@ -470,7 +361,7 @@ fn executable_pty_sidebar_click_focuses_selected_tab_and_renders_its_live_surfac
     wait(&mut screen, &|rows| {
         rows.iter().any(|row| {
             row.chars()
-                .skip(20)
+                .skip(25)
                 .collect::<String>()
                 .starts_with("selected-live")
         })
@@ -661,7 +552,7 @@ impl LiveConsole {
                 .map(|row| {
                     row.cells
                         .iter()
-                        .take(24)
+                        .take(30)
                         .flat_map(|cell| cell.graphemes.iter())
                         .filter_map(|ch| char::from_u32(*ch))
                         .collect()
@@ -704,7 +595,13 @@ fn executable_pty_workspace_collapse_and_expand() {
         .position(|row| row.starts_with("Alpha"))
         .unwrap();
     console.click(header);
-    let rows = console.wait(|rows, _| rows[header].contains("3 hidden"));
+    let rows = console.wait(|rows, _| {
+        rows[header].contains("3 hidden")
+            && rows.iter().any(|row| row.contains("Idle"))
+            && ["Build", "Review", "Activity03"]
+                .iter()
+                .all(|tab| !rows.iter().any(|row| row.contains(tab)))
+    });
     for tab in ["Build", "Review", "Activity03"] {
         assert!(
             !rows.iter().any(|row| row.contains(tab)),
@@ -713,7 +610,12 @@ fn executable_pty_workspace_collapse_and_expand() {
     }
     assert!(rows.iter().any(|row| row.contains("Idle")));
     console.click(header);
-    let rows = console.wait(|rows, _| rows.iter().any(|row| row.contains("Activity03")));
+    let rows = console.wait(|rows, _| {
+        ["Build", "Review", "Activity03"]
+            .iter()
+            .all(|tab| rows.iter().any(|row| row.contains(tab)))
+            && !rows[header].contains("hidden")
+    });
     for tab in ["Build", "Review", "Activity03"] {
         assert!(rows.iter().any(|row| row.contains(tab)));
     }

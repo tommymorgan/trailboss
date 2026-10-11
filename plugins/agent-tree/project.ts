@@ -1,5 +1,6 @@
 import type { EntityRow } from '@herdr/store'
 import { z } from 'zod'
+import { Composition } from './widgets'
 
 export const Context = z.object({
   workspace_id: z.string().optional(),
@@ -30,6 +31,7 @@ export const Declaration = z.object({
   herdr: z.literal('widget_tree'),
   version: z.literal(1),
   zones: z.array(z.object({ zone: z.literal('list'), tree: Column })),
+  composition: Composition.optional(),
 })
 export type Declaration = z.infer<typeof Declaration>
 
@@ -99,5 +101,19 @@ export function declareTree(
 ): Declaration {
   const tree = projectTree(entities, collapsed)
   tree.children.unshift({ type: 'row', children: [label(` ${hostname} · herdr`, 'muted')] })
-  return Declaration.parse({ herdr: 'widget_tree', version: 1, zones: [{ zone: 'list', tree }] })
+  return Declaration.parse({
+    herdr: 'widget_tree',
+    version: 1,
+    zones: [{ zone: 'list', tree }],
+    composition: {
+      priority: 0,
+      tree: {
+        type: 'row',
+        children: [
+          { type: 'flex', weight: 1, child: { type: 'zone', zone: 'list' } },
+          { type: 'flex', weight: 3, child: { type: 'surface' } },
+        ],
+      },
+    },
+  })
 }

@@ -509,7 +509,10 @@ impl HeadlessServer {
                 needs_graphics_render = false;
             }
 
-            if latest_shell_client(&self.clients).is_some() && self.app.ensure_default_workspace() {
+            if latest_shell_client(&self.clients).is_some()
+                && !self.app.has_widget_composition()
+                && self.app.ensure_default_workspace()
+            {
                 needs_render = true;
                 needs_full_render = true;
                 needs_graphics_render = false;
@@ -1920,7 +1923,9 @@ impl HeadlessServer {
                     render_encoding = ?protocol::RenderEncoding::SemanticFrame,
                     "client connected"
                 );
-                self.app.ensure_default_workspace();
+                if !self.app.has_widget_composition() {
+                    self.app.ensure_default_workspace();
+                }
                 let first_app_client = self.app_client_count() == 0;
                 let last_activity = self.allocate_activity_stamp();
                 let observed = crate::kitty_graphics::HostCellSize {
@@ -3245,7 +3250,10 @@ impl HeadlessServer {
             }
         }
 
-        if !skip_default_workspace && latest_shell_client(&self.clients).is_some() {
+        if !skip_default_workspace
+            && latest_shell_client(&self.clients).is_some()
+            && !self.app.has_widget_composition()
+        {
             changed |= self.app.ensure_default_workspace();
         }
 

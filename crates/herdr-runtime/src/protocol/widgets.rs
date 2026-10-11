@@ -15,6 +15,14 @@ pub struct Context {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<String>,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Condition {
+    NoPane,
+    HasPane,
+    NewTab,
+    Menu,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Node {
@@ -33,6 +41,24 @@ pub enum Node {
         role: String,
     },
     Leader,
+    /// Relative allocation, not terminal-cell geometry.
+    Flex {
+        weight: u16,
+        child: Box<Node>,
+    },
+    /// Reference to the Core's focused runtime-owned pane, never a plugin cell grid.
+    Surface,
+    Zone {
+        zone: Zone,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fallback: Option<Box<Node>>,
+    },
+    When {
+        condition: Condition,
+        child: Box<Node>,
+    },
+    /// Core-owned editable new-tab name; producers own its placement.
+    TabName,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,46 +68,70 @@ pub struct Placement {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct Composition {
+    /// Public precedence: any plugin can replace an application composition.
+    pub priority: i32,
+    pub tree: Node,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Declaration {
     pub herdr: String,
     pub version: u32,
     pub zones: Vec<Placement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition: Option<Composition>,
 }
 impl Declaration {
-    /// Core validates structure and declared actions before forwarding data.
     pub fn validate(&self, actions: impl Fn(&str) -> bool) -> bool {
         self.herdr == "widget_tree"
             && self.version == 1
-            && self.zones.len() == 1
-            && self.zones.iter().all(|p| match &p.tree {
-                Node::Column { children } => {
-                    children.len() <= 128
-                        && children.iter().all(|row| match row {
-                            Node::Row {
-                                children,
-                                action,
-                                context,
-                            } => {
-                                // A header can carry one glyph per tab admitted by the column.
-                                children.len() <= 128
-                                    && action.as_deref().is_none_or(&actions)
-                                    && [&context.workspace_id, &context.tab_id, &context.pane_id]
-                                        .into_iter()
-                                        .all(|id| id.as_ref().is_none_or(|id| !id.is_empty()))
-                                    && children.iter().all(|child| match child {
-                                        Node::Label { text, role } => {
-                                            text.chars().count() <= 200
-                                                && !role.is_empty()
-                                                && !text.chars().any(char::is_control)
-                                        }
-                                        Node::Leader => true,
-                                        _ => false,
-                                    })
-                            }
-                            _ => false,
-                        })
-                }
-                _ => false,
-            })
+            && self.zones.len() <= 1
+            && self.zones.iter().all(|p| valid_node(&p.tree, &actions, 0))
+            && self
+                .composition
+                .as_ref()
+                .is_none_or(|c| valid_node(&c.tree, &actions, 0))
+    }
+}
+fn valid_node(node: &Node, actions: &impl Fn(&str) -> bool, depth: usize) -> bool {
+    if depth > 16 {
+        return false;
+    }
+    match node {
+        Node::Row {
+            children,
+            action,
+            context,
+        } => {
+            children.len() <= 128
+                && action.as_deref().is_none_or(|id| {
+                    matches!(
+                        id,
+                        "host:new" | "host:menu" | "host:cancel" | "host:create" | "host:focus"
+                    ) || actions(id)
+                })
+                && [&context.workspace_id, &context.tab_id, &context.pane_id]
+                    .into_iter()
+                    .all(|id| id.as_ref().is_none_or(|id| !id.is_empty()))
+                && children
+                    .iter()
+                    .all(|child| valid_node(child, actions, depth + 1))
+        }
+        Node::Column { children } => {
+            children.len() <= 128
+                && children
+                    .iter()
+                    .all(|child| valid_node(child, actions, depth + 1))
+        }
+        Node::Label { text, role } => {
+            text.chars().count() <= 200 && !role.is_empty() && !text.chars().any(char::is_control)
+        }
+        Node::Flex { weight, child } => *weight > 0 && valid_node(child, actions, depth + 1),
+        Node::When { child, .. } => valid_node(child, actions, depth + 1),
+        Node::Zone { fallback, .. } => fallback
+            .as_ref()
+            .is_none_or(|child| valid_node(child, actions, depth + 1)),
+        Node::Leader | Node::Surface | Node::TabName => true,
     }
 }
