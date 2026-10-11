@@ -1,5 +1,7 @@
 #[path = "support/action_producer.rs"]
 mod action_producer;
+#[path = "support/client_contracts.rs"]
+mod client_contracts;
 #[path = "support/console.rs"]
 mod console;
 mod support;

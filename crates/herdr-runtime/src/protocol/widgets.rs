@@ -151,7 +151,9 @@ fn valid_node(node: &Node, actions: &impl Fn(&str) -> bool, depth: usize) -> boo
                     .all(|child| valid_node(child, actions, depth + 1))
         }
         Node::Label { text, role, .. } => {
-            text.chars().count() <= 200 && !role.is_empty() && !text.chars().any(char::is_control)
+            text.chars().count() <= 200
+                && !role.is_empty()
+                && !text.chars().chain(role.chars()).any(char::is_control)
         }
         Node::Flex { weight, child } => *weight > 0 && valid_node(child, actions, depth + 1),
         Node::When { child, .. } => valid_node(child, actions, depth + 1),

@@ -193,11 +193,11 @@ Scenario Outline: Plugins place core-defined actions
 ### Task 3.5: Consume shared UI and pane state independently of the terminal renderer
 <!-- estimate: ~350 reviewable lines | feature-files: features/client-contracts.feature | demoable: yes -->
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/client-contracts.feature::Consume shared UI and pane state independently of the terminal renderer
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: Consume shared UI and pane state independently of the terminal renderer
   Given the shared Core owns the live session state and action semantics, each client owns its renderer, and the Core publishes widget declarations and pane Surface state through the shared client contract
   When an independent protocol consumer decodes that stream using the documented contract without the terminal renderer
