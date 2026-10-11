@@ -64,3 +64,172 @@ fn living_dispatch_plugin_actions_through_stdin_envelopes() {
     fixture.assert_completed();
     console.text("\x11");
 }
+
+#[path = "support/reserved_actions.rs"]
+mod reserved_actions;
+use herdr_runtime::protocol::widgets::{Condition, Context, Node};
+use reserved_actions::Adversary;
+use serde_json::json;
+
+fn wait_created(fixture: &Adversary, label: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = fixture.core.request("session.snapshot", json!({}));
+        if snapshot["snapshot"]["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tab| tab["label"] == label && tab["focused"] == true)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Core new-tab interaction did not create {label}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+#[test]
+fn reserved_core_actions_ignore_installed_plugin_behavior_before_and_after_replacement() {
+    for action in ["new", "menu"] {
+        let fixture = Adversary::new(action);
+        let mut client = fixture.core.attach();
+        let mut semantic = herdr_fork::core::Core::default();
+        let mut input = client.input().unwrap();
+        for stage in ["before", "after"] {
+            if stage == "after" {
+                fixture.replace();
+            }
+            let tree = fixture.declaration(&mut client, stage);
+            fixture.assert_placement(&tree, stage);
+            semantic.update_session(
+                client.workspace_id.clone(),
+                client.focused_tab_id.clone(),
+                true,
+            );
+            fixture.prove_handler(stage);
+            let Node::Row {
+                action: Some(id),
+                context,
+                ..
+            } = &tree.zones[0].tree
+            else {
+                panic!("missing declared action")
+            };
+            input
+                .dispatch(
+                    &mut semantic,
+                    &client.boot_id,
+                    "fixture.adversary",
+                    id,
+                    context,
+                )
+                .unwrap();
+            assert!(
+                semantic.visible(if action == "new" {
+                    Condition::NewTab
+                } else {
+                    Condition::Menu
+                }),
+                "plugin-defined behavior replaced Core {action}"
+            );
+            assert_eq!(fixture.label(), "Safe");
+            if action == "new" {
+                let label = format!("Core-{stage}");
+                input
+                    .dispatch_text(&mut semantic, &client.boot_id, &label)
+                    .unwrap();
+                input
+                    .dispatch_text(&mut semantic, &client.boot_id, "\r")
+                    .unwrap();
+                wait_created(&fixture, &label);
+            } else {
+                assert!(matches!(
+                    semantic.invoke("host:cancel", &Context::default()),
+                    herdr_fork::core::Effect::Consumed
+                ));
+                assert!(!semantic.visible(Condition::Menu));
+            }
+        }
+        fixture.assert_unchanged();
+    }
+}
+#[test]
+fn living_plugins_place_core_defined_actions() {
+    let feature = include_str!("../features/plugin-actions.feature");
+    let scenario = "Scenario Outline: Plugins place core-defined actions";
+    let block: Vec<_> = feature
+        .lines()
+        .skip_while(|line| line.trim() != scenario)
+        .map(str::trim)
+        .collect();
+    assert_eq!(&block[..4],[scenario,
+        "Given a plugin declares its own label and placement for the client-local <action> in the reserved core-action namespace",
+        "When I activate the action, change its plugin label and placement, and activate it again while the plugin attempts to supply its own behavior",
+        "Then only the core-defined <behavior> occurs, both before and after the change, and the plugin cannot initially define or later redefine those semantics"]);
+    let examples: Vec<_> = block
+        .iter()
+        .filter(|line| line.starts_with('|'))
+        .copied()
+        .collect();
+    assert_eq!(
+        examples,
+        [
+            "| action | behavior |",
+            "| new | new-tab interaction |",
+            "| menu | menu interaction |"
+        ]
+    );
+    for action in ["new", "menu"] {
+        let fixture = Adversary::new(action);
+        let mut observer = fixture.core.attach();
+        let mut console = console::Console::new(&fixture.core);
+        for stage in ["before", "after"] {
+            if stage == "after" {
+                fixture.replace();
+            }
+            let tree = fixture.declaration(&mut observer, stage);
+            fixture.assert_placement(&tree, stage);
+            fixture.prove_handler(stage);
+            let label = format!("{stage} {action}");
+            let rows = console.wait(|rows| {
+                rows.iter().any(|row| row.contains(&label))
+                    && !rows.iter().any(|row| row.contains("HIJACKED"))
+            });
+            let y = rows.iter().position(|row| row.contains(&label)).unwrap();
+            let x = rows[y].find(&label).unwrap();
+            if stage == "after" {
+                assert_eq!(y, 23);
+                assert!(x > 0, "footer-right did not right-align the replacement");
+            } else {
+                assert!(y < 22);
+                assert_eq!(x, 0);
+            }
+            console.click(x, y);
+            let marker = if action == "new" {
+                " Name: "
+            } else {
+                " Session menu "
+            };
+            let rows = console.wait(|rows| {
+                rows.iter()
+                    .any(|row| row.contains(marker) || row.contains("HIJACKED"))
+            });
+            assert!(
+                rows.iter().any(|row| row.contains(marker)),
+                "plugin hijacked Core {action}: {rows:?}"
+            );
+            assert_eq!(fixture.label(), "Safe");
+            if action == "new" {
+                let name = format!("Core-{stage}");
+                console.text(&format!("{name}\r"));
+                wait_created(&fixture, &name);
+            } else {
+                console.text("\x1b");
+            }
+            console.wait(|rows| !rows.iter().any(|row| row.contains(marker)));
+        }
+        fixture.assert_unchanged();
+    }
+}

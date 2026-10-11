@@ -175,11 +175,11 @@ Scenario: Dispatch plugin actions through stdin envelopes
   When I activate that declaration
   Then the producer receives the correlated action and tab context on stdin and the requested tab becomes focused after its successful action result
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/plugin-actions.feature::Plugins place core-defined actions
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: Plugins place core-defined actions
   Given a plugin declares its own label and placement for the client-local <action> in the reserved core-action namespace
   When I activate the action, change its plugin label and placement, and activate it again while the plugin attempts to supply its own behavior
