@@ -110,6 +110,9 @@ pub enum ResponseResult {
     AgentTurnAborted {
         result: super::agents::AgentTurnAbortResult,
     },
+    AgentStopped {
+        result: super::agents::AgentShutdownResult,
+    },
     AgentList {
         agents: Vec<AgentInfo>,
     },

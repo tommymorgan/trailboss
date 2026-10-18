@@ -5,8 +5,8 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use crate::api::schema::{
-    AgentChatSubmitParams, AgentChatSubmitResult, AgentTurnAbortParams, AgentTurnAbortResult,
-    ResponseResult,
+    AgentChatSubmitParams, AgentChatSubmitResult, AgentShutdownParams, AgentShutdownResult,
+    AgentTurnAbortParams, AgentTurnAbortResult, ResponseResult,
 };
 
 use super::restart_idle::{
@@ -20,7 +20,12 @@ const CHAT_TEXT_LIMIT: usize = 128 * 1024;
 /// Chat frames carry user text, so they get a larger cap than control frames.
 const CHAT_FRAME_LIMIT: usize = 256 * 1024;
 const IDEMPOTENCY_KEY_LIMIT: usize = 256;
+const EXIT_WAIT: Duration = Duration::from_secs(8);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+
+const ATTACHMENTS_MAX_COUNT: usize = 8;
+const ATTACHMENT_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const ATTACHMENTS_MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 struct ControlCheck {
@@ -120,6 +125,50 @@ impl App {
         let runtime = self.lookup_runtime_sender(resolved.ws_idx, resolved.pane_id)?;
         runtime.child_pid()
     }
+
+    /// Orderly single-agent shutdown. An agent with no live OMP process is a
+    /// completed no-op; a live one is told to abort any in-flight turn and
+    /// exit through the reporter's native teardown path.
+    pub(super) fn start_agent_shutdown(
+        &mut self,
+        id: String,
+        respond_to: Sender<String>,
+        params: AgentShutdownParams,
+    ) {
+        // No live OMP process behind the pane: shutdown is a completed no-op.
+        // An unresolvable target has no live process either, so it lands on
+        // the same idempotent result instead of a confusing not-found error.
+        self.reconcile_managed_agent_target(&params.target);
+        match self.agent_info_for_target(&params.target) {
+            Ok(agent) if agent.agent.is_some() => {}
+            _ => {
+                let _ = respond_to.send(encode_success(
+                    id,
+                    ResponseResult::AgentStopped {
+                        result: AgentShutdownResult {
+                            target: params.target,
+                            stopped: false,
+                        },
+                    },
+                ));
+                return;
+            }
+        }
+        let check = match self.control_check(&id, &params.target) {
+            Ok(check) => check,
+            Err(response) => return drop(respond_to.send(response)),
+        };
+        let spawned = crate::thread_spawn::spawn_named("trailboss-agent-shutdown", move || {
+            let response = match shutdown_roundtrip(&check) {
+                Ok(result) => encode_success(id, ResponseResult::AgentStopped { result }),
+                Err((code, message)) => encode_error(id, &code, message),
+            };
+            let _ = respond_to.send(response);
+        });
+        if spawned.is_err() {
+            tracing::error!("failed to spawn trailboss-agent-shutdown thread");
+        }
+    }
 }
 
 fn validate_chat(params: &AgentChatSubmitParams) -> Result<(), String> {
@@ -142,6 +191,53 @@ fn validate_chat(params: &AgentChatSubmitParams) -> Result<(), String> {
     {
         return Err("idempotency_key must not contain control or whitespace characters".into());
     }
+    if params.text.trim().is_empty() && params.attachments.is_empty() {
+        return Err("text must not be empty".into());
+    }
+    validate_attachments(&params.target, &params.attachments)
+}
+
+fn validate_attachments(
+    target: &str,
+    attachments: &[crate::api::schema::AgentChatAttachment],
+) -> Result<(), String> {
+    if attachments.len() > ATTACHMENTS_MAX_COUNT {
+        return Err(format!("attachments exceed {ATTACHMENTS_MAX_COUNT} entries"));
+    }
+    let upload_root = crate::session::data_dir().join("uploads").join(target);
+    let mut total: u64 = 0;
+    for attachment in attachments {
+        if attachment.kind != "image" && attachment.kind != "file" {
+            return Err(format!("unsupported attachment kind {}", attachment.kind));
+        }
+        let path = std::path::Path::new(&attachment.path);
+        if !path.is_absolute() || attachment.path.chars().any(|c| c.is_control()) {
+            return Err("attachment path must be absolute".into());
+        }
+        if !path.starts_with(&upload_root) {
+            return Err(format!(
+                "attachment path must be inside {}",
+                upload_root.display()
+            ));
+        }
+        let metadata = std::fs::metadata(path)
+            .map_err(|_| format!("attachment missing: {}", attachment.path))?;
+        if !metadata.is_file() {
+            return Err(format!("attachment is not a regular file: {}", attachment.path));
+        }
+        if metadata.len() > ATTACHMENT_MAX_BYTES {
+            return Err(format!(
+                "attachment exceeds {ATTACHMENT_MAX_BYTES} bytes: {}",
+                attachment.path
+            ));
+        }
+        total += metadata.len();
+    }
+    if total > ATTACHMENTS_MAX_TOTAL_BYTES {
+        return Err(format!(
+            "attachments exceed {ATTACHMENTS_MAX_TOTAL_BYTES} bytes total"
+        ));
+    }
     Ok(())
 }
 
@@ -157,11 +253,49 @@ fn chat_submit_roundtrip(
         "pane_id": target.pane_identity,
         "session_path": check.session_path,
         "text": params.text,
+        "attachments": params.attachments,
         "idempotency_key": params.idempotency_key,
     });
     let reply = control_roundtrip(&target, request, CHAT_FRAME_LIMIT, CONTROL_TIMEOUT)
         .map_err(control_error)?;
     chat_result_from_reply(check, &reply)
+}
+
+fn shutdown_roundtrip(check: &ControlCheck) -> Result<AgentShutdownResult, (String, String)> {
+    let target =
+        prepare_control_target(check.shell_pid, &check.session_path).map_err(control_error)?;
+    let request = serde_json::json!({
+        "operation": "shutdown",
+        "pid": target.omp.pid,
+        "pane_id": target.pane_identity,
+        "session_path": check.session_path,
+    });
+    let reply = control_roundtrip(&target, request, CHAT_FRAME_LIMIT, CONTROL_TIMEOUT)
+        .map_err(control_error)?;
+    match reply.status.as_str() {
+        "accepted" => {
+            // The reporter acked native teardown; confirm the process really
+            // exited before reporting success.
+            let deadline = std::time::Instant::now() + EXIT_WAIT;
+            while std::time::Instant::now() < deadline {
+                if std::path::Path::new(&format!("/proc/{}", target.omp.pid))
+                    .try_exists()
+                    .is_ok_and(|exists| !exists)
+                {
+                    return Ok(AgentShutdownResult {
+                        target: check.target.clone(),
+                        stopped: true,
+                    });
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err((
+                "shutdown_timeout".to_owned(),
+                "agent accepted shutdown but did not exit in time".to_owned(),
+            ))
+        }
+        _ => Err(skip_error(&reply)),
+    }
 }
 
 fn chat_result_from_reply(
@@ -258,7 +392,30 @@ mod tests {
             target: "agent-1".into(),
             text: text.into(),
             idempotency_key: key.into(),
+            attachments: Vec::new(),
         }
+    }
+
+    #[test]
+    fn attachment_paths_outside_the_upload_area_are_rejected() {
+        let attachment = crate::api::schema::AgentChatAttachment {
+            path: "/etc/passwd".into(),
+            kind: "file".into(),
+            name: None,
+        };
+        let err = validate_attachments("agent-1", &[attachment]).unwrap_err();
+        assert!(err.contains("must be inside"), "{err}");
+    }
+
+    #[test]
+    fn unsupported_attachment_kinds_are_rejected_before_delivery() {
+        let attachment = crate::api::schema::AgentChatAttachment {
+            path: "/tmp/x".into(),
+            kind: "video".into(),
+            name: None,
+        };
+        let err = validate_attachments("agent-1", &[attachment]).unwrap_err();
+        assert!(err.contains("unsupported attachment kind"), "{err}");
     }
 
     #[test]

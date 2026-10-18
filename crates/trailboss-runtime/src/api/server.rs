@@ -652,6 +652,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::AgentPrompt(_) => "agent.prompt",
         Method::AgentChatSubmit(_) => "agent.chat_submit",
         Method::AgentTurnAbort(_) => "agent.turn_abort",
+        Method::AgentShutdown(_) => "agent.shutdown",
         Method::AgentWait(_) => "agent.wait",
         Method::PaneSplit(_) => "pane.split",
         Method::PaneSwap(_) => "pane.swap",

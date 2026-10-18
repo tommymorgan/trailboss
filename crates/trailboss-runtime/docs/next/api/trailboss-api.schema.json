@@ -1237,8 +1237,39 @@
     },
     "request": {
       "$defs": {
+        "AgentChatAttachment": {
+          "properties": {
+            "kind": {
+              "description": "\"image\" delivers native image content; \"file\" adds an explicit\nabsolute-path reference to the delivered prompt text.",
+              "type": "string"
+            },
+            "name": {
+              "description": "Optional display name; defaults to the file name of `path`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "description": "Absolute path of an already-materialized upload under the session\nupload area: ~/.config/trailboss/sessions/<session>/uploads/<agent>/<message-id>/.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "kind"
+          ],
+          "type": "object"
+        },
         "AgentChatSubmitParams": {
           "properties": {
+            "attachments": {
+              "description": "Optional attachments, all-or-nothing. Max 8 entries, 32 MiB each,\n64 MiB total; paths must be absolute and inside the session upload\narea (~/.config/trailboss/sessions/<session>/uploads/<agent>/<message-id>/).",
+              "items": {
+                "$ref": "#/schemas/request/$defs/AgentChatAttachment"
+              },
+              "type": "array"
+            },
             "idempotency_key": {
               "description": "Caller-chosen dedupe key: a retry with the same key must not deliver twice.",
               "type": "string"
@@ -1364,6 +1395,17 @@
           "required": [
             "target",
             "keys"
+          ],
+          "type": "object"
+        },
+        "AgentShutdownParams": {
+          "properties": {
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target"
           ],
           "type": "object"
         },
@@ -5532,6 +5574,22 @@
         {
           "properties": {
             "method": {
+              "const": "agent.shutdown",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentShutdownParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.wait",
               "type": "string"
             },
@@ -6938,6 +6996,21 @@
             "path"
           ],
           "type": "string"
+        },
+        "AgentShutdownResult": {
+          "properties": {
+            "stopped": {
+              "type": "boolean"
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "stopped"
+          ],
+          "type": "object"
         },
         "AgentStatus": {
           "oneOf": [
@@ -9788,6 +9861,22 @@
                 },
                 "type": {
                   "const": "agent_turn_aborted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "result"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "result": {
+                  "$ref": "#/schemas/success_response/$defs/AgentShutdownResult"
+                },
+                "type": {
+                  "const": "agent_stopped",
                   "type": "string"
                 }
               },

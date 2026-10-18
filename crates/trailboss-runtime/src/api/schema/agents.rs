@@ -205,6 +205,11 @@ pub struct AgentChatSubmitParams {
     pub text: String,
     /// Caller-chosen dedupe key: a retry with the same key must not deliver twice.
     pub idempotency_key: String,
+    /// Optional attachments, all-or-nothing. Max 8 entries, 32 MiB each,
+    /// 64 MiB total; paths must be absolute and inside the session upload
+    /// area (~/.config/trailboss/sessions/<session>/uploads/<agent>/<message-id>/).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AgentChatAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -225,6 +230,29 @@ pub struct AgentTurnAbortParams {
 pub struct AgentTurnAbortResult {
     pub target: String,
     pub aborted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentShutdownParams {
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentChatAttachment {
+    /// Absolute path of an already-materialized upload under the session
+    /// upload area: ~/.config/trailboss/sessions/<session>/uploads/<agent>/<message-id>/.
+    pub path: String,
+    /// "image" delivers native image content; "file" adds an explicit
+    /// absolute-path reference to the delivered prompt text.
+    pub kind: String,
+    /// Optional display name; defaults to the file name of `path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentShutdownResult {
+    pub target: String,
+    pub stopped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

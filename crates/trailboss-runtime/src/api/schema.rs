@@ -143,6 +143,8 @@ pub enum Method {
     AgentChatSubmit(AgentChatSubmitParams),
     #[serde(rename = "agent.turn_abort")]
     AgentTurnAbort(AgentTurnAbortParams),
+    #[serde(rename = "agent.shutdown")]
+    AgentShutdown(AgentShutdownParams),
     #[serde(rename = "agent.wait")]
     AgentWait(AgentWaitParams),
     #[serde(rename = "pane.split")]

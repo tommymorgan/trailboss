@@ -32,7 +32,17 @@ impl Drop for Terminal {
         );
     }
 }
-fn main() -> io::Result<()> {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("Error: {err}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> io::Result<()> {
     let raw: Vec<String> = std::env::args().collect();
     let (raw, remote) =
         trailboss_runtime::remote::extract_remote_args(&raw).map_err(io::Error::other)?;

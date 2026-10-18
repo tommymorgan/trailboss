@@ -320,7 +320,9 @@ impl Client {
             | ServerMessage::GraphicsTransmissionRetired { .. }) => {
                 self.graphics_messages.push(message)
             }
-            ServerMessage::ServerShutdown { .. } => return Err(error("core stopped")),
+            ServerMessage::ServerShutdown { reason } => {
+                return Err(error(reason.as_deref().unwrap_or("core stopped")))
+            }
             _ => {}
         }
         Ok(())

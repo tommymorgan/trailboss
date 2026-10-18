@@ -2,7 +2,7 @@
 // managed by trailboss; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // TRAILBOSS_INTEGRATION_ID=omp
-// TRAILBOSS_INTEGRATION_VERSION=13
+// TRAILBOSS_INTEGRATION_VERSION=15
 // @ts-nocheck
 
 import net, { type Server, type Socket } from "node:net";
@@ -358,7 +358,10 @@ export default function (pi) {
   const CHAT_FRAME_LIMIT = 256 * 1024;
   const CHAT_TEXT_LIMIT = 128 * 1024;
   const CHAT_KEY_LIMIT = 256;
+  const ATTACHMENT_MAX_BYTES = 32 * 1024 * 1024;
+  const ATTACHMENTS_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
   const CHAT_TURNS_MAX = 256;
+
 
   function baseAdmissionSkipReason(request: unknown): string | undefined {
     if (!request || typeof request !== "object" || Array.isArray(request)) return "invalid-request";
@@ -389,8 +392,66 @@ export default function (pi) {
         /[\s\u0000-\u001f\u007f]/.test(key)) {
       return "invalid-request";
     }
+    const attachments = request.attachments;
+    if (attachments !== undefined) {
+      if (!Array.isArray(attachments) || attachments.length > 8) return "invalid-request";
+      let total = 0;
+      for (const attachment of attachments) {
+        if (!attachment || typeof attachment !== "object") return "invalid-request";
+        if (typeof attachment.path !== "string" || !attachment.path.startsWith("/") ||
+            /[\u0000-\u001f\u007f]/.test(attachment.path)) return "invalid-request";
+        if (attachment.kind !== "image" && attachment.kind !== "file") return "invalid-request";
+        if (attachment.name !== undefined &&
+            (typeof attachment.name !== "string" || attachment.name.length > 256)) {
+          return "invalid-request";
+        }
+        let stat;
+        try {
+          stat = fs.statSync(attachment.path);
+        } catch {
+          return "attachment-missing";
+        }
+        if (!stat.isFile()) return "invalid-request";
+        if (stat.size > ATTACHMENT_MAX_BYTES) return "attachment-too-large";
+        total += stat.size;
+        if (total > ATTACHMENTS_MAX_TOTAL_BYTES) return "attachment-too-large";
+        if (attachment.kind === "image" && !imageMimeType(attachment.path)) {
+          return "unsupported-image";
+        }
+      }
+    }
     if (typeof pi?.sendUserMessage !== "function") return "structured-capability-unavailable";
     return undefined;
+  }
+
+  function imageMimeType(path) {
+    const extension = path.slice(path.lastIndexOf(".")).toLowerCase();
+    return ({
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".gif": "image/gif",
+      ".webp": "image/webp",
+    })[extension];
+  }
+
+  function buildChatContent(request) {
+    let text = request.text;
+    const images = [];
+    for (const attachment of request.attachments || []) {
+      if (attachment.kind === "file") {
+        const label = attachment.name || attachment.path.slice(attachment.path.lastIndexOf("/") + 1);
+        text += `\n[attached file: ${label}: ${attachment.path}]`;
+      } else {
+        images.push({
+          type: "image",
+          data: fs.readFileSync(attachment.path).toString("base64"),
+          mimeType: imageMimeType(attachment.path),
+        });
+      }
+    }
+    if (images.length === 0) return text;
+    return [{ type: "text", text }, ...images];
   }
 
   function abortSkipReason(request: Record<string, unknown>): string | undefined {
@@ -399,6 +460,15 @@ export default function (pi) {
     if (request.operation !== "abort") return "invalid-request";
     if (typeof currentContext?.abort !== "function") return "structured-capability-unavailable";
     if (desiredState().state !== "working") return "agent-not-working";
+    return undefined;
+  }
+
+  function shutdownSkipReason(request: Record<string, unknown>): string | undefined {
+    const base = baseAdmissionSkipReason(request);
+    if (base) return base;
+    if (request.operation !== "shutdown") return "invalid-request";
+    const ctx = currentContext;
+    if (typeof ctx?.shutdown !== "function") return "structured-capability-unavailable";
     return undefined;
   }
 
@@ -456,13 +526,17 @@ export default function (pi) {
                 if (skip) {
                   reason = skip;
                 } else {
-                  const request = parsed as { text: string; idempotency_key: string };
+                  const request = parsed as {
+                    text: string;
+                    idempotency_key: string;
+                    attachments?: Array<{ path: string; kind: string; name?: string }>;
+                  };
                   const existing = chatTurns.get(request.idempotency_key);
                   if (existing) {
                     outcome = { status: "accepted", reason: "duplicate", turn_id: existing };
                   } else {
                     try {
-                      pi.sendUserMessage(request.text);
+                      pi.sendUserMessage(buildChatContent(request));
                     } catch {
                       reason = "send-failed";
                     }
@@ -488,6 +562,28 @@ export default function (pi) {
                     outcome = { status: "accepted", reason: "" };
                   } catch {
                     reason = "abort-failed";
+                  }
+                }
+              } else if (operation === "shutdown") {
+                const skip = shutdownSkipReason(parsed as Record<string, unknown>);
+                if (skip) {
+                  reason = skip;
+                } else {
+                  // Abort-then-shutdown: an in-flight turn is cancelled, then
+                  // native teardown runs. No restart follows.
+                  try {
+                    if (desiredState().state === "working") currentContext?.abort();
+                  } catch {
+                    // Abort best-effort; teardown proceeds regardless.
+                  }
+                  acceptedClients.add(client);
+                  outcome = { status: "accepted", reason: "shutdown-requested" };
+                  try {
+                    currentContext?.shutdown();
+                  } catch {
+                    reason = "shutdown-failed";
+                    acceptedClients.delete(client);
+                    outcome = undefined;
                   }
                 }
               } else {
