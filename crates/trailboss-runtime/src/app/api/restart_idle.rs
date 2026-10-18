@@ -42,9 +42,9 @@ struct Candidate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ProcessIdentity {
-    pid: u32,
-    started: u64,
+pub(super) struct ProcessIdentity {
+    pub(super) pid: u32,
+    pub(super) started: u64,
 }
 
 impl App {
@@ -254,7 +254,7 @@ fn initial_skip_reason(agent: &AgentInfo) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn exact_session_path(agent: &AgentInfo) -> Option<String> {
+pub(super) fn exact_session_path(agent: &AgentInfo) -> Option<String> {
     let session = agent.agent_session.as_ref()?;
     (session.source == "herdr:omp"
         && session.agent == "omp"
@@ -331,7 +331,7 @@ fn restart_one(
         Err(reason) => return row(&check.agent, Outcome::Skipped, reason),
     };
     match request_shutdown(&prepared, &check.session_path) {
-        Ok(ControlReply { status, reason }) if status == "skipped" => {
+        Ok(ControlReply { status, reason, .. }) if status == "skipped" => {
             return row(&check.agent, Outcome::Skipped, reason)
         }
         Ok(ControlReply { status, .. }) if status == "accepted" => {}
@@ -395,9 +395,63 @@ fn restart_one(
 }
 
 #[derive(serde::Deserialize)]
-struct ControlReply {
-    status: String,
-    reason: String,
+pub(super) struct ControlReply {
+    pub(super) status: String,
+    pub(super) reason: String,
+    #[serde(default)]
+    pub(super) turn_id: Option<String>,
+}
+
+/// The identity facts a reporter control op needs; restart preparation adds
+/// resume specifics on top of this shared target.
+#[cfg(target_os = "linux")]
+pub(super) struct ControlTarget {
+    pub(super) shell: ProcessIdentity,
+    pub(super) omp: ProcessIdentity,
+    pub(super) pane_identity: String,
+}
+
+#[cfg(target_os = "linux")]
+impl From<&Prepared> for ControlTarget {
+    fn from(prepared: &Prepared) -> Self {
+        ControlTarget {
+            shell: prepared.shell.clone(),
+            omp: prepared.omp.clone(),
+            pane_identity: prepared.pane_identity.clone(),
+        }
+    }
+}
+
+/// Resolves the live OMP process behind a pane for non-restart control ops:
+/// same process-tree admission as restart, without resume argv reconstruction.
+#[cfg(target_os = "linux")]
+pub(super) fn prepare_control_target(
+    shell_pid: u32,
+    // Kept for signature parity with restart preparation; admission of the
+    // session path happens reporter-side, where the live session is known.
+    _session_path: &str,
+) -> Result<ControlTarget, String> {
+    let shell = process_identity(shell_pid).ok_or("shell_identity_unavailable")?;
+    let job = crate::detect::foreground_job(shell.pid).ok_or("foreground_unavailable")?;
+    let (agent, _, pid) =
+        crate::detect::identify_agent_process_in_job(&job).ok_or("foreground_not_omp")?;
+    if agent != crate::detect::Agent::Omp || pid == shell.pid || pid != job.process_group_id {
+        return Err("foreground_not_root_omp".into());
+    }
+    let omp = process_identity(pid).ok_or("agent_identity_unavailable")?;
+    if process_stat(pid).and_then(|s| s.get(1)?.parse::<u32>().ok()) != Some(shell.pid) {
+        return Err("omp_not_original_shell_child".into());
+    }
+    // Session-path admission is enforced by the reporter against its live
+    // session; a local existence probe would misclassify socketless (v11)
+    // reporters before the structured-unavailable mapping can apply.
+    let pane_identity =
+        process_environment_value(pid, "HERDR_PANE_ID").ok_or("pane_environment_unavailable")?;
+    Ok(ControlTarget {
+        shell,
+        omp,
+        pane_identity,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -428,9 +482,6 @@ fn prepare(check: &RestartIdleCheck) -> Result<Prepared, String> {
         return Err("foreground_not_root_omp".into());
     }
     let omp = process_identity(pid).ok_or("agent_identity_unavailable")?;
-    if process_stat(pid).and_then(|s| s.get(1)?.parse::<u32>().ok()) != Some(shell.pid) {
-        return Err("omp_not_original_shell_child".into());
-    }
     for process in &job.processes {
         if process.pid != pid && !is_zombie(process.pid) && !is_resident_worker(process.pid, pid) {
             return Err("other_live_foreground_work".into());
@@ -712,24 +763,36 @@ fn control_request(
     prepared: &Prepared,
     request: serde_json::Value,
 ) -> Result<ControlReply, String> {
+    control_roundtrip(&ControlTarget::from(prepared), request, FRAME_LIMIT, STEP_TIMEOUT)
+}
+
+/// One newline-framed request/response exchange with a reporter control
+/// socket, revalidating both process identities before connecting.
+#[cfg(target_os = "linux")]
+pub(super) fn control_roundtrip(
+    target: &ControlTarget,
+    request: serde_json::Value,
+    frame_limit: usize,
+    timeout: Duration,
+) -> Result<ControlReply, String> {
     use std::io::Write;
     let uid = unsafe { libc::geteuid() };
-    if process_identity(prepared.omp.pid).as_ref() != Some(&prepared.omp)
-        || process_identity(prepared.shell.pid).as_ref() != Some(&prepared.shell)
+    if process_identity(target.omp.pid).as_ref() != Some(&target.omp)
+        || process_identity(target.shell.pid).as_ref() != Some(&target.shell)
     {
         return Err("process_identity_changed".into());
     }
     let directory = std::path::PathBuf::from(format!("/tmp/trailboss-omp-control-{uid}"));
-    let path = checked_control_socket(&directory, prepared.omp.pid, uid)?;
+    let path = checked_control_socket(&directory, target.omp.pid, uid)?;
     // Unix local connect is bounded by nonblocking connect + poll below.
     let mut stream =
         connect_control(&path).map_err(|err| format!("control_connect_failed: {err}"))?;
-    verify_peer(&stream, prepared.omp.pid)?;
+    verify_peer(&stream, target.omp.pid)?;
     stream.set_nonblocking(true).map_err(|e| e.to_string())?;
-    let deadline = std::time::Instant::now() + STEP_TIMEOUT;
+    let deadline = std::time::Instant::now() + timeout;
     let mut frame = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
     frame.push(b'\n');
-    if frame.len() > FRAME_LIMIT {
+    if frame.len() > frame_limit {
         return Err("control_request_too_large".into());
     }
     let mut written = 0;

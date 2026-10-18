@@ -416,6 +416,27 @@ fn agent_view_requests_round_trip() {
 }
 
 #[test]
+fn agent_chat_submit_and_turn_abort_round_trip() {
+    let chat_json = serde_json::json!({
+        "id": "chat-1",
+        "method": "agent.chat_submit",
+        "params": {"target": "agent-1", "text": "hello", "idempotency_key": "k1"}
+    });
+    let request: Request = serde_json::from_value(chat_json.clone()).unwrap();
+    assert!(matches!(request.method, Method::AgentChatSubmit(_)));
+    assert_eq!(serde_json::to_value(request).unwrap(), chat_json);
+
+    let abort_json = serde_json::json!({
+        "id": "abort-1",
+        "method": "agent.turn_abort",
+        "params": {"target": "agent-1"}
+    });
+    let request: Request = serde_json::from_value(abort_json.clone()).unwrap();
+    assert!(matches!(request.method, Method::AgentTurnAbort(_)));
+    assert_eq!(serde_json::to_value(request).unwrap(), abort_json);
+}
+
+#[test]
 fn unknown_method_is_rejected() {
     let json = r#"{"id":"req_1","method":"nope","params":{}}"#;
     let err = serde_json::from_str::<Request>(json)

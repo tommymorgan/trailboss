@@ -79,6 +79,20 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
         index += 1;
     }
 
+
+    // Mixed-version compatibility: a pre-rename Trailboss core exports its
+    // session as HERDR_SESSION. Children running this build — notably a
+    // handoff import server spawned by an old core — must target that same
+    // session instead of silently falling back to the default one.
+    if std::env::var_os(SESSION_ENV_VAR).is_none() {
+        if let Some(legacy) = std::env::var_os("HERDR_SESSION") {
+            if let Some(legacy) = legacy.into_string().ok() {
+                if normalize_name(&legacy).is_ok() {
+                    std::env::set_var(SESSION_ENV_VAR, &legacy);
+                }
+            }
+        }
+    }
     if let Some(session) = requested_session {
         apply_explicit_name(&session)?;
     } else if std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_some() {
@@ -741,6 +755,21 @@ mod tests {
         assert_eq!(cleaned, vec!["trailboss", "workspace", "list"]);
         std::env::remove_var(SESSION_ENV_VAR);
         clear_explicit_session_for_test();
+    }
+
+    #[test]
+    fn legacy_herdr_session_env_selects_session_when_trailboss_unset() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::remove_var(SESSION_ENV_VAR);
+        clear_explicit_session_for_test();
+        std::env::set_var("HERDR_SESSION", "legacy-session");
+
+        let cleaned = configure_from_args(&["trailboss".to_string()]).unwrap();
+
+        assert_eq!(active_name().as_deref(), Some("legacy-session"));
+        assert_eq!(cleaned, vec!["trailboss".to_string()]);
+        std::env::remove_var("HERDR_SESSION");
+        std::env::remove_var(SESSION_ENV_VAR);
     }
 
     #[test]

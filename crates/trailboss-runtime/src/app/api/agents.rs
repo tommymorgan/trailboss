@@ -91,6 +91,14 @@ impl App {
             self.start_restart_idle_agents(request.id, respond_to);
             return true;
         }
+        if let crate::api::schema::Method::AgentChatSubmit(params) = &request.method {
+            self.start_agent_chat_submit(request.id, respond_to, params.clone());
+            return true;
+        }
+        if let crate::api::schema::Method::AgentTurnAbort(params) = &request.method {
+            self.start_agent_turn_abort(request.id, respond_to, params.clone());
+            return true;
+        }
         let crate::api::schema::Method::AgentPrompt(params) = request.method else {
             return false;
         };

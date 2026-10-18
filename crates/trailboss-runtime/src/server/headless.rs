@@ -3026,7 +3026,10 @@ impl HeadlessServer {
         let alt_screen_read_spec = self.alt_screen_read_spec(&msg.request);
         if matches!(
             &msg.request.method,
-            api::schema::Method::AgentPrompt(_) | api::schema::Method::AgentRestartIdle(_)
+            api::schema::Method::AgentPrompt(_)
+                | api::schema::Method::AgentRestartIdle(_)
+                | api::schema::Method::AgentChatSubmit(_)
+                | api::schema::Method::AgentTurnAbort(_)
         ) {
             let deferred_changed = self
                 .app

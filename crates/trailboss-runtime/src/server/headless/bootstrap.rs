@@ -211,6 +211,19 @@ fn take_startup_cwd() -> Option<PathBuf> {
 
 #[cfg(unix)]
 fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> {
+    // The import child can inherit a stale session or socket override from
+    // whoever spawned the old core (a Trailboss pane exports its own session,
+    // a pre-rename core exports the old names). The handoff socket path is
+    // the one authority for which session is being transferred, so derive
+    // the session from it and drop any overrides before anything resolves
+    // paths.
+    if let Some(session_dir) = socket_path.parent() {
+        if let Some(name) = session_dir.file_name().and_then(|n| n.to_str()) {
+            std::env::set_var(crate::session::SESSION_ENV_VAR, name);
+        }
+    }
+    std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+    std::env::remove_var(crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR);
     let loaded_config = config::Config::load();
     let mut received = crate::server::handoff::receive(socket_path, token)?;
     crate::server::handoff::log_import_result(received.manifest.panes.len());
@@ -258,6 +271,12 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             event_hub.clone(),
             server_stop.clone(),
         )?;
+        // Report ready as soon as the public API socket is bound: a
+        // pre-rename source core has a shorter ready timeout than this
+        // build's construction (plugin + server assembly) takes, and rolls
+        // back if "ready" arrives late. The commit line is buffered by the
+        // stream, so reading it after construction stays safe.
+        crate::server::handoff::report_ready(&mut received.stream)?;
         let mut server = HeadlessServer::new(
             app,
             &loaded_config.diagnostics,
@@ -268,7 +287,6 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         // Carried across before any client attaches, so the first title sent is
         // the override rather than the configured one it replaced.
         server.api_window_title = received.manifest.api_window_title.take();
-        crate::server::handoff::report_ready(&mut received.stream)?;
         crate::server::handoff::wait_committed(&mut received.stream)?;
         server.app.assume_handoff_ownership();
         server.app.unpause_handoff_readers();

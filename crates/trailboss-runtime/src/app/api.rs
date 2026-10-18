@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+mod agent_control;
 mod agent_view;
 mod agents;
 mod env;
@@ -1182,6 +1183,13 @@ impl App {
                     request.id,
                     "invalid_request",
                     "agent.prompt is handled asynchronously by the app runtime",
+                );
+            }
+            Method::AgentChatSubmit(_) | Method::AgentTurnAbort(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "invalid_request",
+                    "agent.chat_submit and agent.turn_abort are handled asynchronously by the app runtime",
                 );
             }
             Method::AgentWait(_) => {

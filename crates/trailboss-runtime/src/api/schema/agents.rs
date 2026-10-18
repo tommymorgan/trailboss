@@ -199,6 +199,33 @@ pub struct AgentPromptParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<AgentPromptWaitOptions>,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentChatSubmitParams {
+    pub target: String,
+    pub text: String,
+    /// Caller-chosen dedupe key: a retry with the same key must not deliver twice.
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentChatSubmitResult {
+    pub target: String,
+    pub turn_id: String,
+    /// True when this call replayed an already-delivered idempotency key.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub deduplicated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentTurnAbortParams {
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentTurnAbortResult {
+    pub target: String,
+    pub aborted: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentInfo {

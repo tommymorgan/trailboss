@@ -2,7 +2,7 @@
 // managed by trailboss; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // TRAILBOSS_INTEGRATION_ID=omp
-// TRAILBOSS_INTEGRATION_VERSION=12
+// TRAILBOSS_INTEGRATION_VERSION=13
 // @ts-nocheck
 
 import net, { type Server, type Socket } from "node:net";
@@ -352,6 +352,56 @@ export default function (pi) {
     return undefined;
   }
 
+  // Structured chat-submit and turn-abort admission (v13). Both share the
+  // identity checks with restart admission but allow working agents.
+  const chatTurns = new Map<string, string>();
+  const CHAT_FRAME_LIMIT = 256 * 1024;
+  const CHAT_TEXT_LIMIT = 128 * 1024;
+  const CHAT_KEY_LIMIT = 256;
+  const CHAT_TURNS_MAX = 256;
+
+  function baseAdmissionSkipReason(request: unknown): string | undefined {
+    if (!request || typeof request !== "object" || Array.isArray(request)) return "invalid-request";
+    if (!("operation" in request) || !("pid" in request) ||
+        !("pane_id" in request) || !("session_path" in request) ||
+        !Number.isSafeInteger(request.pid) ||
+        typeof request.pane_id !== "string" || typeof request.session_path !== "string" ||
+        !path.posix.isAbsolute(request.session_path)) return "invalid-request";
+    if (request.pid !== process.pid) return "pid-mismatch";
+    if (request.pane_id !== paneId) return "pane-mismatch";
+    if (controlClosed || !rootSession) return "interactive-context-unavailable";
+    if (!currentAgentSessionPath || request.session_path !== currentAgentSessionPath) {
+      return "session-mismatch";
+    }
+    return undefined;
+  }
+
+  function chatSubmitSkipReason(request: Record<string, unknown>): string | undefined {
+    const base = baseAdmissionSkipReason(request);
+    if (base) return base;
+    if (request.operation !== "chat_submit") return "invalid-request";
+    const text = request.text;
+    const key = request.idempotency_key;
+    if (typeof text !== "string" || text.length === 0 || text.length > CHAT_TEXT_LIMIT) {
+      return "invalid-request";
+    }
+    if (typeof key !== "string" || key.length === 0 || key.length > CHAT_KEY_LIMIT ||
+        /[\s\u0000-\u001f\u007f]/.test(key)) {
+      return "invalid-request";
+    }
+    if (typeof pi?.sendUserMessage !== "function") return "structured-capability-unavailable";
+    return undefined;
+  }
+
+  function abortSkipReason(request: Record<string, unknown>): string | undefined {
+    const base = baseAdmissionSkipReason(request);
+    if (base) return base;
+    if (request.operation !== "abort") return "invalid-request";
+    if (typeof currentContext?.abort !== "function") return "structured-capability-unavailable";
+    if (desiredState().state !== "working") return "agent-not-working";
+    return undefined;
+  }
+
   function startControl() {
     if (controlServer || controlClosed || process.platform !== "linux" || !process.geteuid) return;
     const uid = process.geteuid();
@@ -389,16 +439,60 @@ export default function (pi) {
         let replied = false;
         client.on("data", (chunk) => {
           if (replied) return;
-          const tooLarge = input.length + chunk.length > 8192;
+          const tooLarge = input.length + chunk.length > CHAT_FRAME_LIMIT;
           if (!tooLarge) input = Buffer.concat([input, chunk]);
           const newline = input.indexOf(10);
           let reason: string | undefined;
+          let outcome: { status: string; reason: string; turn_id?: string } | undefined;
           if (tooLarge) reason = "request-too-large";
           else if (newline < 0) return;
           else if (newline !== input.length - 1) reason = "invalid-frame";
           else {
             try {
-              reason = restartSkipReason(JSON.parse(input.subarray(0, newline).toString("utf8")));
+              const parsed = JSON.parse(input.subarray(0, newline).toString("utf8"));
+              const operation = (parsed as Record<string, unknown>)?.operation;
+              if (operation === "chat_submit") {
+                const skip = chatSubmitSkipReason(parsed as Record<string, unknown>);
+                if (skip) {
+                  reason = skip;
+                } else {
+                  const request = parsed as { text: string; idempotency_key: string };
+                  const existing = chatTurns.get(request.idempotency_key);
+                  if (existing) {
+                    outcome = { status: "accepted", reason: "duplicate", turn_id: existing };
+                  } else {
+                    try {
+                      pi.sendUserMessage(request.text);
+                    } catch {
+                      reason = "send-failed";
+                    }
+                    if (!reason) {
+                      const turnId = globalThis.crypto?.randomUUID?.() ??
+                        `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+                      if (chatTurns.size >= CHAT_TURNS_MAX) {
+                        const oldest = chatTurns.keys().next().value;
+                        if (oldest !== undefined) chatTurns.delete(oldest);
+                      }
+                      chatTurns.set(request.idempotency_key, turnId);
+                      outcome = { status: "accepted", reason: "", turn_id: turnId };
+                    }
+                  }
+                }
+              } else if (operation === "abort") {
+                const skip = abortSkipReason(parsed as Record<string, unknown>);
+                if (skip) {
+                  reason = skip;
+                } else {
+                  try {
+                    currentContext?.abort();
+                    outcome = { status: "accepted", reason: "" };
+                  } catch {
+                    reason = "abort-failed";
+                  }
+                }
+              } else {
+                reason = restartSkipReason(parsed);
+              }
             } catch {
               reason = "invalid-request";
             }
@@ -406,6 +500,10 @@ export default function (pi) {
           replied = true;
           if (reason) {
             client.end(`${JSON.stringify({ status: "skipped", reason })}\n`);
+            return;
+          }
+          if (outcome) {
+            client.end(`${JSON.stringify(outcome)}\n`);
             return;
           }
           restartAccepted = true;

@@ -104,6 +104,12 @@ pub enum ResponseResult {
     AgentPrompted {
         agent: AgentInfo,
     },
+    AgentChatSubmitted {
+        result: super::agents::AgentChatSubmitResult,
+    },
+    AgentTurnAborted {
+        result: super::agents::AgentTurnAbortResult,
+    },
     AgentList {
         agents: Vec<AgentInfo>,
     },
