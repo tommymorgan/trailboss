@@ -7,6 +7,11 @@ This fork is maintained for my own workflow first, and published in case the
 pieces are useful to anyone else. Upstream [herdr](https://herdr.dev) remains
 the supported product; expect this line to diverge freely.
 
+
+<p align="center">
+  <img src="docs/assets/trailboss-demo.png" alt="Trailboss: agent sidebar with per-agent panes alongside a shell workspace" width="820">
+</p>
+
 ## Why my own fork
 
 I run a couple dozen coding agents in one long-lived session, attach to them
