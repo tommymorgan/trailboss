@@ -10,6 +10,15 @@ use trailboss_runtime::protocol::widgets::Context;
 
 #[test]
 fn c01_neutral_consumer_uses_actual_projection_and_invokes_true_owners_once() {
+    consume_command_catalog(false);
+}
+
+#[test]
+fn c02_manifest_action_addition_publishes_without_registration_or_consumer_changes() {
+    consume_command_catalog(true);
+}
+
+fn consume_command_catalog(add_action_after_link: bool) {
     let core = support::Core::new();
     let review = core.request(
         "workspace.create",
@@ -30,9 +39,48 @@ fn c01_neutral_consumer_uses_actual_projection_and_invokes_true_owners_once() {
     std::fs::create_dir_all(&consumer).unwrap();
     let recorded = owner.join("recorded.jsonl");
     let wrong_owner = consumer.join("invocations");
-    std::fs::write(owner.join("trailboss-plugin.toml"), "id = \"demo.owner\"\nname = \"Demo owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"record-target\"\ntitle = \"Record target\"\ncontexts = [\"pane\"]\ncommand = [\"python3\", \"record.py\"]\n").unwrap();
+    let owner_manifest = "id = \"demo.owner\"\nname = \"Demo owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n";
+    let declared_action = "[[actions]]\nid = \"record-target\"\ntitle = \"Record target\"\ncontexts = [\"pane\"]\ncommand = [\"python3\", \"record.py\"]\n";
+    let complete_manifest = format!("{owner_manifest}{declared_action}");
+    std::fs::write(
+        owner.join("trailboss-plugin.toml"),
+        if add_action_after_link {
+            owner_manifest
+        } else {
+            &complete_manifest
+        },
+    )
+    .unwrap();
     std::fs::write(owner.join("record.py"), format!("import json, os\nwith open({:?}, 'a') as output:\n output.write(json.dumps({{'owner':os.environ['HERDR_PLUGIN_ID'],'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON'])}})+'\\n')\n", recorded.to_str().unwrap())).unwrap();
     core.request("plugin.link", json!({"path":owner,"enabled":true}));
+    if add_action_after_link {
+        let key = json!({"kind":"plugin","plugin_id":"demo.owner","action_id":"record-target"});
+        let before = core.request("ui.command.list", json!({}));
+        assert!(!before["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command["key"] == key));
+        // Only the ordinary manifest changes. No link, enable, registration,
+        // consumer rewrite or action-specific publication call follows it.
+        std::fs::write(owner.join("trailboss-plugin.toml"), &complete_manifest).unwrap();
+        let refreshed = core.request("ui.command.list", json!({}));
+        let published: Vec<_> = refreshed["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|command| command["key"] == key)
+            .collect();
+        assert_eq!(
+            published.len(),
+            1,
+            "ordinary manifest addition must publish automatically"
+        );
+        assert_eq!(published[0]["title"], "Record target");
+        assert!(published[0]["fragment_name"]
+            .as_str()
+            .is_some_and(|name| !name.is_empty()));
+    }
     let driver = format!(
         "{}/tests/support/command_consumer.py",
         env!("CARGO_MANIFEST_DIR")
