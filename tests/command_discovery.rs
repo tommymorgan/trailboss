@@ -171,3 +171,165 @@ fn consume_command_catalog(add_action_after_link: bool) {
         "consumer was incorrectly invoked as the action owner"
     );
 }
+
+#[test]
+fn c03_core_inventory_resolves_to_native_actions_without_controls_or_rpc_commands() {
+    use trailboss_runtime::protocol::widgets::Node;
+    let core = support::Core::new();
+    let catalog = core.request("ui.command.list", json!({}));
+    let commands = catalog["commands"].as_array().unwrap();
+    // Source-independent user inventory: intentionally not copied from CORE_COMMANDS
+    // at runtime, and not inferred from API methods or reserved parser membership.
+    let inventory = [
+        ("host:new-space", None, "workspace.create"),
+        ("host:new", None, "tab.create"),
+        ("host:new-tab", None, "tab.create"),
+        ("host:rename-space", None, "workspace.rename"),
+        ("host:rename-tab", None, "tab.rename"),
+        ("host:close-tab", None, "tab.close"),
+        ("host:focus", Some("targeted"), "tab.focus"),
+        ("host:focus", Some("previous"), ""),
+        ("host:restart-idle-agents", None, "agent.restart_idle"),
+        ("host:detach", None, ""),
+    ];
+    assert_eq!(
+        commands.len(),
+        inventory.len(),
+        "only the independent user inventory belongs in the empty-plugin Core catalog"
+    );
+    for excluded in [
+        "host:create",
+        "host:cancel",
+        "workspace.list",
+        "agent.read",
+        "pane.send_text",
+        "terminal.input",
+        "tab.cycle",
+    ] {
+        assert!(
+            !commands
+                .iter()
+                .any(|command| command["key"]["action_id"] == excluded),
+            "{excluded} is not a standalone user command"
+        );
+    }
+    let mut client = core.attach();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.boot_id.is_empty() || client.declarations.is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "actual Core projection was not received"
+        );
+        client.receive().unwrap();
+    }
+    assert_eq!(catalog["boot_id"], client.boot_id);
+    let declarations = client.declarations.as_ref().unwrap();
+    fn count_action(node: &Node, wanted: &str) -> usize {
+        match node {
+            Node::Row {
+                action,
+                children,
+                menu,
+                ..
+            } => {
+                usize::from(action.as_deref() == Some(wanted))
+                    + children
+                        .iter()
+                        .map(|child| count_action(child, wanted))
+                        .sum::<usize>()
+                    + menu.as_deref().map_or(0, |menu| count_action(menu, wanted))
+            }
+            Node::Column { children } => children
+                .iter()
+                .map(|child| count_action(child, wanted))
+                .sum(),
+            _ => 0,
+        }
+    }
+    for (action, mode, method) in inventory {
+        let mut key = json!({"kind":"core","action_id":action});
+        if let Some(mode) = mode {
+            key["mode"] = json!(mode);
+        }
+        let matching: Vec<_> = commands
+            .iter()
+            .filter(|command| command["key"] == key)
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "missing or duplicated authoritative mode: {key}"
+        );
+        let command = matching[0];
+        let name = command["fragment_name"].as_str().unwrap();
+        let mut native = NativeCore::default();
+        let (owner, tree) = native
+            .fragment(declarations, name)
+            .expect("advertised Core locator must resolve in actual projection");
+        assert_eq!(owner, "trailboss.core");
+        assert_eq!(
+            count_action(tree, action),
+            1,
+            "published fragment must retain its actual native host action"
+        );
+        let mut labels = Vec::new();
+        for (_, declaration) in declarations {
+            if declaration
+                .fragments
+                .iter()
+                .any(|fragment| fragment.name == name)
+            {
+                assert!(
+                    declaration.validate(|_| false),
+                    "Core exports must validate without plugin action handlers"
+                );
+                labels.push(declaration);
+            }
+        }
+        assert_eq!(labels.len(), 1);
+        let context = if mode == Some("previous") || action == "host:detach" {
+            Context::default()
+        } else {
+            serde_json::from_value(json!({"workspace_id":"captured-space","tab_id":"captured-tab","pane_id":"captured-pane"})).unwrap()
+        };
+        native.update_session(
+            Some("native-space".to_owned()),
+            Some("native-tab".to_owned()),
+            true,
+        );
+        let effect = if matches!(
+            action,
+            "host:new-space"
+                | "host:new"
+                | "host:new-tab"
+                | "host:rename-space"
+                | "host:rename-tab"
+        ) {
+            assert!(matches!(
+                native.prepare_palette(action, &context),
+                Effect::Consumed
+            ));
+            assert!(matches!(
+                native.text("C03 entered name"),
+                Some(Effect::Consumed)
+            ));
+            native
+                .text("\r")
+                .expect("published name action must submit through the native owner")
+        } else {
+            native.invoke(action, &context, None)
+        };
+        if method.is_empty() {
+            assert!(
+                matches!(effect, Effect::Consumed),
+                "client-local action must not become a plugin invocation"
+            );
+            assert_eq!(native.detach_requested, action == "host:detach");
+        } else {
+            let Effect::Request { method: actual, .. } = effect else {
+                panic!("{action} did not reach existing native request dispatch")
+            };
+            assert_eq!(actual, method);
+        }
+    }
+}
