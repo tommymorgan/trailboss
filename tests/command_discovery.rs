@@ -2192,3 +2192,200 @@ fn c19_twenty_thousand_valid_actions_surface_a_complete_publication_failure_with
         .iter()
         .any(|workspace| workspace["workspace_id"] == survivor["workspace"]["workspace_id"]));
 }
+
+#[test]
+fn c20_native_nested_use_dispatches_explicit_child_scope_after_other_focus() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use trailboss::terminal::{
+        menus::{Controls, Response},
+        Rect,
+    };
+    let core = support::Core::new();
+    let parent = core.request(
+        "workspace.create",
+        json!({"label":"Review","cwd":core.home,"focus":true}),
+    );
+    core.request(
+        "tab.rename",
+        json!({"tab_id":parent["tab"]["tab_id"],"label":"Parent"}),
+    );
+    let child = core.request(
+        "workspace.create",
+        json!({"label":"ChildScope","cwd":core.home,"focus":false}),
+    );
+    core.request(
+        "tab.rename",
+        json!({"tab_id":child["tab"]["tab_id"],"label":"Child"}),
+    );
+    let other = core.request(
+        "workspace.create",
+        json!({"label":"Other","cwd":core.home,"focus":false}),
+    );
+    let captured = |resource: &Value| {
+        json!({
+            "workspace_id":resource["workspace"]["workspace_id"],
+            "tab_id":resource["tab"]["tab_id"],"pane_id":resource["root_pane"]["pane_id"],
+        })
+    };
+    let parent_context = captured(&parent);
+    let child_context = captured(&child);
+    let owner = core.home.join("nested-owner");
+    let consumer = core.home.join("nested-consumer");
+    std::fs::create_dir_all(&owner).unwrap();
+    std::fs::create_dir_all(&consumer).unwrap();
+    std::fs::write(owner.join("trailboss-plugin.toml"),
+        "id = \"demo.owner\"\nname = \"Nested action owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"record-target\"\ntitle = \"Record explicit child\"\ncontexts = [\"pane\"]\ncommand = [\"python3\", \"record.py\"]\n").unwrap();
+    std::fs::write(owner.join("record.py"),
+        "import json, os\nwith open('executed.jsonl','a') as output:\n output.write(json.dumps({'owner':os.environ['HERDR_PLUGIN_ID'],'action':os.environ['HERDR_PLUGIN_ACTION_ID'],'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON'])})+'\\n')\n").unwrap();
+    core.request("plugin.link", json!({"path":owner,"enabled":true}));
+    let catalog = core.request("ui.command.list", json!({}));
+    let command = catalog["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| {
+            command["key"]
+                == json!({"kind":"plugin","plugin_id":"demo.owner","action_id":"record-target"})
+        })
+        .unwrap();
+    let label = |text: &str| json!({"type":"label","text":text,"role":"primary"});
+    let declaration = json!({"herdr":"widget_tree","version":1,"zones":[],
+    "fragments":[{"name":"command-palette","priority":1000000,"tree":{
+        "type":"column","children":[{
+            "type":"row","children":[label("Review Parent")],"context":parent_context,
+            "menu":{"type":"column","children":[{
+                "type":"row","children":[label("ChildScope Child")],"context":child_context,
+                "menu":{"type":"column","children":[{"type":"use","name":command["fragment_name"]}]}
+            }]}
+        }]
+    }}]});
+    std::fs::write(consumer.join("trailboss-plugin.toml"),
+        "id = \"fixture.nested-consumer\"\nname = \"Nested neutral consumer\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[ui]]\nid = \"menus\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"consumer.py\"]\n").unwrap();
+    std::fs::write(
+        consumer.join("consumer.py"),
+        format!("print({:?}, flush=True)\n", declaration.to_string()),
+    )
+    .unwrap();
+    core.request("plugin.link", json!({"path":consumer,"enabled":true}));
+    let mut client = core.attach();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if client.declarations.as_ref().is_some_and(|declarations| {
+            declarations.iter().any(|(provider, declaration)| {
+                provider == "fixture.nested-consumer"
+                    && declaration
+                        .fragments
+                        .iter()
+                        .any(|fragment| fragment.name == "command-palette")
+            })
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actual ordinary nested consumer not published"
+        );
+        client.receive().unwrap();
+    }
+    let mut native = NativeCore::default();
+    native.update_session(
+        parent_context["workspace_id"].as_str().map(str::to_owned),
+        parent_context["tab_id"].as_str().map(str::to_owned),
+        true,
+    );
+    let mut controls = Controls::default();
+    let viewport = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 24,
+    };
+    assert!(controls.open_palette(&native, client.declarations.as_ref().unwrap(), None));
+    for _ in 0..2 {
+        assert!(matches!(
+            controls.key(
+                &native,
+                client.declarations.as_ref().unwrap(),
+                viewport,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+            ),
+            Response::Consumed
+        ));
+    }
+    assert!(
+        !owner.join("executed.jsonl").exists(),
+        "opening target menus must not invoke an action"
+    );
+    core.request(
+        "workspace.focus",
+        json!({"workspace_id":other["workspace"]["workspace_id"]}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.focused_tab_id.as_deref())
+        != other["tab"]["tab_id"].as_str()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "actual later Other focus not received"
+        );
+        client.receive().unwrap();
+    }
+    let snapshot = client.snapshot.as_ref().unwrap();
+    native.update_session(
+        snapshot.focused_workspace_id.clone(),
+        snapshot.focused_tab_id.clone(),
+        true,
+    );
+    let Response::Invoke(selected) = controls.key(
+        &native,
+        client.declarations.as_ref().unwrap(),
+        viewport,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    ) else {
+        panic!("nested ordinary Use must yield its true owner action");
+    };
+    assert_eq!(selected.plugin, "demo.owner");
+    assert_eq!(selected.action, "record-target");
+    assert!(matches!(
+        native.invoke(&selected.action, &selected.context, Some(snapshot)),
+        Effect::Plugin
+    ));
+    client
+        .input()
+        .unwrap()
+        .invoke(
+            &client.boot_id,
+            &selected.plugin,
+            &selected.action,
+            &selected.context,
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let records = loop {
+        if let Ok(text) = std::fs::read_to_string(owner.join("executed.jsonl")) {
+            let records: Vec<Value> = text
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            if !records.is_empty() {
+                break records;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actual nested owner invocation did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["owner"], "demo.owner");
+    assert_eq!(records[0]["action"], "record-target");
+    for field in ["workspace_id", "tab_id", "pane_id"] {
+        assert_eq!(records[0]["context"][field], child_context[field]);
+        assert_ne!(records[0]["context"][field], parent_context[field]);
+        assert_ne!(records[0]["context"][field], captured(&other)[field]);
+    }
+}
