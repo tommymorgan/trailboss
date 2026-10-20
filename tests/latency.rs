@@ -137,26 +137,38 @@ fn producer_dispatch_to_completed_selected_surface_meets_latency_gate() {
     }
     for (action, index) in [("open-workspace", 5), ("focus-tab", 8), ("focus-pane", 9)] {
         let target = &populations[index];
-        let declarations = client.declarations.as_ref().unwrap();
-        let (plugin, action_id, context) = trailboss::sidebar::rows(declarations)
-            .enumerate()
-            .find_map(|(row, _)| {
-                let (plugin, declared, context) = trailboss::sidebar::action_at(declarations, row)?;
-                (declared == action
-                    && match action {
-                        "open-workspace" => {
-                            context.workspace_id.as_deref() == target["workspace"].as_str()
-                        }
-                        "focus-tab" => context.tab_id.as_deref() == target["tab"].as_str(),
-                        _ => context.pane_id.as_deref() == target["pane"].as_str(),
+        let declaration_started = Instant::now();
+        let (plugin, action_id, context) = loop {
+            let declarations = client.declarations.as_ref().unwrap();
+            if let Some(selection) =
+                trailboss::sidebar::rows(declarations)
+                    .enumerate()
+                    .find_map(|(row, _)| {
+                        let (plugin, declared, context) =
+                            trailboss::sidebar::action_at(declarations, row)?;
+                        (declared == action
+                            && match action {
+                                "open-workspace" => {
+                                    context.workspace_id.as_deref() == target["workspace"].as_str()
+                                }
+                                "focus-tab" => context.tab_id.as_deref() == target["tab"].as_str(),
+                                _ => context.pane_id.as_deref() == target["pane"].as_str(),
+                            })
+                        .then_some((
+                            plugin.to_owned(),
+                            declared.to_owned(),
+                            context.clone(),
+                        ))
                     })
-                .then_some((
-                    plugin.to_owned(),
-                    declared.to_owned(),
-                    context.clone(),
-                ))
-            })
-            .expect("actual producer declaration missing selection action");
+            {
+                break selection;
+            }
+            assert!(
+                declaration_started.elapsed() < Duration::from_secs(8),
+                "actual producer declaration missing selection action"
+            );
+            client.receive().unwrap();
+        };
         let started = Instant::now();
         client
             .input()

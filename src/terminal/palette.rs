@@ -11,7 +11,10 @@ use crossterm::{
     style::{Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor},
 };
 use std::io::{self, Write};
-use trailboss_runtime::protocol::widgets::{Context, Node};
+use trailboss_runtime::{
+    core_actions::COMMAND_FRAGMENT_PREFIX,
+    protocol::widgets::{Context, Node},
+};
 use unicode_width::UnicodeWidthChar;
 
 fn draw_input(out: &mut impl Write, rect: Rect, text: &str) -> io::Result<()> {
@@ -58,11 +61,13 @@ struct Identity {
     plugin: String,
     action: Option<String>,
     context: Context,
+    command_locator: Option<String>,
     anonymous_label: String,
 }
 struct Entry<'a> {
     plugin: &'a str,
     node: &'a Node,
+    command_locator: Option<&'a str>,
     label: String,
     group: Option<&'a Node>,
 }
@@ -80,6 +85,7 @@ impl Entry<'_> {
         self.plugin == identity.plugin
             && *action == identity.action
             && *context == identity.context
+            && self.command_locator == identity.command_locator.as_deref()
             && (identity.anonymous_label.is_empty() || self.label == identity.anonymous_label)
     }
     fn identity(&self) -> Identity {
@@ -93,7 +99,11 @@ impl Entry<'_> {
             plugin: self.plugin.into(),
             action: action.clone(),
             context: context.clone(),
-            anonymous_label: if action.is_none() && *context == Context::default() {
+            command_locator: self.command_locator.map(str::to_owned),
+            anonymous_label: if self.command_locator.is_none()
+                && action.is_none()
+                && *context == Context::default()
+            {
                 self.label.clone()
             } else {
                 String::new()
@@ -128,6 +138,7 @@ fn collect<'a>(
     declarations: &'a Declarations,
     plugin: &'a str,
     node: &'a Node,
+    command_locator: Option<&'a str>,
     depth: usize,
     view: &mut View<'a>,
 ) {
@@ -140,7 +151,22 @@ fn collect<'a>(
     match node {
         Node::Use { name } => {
             if let Some((provider, tree)) = core.fragment(declarations, name) {
-                collect(core, declarations, provider, tree, depth + 1, view);
+                // Only Core-issued command Uses gain private identity. Ordinary public
+                // Use aliases retain their existing owner/action/context/label matching.
+                let command_locator = if name.starts_with(COMMAND_FRAGMENT_PREFIX) {
+                    Some(name.as_str())
+                } else {
+                    command_locator
+                };
+                collect(
+                    core,
+                    declarations,
+                    provider,
+                    tree,
+                    command_locator,
+                    depth + 1,
+                    view,
+                );
             }
         }
         Node::Row {
@@ -155,12 +181,21 @@ fn collect<'a>(
                 view.entries.push(Entry {
                     plugin,
                     node,
+                    command_locator,
                     label: text,
                     group: None,
                 });
             } else {
                 for child in children {
-                    collect(core, declarations, plugin, child, depth + 1, view);
+                    collect(
+                        core,
+                        declarations,
+                        plugin,
+                        child,
+                        command_locator,
+                        depth + 1,
+                        view,
+                    );
                 }
             }
         }
@@ -170,7 +205,15 @@ fn collect<'a>(
                 .first()
                 .filter(|node| matches!(node, Node::Label { role, .. } if role == "heading"));
             for child in children {
-                collect(core, declarations, plugin, child, depth + 1, view);
+                collect(
+                    core,
+                    declarations,
+                    plugin,
+                    child,
+                    command_locator,
+                    depth + 1,
+                    view,
+                );
             }
             if let Some(heading) = heading {
                 for entry in &mut view.entries[start..] {
@@ -178,13 +221,20 @@ fn collect<'a>(
                 }
             }
         }
-        Node::Flex { child, .. } | Node::Modal { child } => {
-            collect(core, declarations, plugin, child, depth + 1, view)
-        }
+        Node::Flex { child, .. } | Node::Modal { child } => collect(
+            core,
+            declarations,
+            plugin,
+            child,
+            command_locator,
+            depth + 1,
+            view,
+        ),
         Node::Input => view.input = true,
         Node::Label { text, role, .. } if role == "heading" => view.entries.push(Entry {
             plugin,
             node,
+            command_locator,
             label: text.clone(),
             group: None,
         }),
@@ -251,9 +301,18 @@ impl Palette {
         if plugin != self.provider {
             return None;
         }
+        let mut command_locator = None;
         for identity in &self.path {
             let mut view = View::default();
-            collect(core, declarations, plugin, tree, 0, &mut view);
+            collect(
+                core,
+                declarations,
+                plugin,
+                tree,
+                command_locator,
+                0,
+                &mut view,
+            );
             let mut matches = view.entries.iter().filter(|entry| entry.matches(identity));
             let entry = matches.next()?;
             if matches.next().is_some() {
@@ -267,9 +326,18 @@ impl Palette {
             };
             plugin = entry.plugin;
             tree = menu;
+            command_locator = entry.command_locator;
         }
         let mut view = View::default();
-        collect(core, declarations, plugin, tree, 0, &mut view);
+        collect(
+            core,
+            declarations,
+            plugin,
+            tree,
+            command_locator,
+            0,
+            &mut view,
+        );
         if !view.input {
             let grouped = view.entries.iter().any(|entry| entry.group.is_some());
             if grouped {
@@ -433,7 +501,15 @@ impl Palette {
         }
         let mut child_view = View::default();
         if let Some(menu) = menu {
-            collect(core, declarations, entry.plugin, menu, 0, &mut child_view);
+            collect(
+                core,
+                declarations,
+                entry.plugin,
+                menu,
+                entry.command_locator,
+                0,
+                &mut child_view,
+            );
         }
         let prepares_input = child_view.input;
         let response = action

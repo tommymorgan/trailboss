@@ -11,8 +11,8 @@ use crate::{
     api::schema::{ResponseResult, UiCommandInfo, UiCommandKey, UiCommandTarget},
     app::{App, AppState},
     core_actions::{
-        CoreCommandInteraction, CoreCommandTarget, CoreFocusMode, COMMAND_FRAGMENT_PREFIX,
-        CORE_COMMANDS,
+        CoreAction, CoreCommandInteraction, CoreCommandTarget, CoreFocusMode,
+        COMMAND_FRAGMENT_PREFIX, CORE_COMMANDS,
     },
     protocol::{
         endpoint::{EndpointPluginUi, EndpointPluginUiItem, PLUGIN_UI_KIND},
@@ -295,15 +295,30 @@ pub(crate) fn projection(
             {
                 continue;
             }
-            let (tree, diagnostic) = match action.confirmation_fragment.as_deref() {
-                None => (Some(row(&action.title, Some(&action.id), None)), None),
-                Some(name) => match confirmation(&ordinary, &plugin.plugin_id, &action.id, name) {
-                    Ok(menu) => (Some(row(&action.title, None, Some(menu.clone()))), None),
-                    Err(reason) => (
-                        None,
-                        Some(format!("{}/{}: {reason}", plugin.plugin_id, action.id)),
-                    ),
-                },
+            // Native dispatch reserves these identities before plugin routing.
+            // Keep legacy registration intact, but never issue a plugin Use
+            // that would execute a different (Core-owned) operation.
+            let (tree, diagnostic) = if CoreAction::parse(&action.id).is_some() {
+                (
+                    None,
+                    Some(format!(
+                        "{}/{}: action identity is reserved by Core",
+                        plugin.plugin_id, action.id
+                    )),
+                )
+            } else {
+                match action.confirmation_fragment.as_deref() {
+                    None => (Some(row(&action.title, Some(&action.id), None)), None),
+                    Some(name) => {
+                        match confirmation(&ordinary, &plugin.plugin_id, &action.id, name) {
+                            Ok(menu) => (Some(row(&action.title, None, Some(menu.clone()))), None),
+                            Err(reason) => (
+                                None,
+                                Some(format!("{}/{}: {reason}", plugin.plugin_id, action.id)),
+                            ),
+                        }
+                    }
+                }
             };
             publish(
                 &plugin.plugin_id,

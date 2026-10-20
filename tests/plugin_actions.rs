@@ -19,7 +19,7 @@ fn producer_stdin_action_correlates_unfocused_tab_and_successful_result() {
             && client
                 .declarations
                 .as_ref()
-                .is_some_and(|trees| !trees.is_empty())
+                .is_some_and(|trees| trailboss::sidebar::rows(trees).any(|(_, node)| matches!(node, trailboss_runtime::protocol::widgets::Node::Row { context, .. } if context.tab_id.as_deref() == Some(&fixture.target))))
         {
             break;
         }

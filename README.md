@@ -79,6 +79,9 @@ rows: `host:cancel` and that action, with no target override or nested behavior.
 Opening it does not invoke the action. Missing, invalid or ambiguous exports
 leave the command listed with a `diagnostic` but no actionable generated
 wrapper; consumers must not substitute a direct invocation.
+The same unresolved behavior applies when a plugin declares a reserved Core
+action ID: legacy registration remains intact, but discovery never issues a
+plugin wrapper that would execute a different Core operation.
 
 ## Thanks
 

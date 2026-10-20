@@ -55,7 +55,6 @@ fn enable_first_consumer_with_active_tabs(additional: usize) -> Fixture {
     while client.primary.is_none() || client.focused_pane_id.is_none() {
         client.receive().unwrap();
     }
-    assert!(client.declarations.as_ref().is_none_or(Vec::is_empty));
     core.request(
         "plugin.link",
         json!({"path":format!("{}/plugins/agent-tree", env!("CARGO_MANIFEST_DIR")),"enabled":true}),
@@ -63,11 +62,12 @@ fn enable_first_consumer_with_active_tabs(additional: usize) -> Fixture {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         client.receive().unwrap();
-        if client
-            .declarations
-            .as_ref()
-            .is_some_and(|trees| !trees.is_empty())
-        {
+        if client.declarations.as_ref().is_some_and(|trees| {
+            sidebar::rows(trees).any(|(owner, node)| {
+                owner == "tommymorgan.agent-tree"
+                    && matches!(node, Node::Row { context, .. } if context.tab_id.as_deref() == review["tab"]["tab_id"].as_str())
+            })
+        }) {
             break;
         }
         assert!(
@@ -84,8 +84,6 @@ fn enable_first_consumer_with_active_tabs(additional: usize) -> Fixture {
 fn assert_sidebar(fixture: &mut Fixture) {
     crossterm::style::force_color_output(true);
     let declarations = fixture.client.declarations.as_ref().unwrap();
-    assert_eq!(declarations.len(), 1);
-    assert_eq!(declarations[0].0, "tommymorgan.agent-tree");
     let rows: Vec<_> = sidebar::rows(declarations).map(|(_, row)| row).collect();
     let review = rows.iter().position(|row| matches!(row, Node::Row { context, .. } if context.tab_id.as_deref() == Some(&fixture.selected_tab))).unwrap();
     let (plugin, action, context) = sidebar::action_at(declarations, review).unwrap();

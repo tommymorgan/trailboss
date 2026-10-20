@@ -9,6 +9,58 @@ use trailboss::core::{Core as NativeCore, Effect};
 use trailboss_runtime::protocol::widgets::Context;
 
 #[test]
+fn reserved_core_action_collision_is_discoverable_but_cannot_detach_through_plugin_use() {
+    let core = support::Core::new();
+    let owner = core.home.join("reserved-owner");
+    std::fs::create_dir_all(&owner).unwrap();
+    std::fs::write(
+        owner.join("trailboss-plugin.toml"),
+        "id = \"fixture.reserved\"\nname = \"Reserved owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"host:detach\"\ntitle = \"Plugin detach collision\"\ncommand = [\"true\"]\n",
+    )
+    .unwrap();
+    core.request("plugin.link", json!({"path":owner,"enabled":true}));
+    let catalog = core.request("ui.command.list", json!({}));
+    let command = catalog["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| {
+            command["key"]
+                == json!({"kind":"plugin","plugin_id":"fixture.reserved","action_id":"host:detach"})
+        })
+        .expect("manifest declaration remains discoverable");
+    let locator = command["fragment_name"].as_str().unwrap();
+    let mut client = core.attach();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.boot_id.is_empty() || client.declarations.is_none() {
+        client.receive().unwrap();
+        assert!(Instant::now() < deadline);
+    }
+    assert!(
+        NativeCore::default()
+            .fragment(client.declarations.as_ref().unwrap(), locator)
+            .is_none(),
+        "a plugin locator must not resolve to the reserved native detach operation"
+    );
+    assert!(
+        command["diagnostic"]
+            .as_str()
+            .is_some_and(|diagnostic| diagnostic.contains("fixture.reserved/host:detach")),
+        "unresolved owner must be reported without suppressing metadata"
+    );
+    let legacy = core.request("plugin.action.list", json!({}));
+    assert!(
+        legacy["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["plugin_id"] == "fixture.reserved"
+                && action["action_id"] == "host:detach"),
+        "legacy action registration must not change"
+    );
+}
+
+#[test]
 fn c01_neutral_consumer_uses_actual_projection_and_invokes_true_owners_once() {
     consume_command_catalog(CatalogChange::None);
 }
@@ -2814,5 +2866,407 @@ fn unusual_title_native_invocations(titles: [String; 3], display: [String; 2]) {
         for field in ["workspace_id", "tab_id", "pane_id"] {
             assert_eq!(matching[0]["context"][field], context[field]);
         }
+    }
+}
+
+#[test]
+fn c24_same_captured_scope_keeps_second_confirmation_locator_through_real_refresh() {
+    confirmation_locator_refresh(true);
+}
+
+#[test]
+fn c24_default_scope_shortened_identical_labels_keep_second_confirmation_through_refresh() {
+    confirmation_locator_refresh(false);
+}
+
+fn confirmation_locator_refresh(captured_scope: bool) {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use trailboss::{
+        sidebar::Declarations,
+        terminal::{menus::Response, FrameRenderer, Rect},
+    };
+    use trailboss_runtime::protocol::widgets::Node;
+    let core = support::Core::new();
+    let target = core.request(
+        "workspace.create",
+        json!({"label":"Review","cwd":core.home,"focus":true}),
+    );
+    let other = core.request(
+        "workspace.create",
+        json!({"label":"Other","cwd":core.home,"focus":false}),
+    );
+    let context = if captured_scope {
+        json!({"workspace_id":target["workspace"]["workspace_id"],
+            "tab_id":target["tab"]["tab_id"],"pane_id":target["root_pane"]["pane_id"]})
+    } else {
+        json!({"workspace_id":null,"tab_id":null,"pane_id":null})
+    };
+    let owner = core.home.join("confirmation-owner");
+    let consumer = core.home.join("confirmation-consumer");
+    std::fs::create_dir_all(&owner).unwrap();
+    std::fs::create_dir_all(&consumer).unwrap();
+    let mut manifest = String::from(
+        "id = \"fixture.destructive\"\nname = \"Confirmation identity owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n");
+    for action in ["first", "second"] {
+        let title = if captured_scope {
+            "Remove owned fixture".to_owned()
+        } else {
+            format!("{} {action}", "界".repeat(250))
+        };
+        manifest.push_str(&format!(
+            "[[actions]]\nid = {action:?}\ntitle = {}\ncontexts = [\"pane\"]\nconfirmation_fragment = \"confirm.{action}\"\ncommand = [\"python3\", \"delete.py\"]\n",
+            json!(title)));
+        std::fs::write(
+            owner.join(format!("{action}-state")),
+            format!("original {action}"),
+        )
+        .unwrap();
+    }
+    manifest.push_str("[[ui]]\nid = \"confirmations\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"publish.py\"]\nstream = true\n");
+    std::fs::write(owner.join("trailboss-plugin.toml"), manifest).unwrap();
+    std::fs::write(owner.join("delete.py"),
+        "import json, os, pathlib\naction = os.environ['HERDR_PLUGIN_ACTION_ID']\npathlib.Path(action+'-state').unlink()\nwith open('executed.jsonl','a') as output:\n output.write(json.dumps({'owner':os.environ['HERDR_PLUGIN_ID'],'action':action,'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON'])})+'\\n')\n").unwrap();
+    let publisher = "import pathlib, time\npath = pathlib.Path('ui.json')\nlast = None\nwhile True:\n text = path.read_text()\n if text != last:\n  print(text, flush=True)\n  last = text\n time.sleep(0.02)\n";
+    std::fs::write(owner.join("publish.py"), publisher).unwrap();
+    std::fs::write(consumer.join("publish.py"), publisher).unwrap();
+    let owner_ui = |stage: &str, reverse: bool| {
+        let mut actions = vec!["first", "second"];
+        if reverse {
+            actions.reverse();
+        }
+        json!({"herdr":"widget_tree","version":1,"zones":[],
+            "fragments":actions.into_iter().map(|action| json!({
+                "name":format!("confirm.{action}"),"priority":0,
+                "tree":{"type":"column","children":[
+                    {"type":"label","text":format!("Confirm {action} {stage}"),"role":"primary"},
+                    {"type":"row","children":[{"type":"label","text":"Cancel","role":"primary"}],"action":"host:cancel"},
+                    {"type":"row","children":[{"type":"label","text":"Accept","role":"primary"}],"action":action}
+                ]}
+            })).collect::<Vec<_>>()})
+    };
+    std::fs::write(
+        owner.join("ui.json"),
+        owner_ui("initial", false).to_string(),
+    )
+    .unwrap();
+    core.request("plugin.link", json!({"path":owner,"enabled":true}));
+    let keys: Vec<_> = ["first", "second"]
+        .into_iter()
+        .map(|action| json!({"kind":"plugin","plugin_id":"fixture.destructive","action_id":action}))
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let commands = loop {
+        let catalog = core.request("ui.command.list", json!({}));
+        let commands: Vec<Value> = keys
+            .iter()
+            .filter_map(|key| {
+                catalog["commands"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|command| command["key"] == *key && command["diagnostic"].is_null())
+                    .cloned()
+            })
+            .collect();
+        if commands.len() == 2 {
+            break commands;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actual same-owner confirmation exports were not published"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_ne!(commands[0]["fragment_name"], commands[1]["fragment_name"]);
+    if !captured_scope {
+        assert_ne!(
+            commands[0]["title"], commands[1]["title"],
+            "default-scope fixture must exercise distinct titles shortened to the same label"
+        );
+    }
+    let names: Vec<String> = commands
+        .iter()
+        .map(|command| command["fragment_name"].as_str().unwrap().to_owned())
+        .collect();
+    let consumer_ui = |reverse: bool| {
+        let order = if reverse { [1, 0] } else { [0, 1] };
+        let uses = json!({"type":"column","children":order.into_iter().map(|index|
+            json!({"type":"use","name":names[index]})).collect::<Vec<_>>()});
+        let tree = if captured_scope {
+            json!({"type":"column","children":[{
+                "type":"row","children":[{"type":"label","text":"Captured target","role":"primary"}],
+                "context":context,"menu":uses
+            }]})
+        } else {
+            uses
+        };
+        json!({"herdr":"widget_tree","version":1,"zones":[],
+            "fragments":[{"name":"command-palette","priority":1000000,"tree":tree}]})
+    };
+    std::fs::write(consumer.join("trailboss-plugin.toml"),
+        "id = \"fixture.confirmation-consumer\"\nname = \"Neutral confirmation consumer\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[ui]]\nid = \"commands\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"publish.py\"]\nstream = true\n").unwrap();
+    std::fs::write(consumer.join("ui.json"), consumer_ui(false).to_string()).unwrap();
+    core.request("plugin.link", json!({"path":consumer,"enabled":true}));
+    let mut client = core.attach();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.boot_id.is_empty()
+        || client.snapshot.is_none()
+        || !client.declarations.as_ref().is_some_and(|declarations| {
+            declarations.iter().any(|(owner, declaration)| {
+                owner == "fixture.confirmation-consumer"
+                    && declaration
+                        .fragments
+                        .iter()
+                        .any(|fragment| fragment.name == "command-palette")
+            })
+        })
+    {
+        assert!(
+            Instant::now() < deadline,
+            "actual native confirmation consumer was not published"
+        );
+        client.receive().unwrap();
+    }
+    let mut native = NativeCore::default();
+    let snapshot = client.snapshot.as_ref().unwrap();
+    native.update_session(
+        snapshot.focused_workspace_id.clone(),
+        snapshot.focused_tab_id.clone(),
+        true,
+    );
+    let declarations = client.declarations.as_ref().unwrap();
+    let labels: Vec<_> = names
+        .iter()
+        .map(|name| {
+            let (provider, tree) = native.fragment(declarations, name).unwrap();
+            assert_eq!(provider, "fixture.destructive");
+            let Node::Row {
+                action, children, ..
+            } = tree
+            else {
+                panic!("generated confirmation must be an ordinary Row")
+            };
+            assert!(
+                action.is_none(),
+                "a generated outer confirmation must have no destructive action"
+            );
+            let Node::Label { text, .. } = &children[0] else {
+                panic!("missing generated display label")
+            };
+            text.clone()
+        })
+        .collect();
+    assert_eq!(
+        labels[0], labels[1],
+        "both real issued commands must be display-identical"
+    );
+    assert_eq!(labels[0].ends_with('…'), !captured_scope);
+    let viewport = Rect::viewport(100, 30);
+    let mut renderer = FrameRenderer::default();
+    let mut screen = ghostty_vt::Terminal::new(100, 30, 0).unwrap();
+    let mut render =
+        |renderer: &mut FrameRenderer, native: &NativeCore, declarations: &Declarations| {
+            let mut bytes = Vec::new();
+            renderer
+                .draw_frame(&mut bytes, None, declarations, native, viewport)
+                .unwrap();
+            screen.write(&bytes);
+            screen
+                .screen_text_rows()
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    row.cells
+                        .iter()
+                        .flat_map(|cell| cell.graphemes.iter())
+                        .filter_map(|cp| char::from_u32(*cp))
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+    assert!(renderer.controls.open_palette(&native, declarations, None));
+    if captured_scope {
+        assert!(matches!(
+            renderer.controls.key(
+                &native,
+                declarations,
+                viewport,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+            ),
+            Response::Consumed
+        ));
+    }
+    assert!(matches!(
+        renderer.controls.key(
+            &native,
+            declarations,
+            viewport,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)
+        ),
+        Response::Consumed
+    ));
+    assert!(matches!(
+        renderer.controls.key(
+            &native,
+            declarations,
+            viewport,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+        ),
+        Response::Consumed
+    ));
+    assert!(render(&mut renderer, &native, declarations).contains("Confirm second initial"),
+        "native UI must open the second issued command's actual confirmation, not unwind an ambiguous path");
+    assert!(!owner.join("executed.jsonl").exists());
+    assert_eq!(
+        std::fs::read_to_string(owner.join("first-state")).unwrap(),
+        "original first"
+    );
+    assert_eq!(
+        std::fs::read_to_string(owner.join("second-state")).unwrap(),
+        "original second"
+    );
+    core.request(
+        "workspace.focus",
+        json!({"workspace_id":other["workspace"]["workspace_id"]}),
+    );
+    for (path, declaration) in [
+        (owner.join("ui.json"), owner_ui("refreshed", true)),
+        (consumer.join("ui.json"), consumer_ui(true)),
+    ] {
+        let pending = path.with_extension("next");
+        std::fs::write(&pending, declaration.to_string()).unwrap();
+        std::fs::rename(pending, path).unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let refreshed = client.declarations.as_ref().is_some_and(|declarations| {
+            let Some((_, fragment)) = declarations
+                .iter()
+                .filter(|(owner, _)| owner == "fixture.confirmation-consumer")
+                .flat_map(|(owner, declaration)| {
+                    declaration
+                        .fragments
+                        .iter()
+                        .map(move |fragment| (owner, fragment))
+                })
+                .find(|(_, fragment)| fragment.name == "command-palette")
+            else {
+                return false;
+            };
+            let tree = serde_json::to_value(&fragment.tree).unwrap();
+            let children = if captured_scope {
+                &tree["children"][0]["menu"]["children"]
+            } else {
+                &tree["children"]
+            };
+            let reordered = children.as_array().is_some_and(|children| {
+                children.len() == 2
+                    && children[0]["name"] == names[1]
+                    && children[1]["name"] == names[0]
+            });
+            let second_updated =
+                native
+                    .fragment(declarations, &names[1])
+                    .is_some_and(|(_, tree)| {
+                        let tree = serde_json::to_value(tree).unwrap();
+                        tree["menu"]["children"][0]["text"] == "Confirm second refreshed"
+                    });
+            reordered && second_updated
+        });
+        let focused_other = client
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.focused_tab_id.as_deref())
+            == other["tab"]["tab_id"].as_str();
+        if refreshed && focused_other {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actual reordered Uses, refreshed owner confirmation and later focus were not received"
+        );
+        client.receive().unwrap();
+    }
+    let snapshot = client.snapshot.as_ref().unwrap();
+    native.update_session(
+        snapshot.focused_workspace_id.clone(),
+        snapshot.focused_tab_id.clone(),
+        true,
+    );
+    let declarations = client.declarations.as_ref().unwrap();
+    assert!(
+        render(&mut renderer, &native, declarations).contains("Confirm second refreshed"),
+        "native refresh must retain the second locator's confirmation ancestry after reorder"
+    );
+    assert!(matches!(
+        renderer.controls.key(
+            &native,
+            declarations,
+            viewport,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)
+        ),
+        Response::Consumed
+    ));
+    let Response::Invoke(selected) = renderer.controls.key(
+        &native,
+        declarations,
+        viewport,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    ) else {
+        panic!("accepting the retained confirmation must invoke its real owner");
+    };
+    assert!(matches!(
+        native.invoke(&selected.action, &selected.context, Some(snapshot)),
+        Effect::Plugin
+    ));
+    client
+        .input()
+        .unwrap()
+        .invoke(
+            &client.boot_id,
+            &selected.plugin,
+            &selected.action,
+            &selected.context,
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let logs = core.request(
+            "plugin.log.list",
+            json!({"plugin_id":"fixture.destructive"}),
+        );
+        if logs["logs"].as_array().unwrap().iter().any(|log| {
+            matches!(log["action_id"].as_str(), Some("first" | "second"))
+                && log["status"] == "succeeded"
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "real destructive fixture action did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        std::fs::read_to_string(owner.join("first-state")).unwrap(),
+        "original first",
+        "acceptance must not mutate the display-identical first action's fixture state"
+    );
+    assert!(
+        !owner.join("second-state").exists(),
+        "only the second action must delete its fixture state"
+    );
+    let records: Vec<Value> = std::fs::read_to_string(owner.join("executed.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["owner"], "fixture.destructive");
+    assert_eq!(records[0]["action"], "second");
+    for field in ["workspace_id", "tab_id", "pane_id"] {
+        assert_eq!(records[0]["context"][field], context[field],
+            "confirmation acceptance must retain the original captured/default context, never later focus");
     }
 }

@@ -600,3 +600,41 @@ fn shared_confirmation_inherits_chosen_identity_but_explicit_child_scope_wins() 
         );
     }
 }
+
+#[test]
+fn ordinary_use_alias_refresh_retains_existing_anonymous_menu_matching() {
+    let core = Core::default();
+    let ordinary = json!({"type":"row",
+    "children":[{"type":"label","text":"Open ordinary","role":"label"}],
+    "menu":{"type":"column","children":[
+        {"type":"row","children":[{"type":"label","text":"Cancel","role":"label"}],"action":"host:cancel"},
+        {"type":"row","children":[{"type":"label","text":"Accept","role":"label"}],"action":"ordinary"}
+    ]}});
+    let mut declarations = vec![
+        fragment(
+            "catalog",
+            "command-palette",
+            0,
+            column(vec![json!({"type":"use","name":"ordinary.before"})]),
+        ),
+        fragment("ordinary-owner", "ordinary.before", 0, ordinary.clone()),
+        fragment("ordinary-owner", "ordinary.after", 0, ordinary),
+    ];
+    let mut controls = Controls::default();
+    assert!(controls.open_palette(&core, &declarations, None));
+    assert!(matches!(
+        key(&mut controls, &core, &declarations, KeyCode::Enter),
+        Response::Consumed
+    ));
+    declarations[0] = fragment(
+        "catalog",
+        "command-palette",
+        0,
+        column(vec![json!({"type":"use","name":"ordinary.after"})]),
+    );
+    controls.reconcile(&core, &declarations, Rect::viewport(100, 30));
+    key(&mut controls, &core, &declarations, KeyCode::Down);
+    let selected = invoked(key(&mut controls, &core, &declarations, KeyCode::Enter));
+    assert_eq!(selected.plugin, "ordinary-owner");
+    assert_eq!(selected.action, "ordinary");
+}
