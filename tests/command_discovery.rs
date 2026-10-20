@@ -10,15 +10,26 @@ use trailboss_runtime::protocol::widgets::Context;
 
 #[test]
 fn c01_neutral_consumer_uses_actual_projection_and_invokes_true_owners_once() {
-    consume_command_catalog(false);
+    consume_command_catalog(CatalogChange::None);
 }
 
 #[test]
 fn c02_manifest_action_addition_publishes_without_registration_or_consumer_changes() {
-    consume_command_catalog(true);
+    consume_command_catalog(CatalogChange::AddAction);
 }
 
-fn consume_command_catalog(add_action_after_link: bool) {
+#[test]
+fn c04_manifest_title_change_updates_projection_without_changing_identity_or_owner() {
+    consume_command_catalog(CatalogChange::RenameAction);
+}
+
+enum CatalogChange {
+    None,
+    AddAction,
+    RenameAction,
+}
+
+fn consume_command_catalog(change: CatalogChange) {
     let core = support::Core::new();
     let review = core.request(
         "workspace.create",
@@ -44,7 +55,7 @@ fn consume_command_catalog(add_action_after_link: bool) {
     let complete_manifest = format!("{owner_manifest}{declared_action}");
     std::fs::write(
         owner.join("trailboss-plugin.toml"),
-        if add_action_after_link {
+        if matches!(change, CatalogChange::AddAction) {
             owner_manifest
         } else {
             &complete_manifest
@@ -53,7 +64,7 @@ fn consume_command_catalog(add_action_after_link: bool) {
     .unwrap();
     std::fs::write(owner.join("record.py"), format!("import json, os\nwith open({:?}, 'a') as output:\n output.write(json.dumps({{'owner':os.environ['HERDR_PLUGIN_ID'],'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON'])}})+'\\n')\n", recorded.to_str().unwrap())).unwrap();
     core.request("plugin.link", json!({"path":owner,"enabled":true}));
-    if add_action_after_link {
+    if matches!(change, CatalogChange::AddAction) {
         let key = json!({"kind":"plugin","plugin_id":"demo.owner","action_id":"record-target"});
         let before = core.request("ui.command.list", json!({}));
         assert!(!before["commands"]
@@ -81,6 +92,61 @@ fn consume_command_catalog(add_action_after_link: bool) {
             .as_str()
             .is_some_and(|name| !name.is_empty()));
     }
+    let title_transition = if matches!(change, CatalogChange::RenameAction) {
+        let before = core.request("ui.command.list", json!({}));
+        let key = json!({"kind":"plugin","plugin_id":"demo.owner","action_id":"record-target"});
+        let command = before["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| command["key"] == key)
+            .expect("original action must be published")
+            .clone();
+        let mut client = core.attach();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while client.boot_id.is_empty() || client.declarations.is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "original owner projection missing"
+            );
+            client.receive().unwrap();
+        }
+        let native = NativeCore::default();
+        let (provider, tree) = native
+            .fragment(
+                client.declarations.as_ref().unwrap(),
+                command["fragment_name"].as_str().unwrap(),
+            )
+            .expect("original locator must resolve before title change");
+        assert_eq!(provider, "demo.owner");
+        let original_tree = serde_json::to_value(tree).unwrap();
+        assert_eq!(original_tree["children"][0]["text"], command["title"]);
+        let renamed = complete_manifest.replace(
+            "title = \"Record target\"",
+            "title = \"Capture review target\"",
+        );
+        std::fs::write(owner.join("trailboss-plugin.toml"), renamed).unwrap();
+        let after = core.request("ui.command.list", json!({}));
+        let changed = after["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|candidate| candidate["key"] == key)
+            .expect("title change must not withdraw the action");
+        assert_eq!(after["boot_id"], before["boot_id"]);
+        assert_ne!(
+            changed["title"], command["title"],
+            "discovery must reflect authoritative title edits"
+        );
+        assert_eq!(changed["title"], "Capture review target");
+        assert_eq!(
+            changed["fragment_name"], command["fragment_name"],
+            "presentation edits must retain the within-boot locator"
+        );
+        Some(command)
+    } else {
+        None
+    };
     let driver = format!(
         "{}/tests/support/command_consumer.py",
         env!("CARGO_MANIFEST_DIR")
@@ -118,6 +184,34 @@ fn consume_command_catalog(add_action_after_link: bool) {
         String::from_utf8_lossy(&output.stderr)
     );
     let observed: Value = serde_json::from_slice(&std::fs::read(evidence).unwrap()).unwrap();
+    if let Some(original_command) = title_transition {
+        let changed = observed["catalog"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| command["key"] == original_command["key"])
+            .unwrap();
+        assert_eq!(changed["fragment_name"], original_command["fragment_name"]);
+        assert_eq!(changed["title"], "Capture review target");
+        let fragment = observed["declarations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["plugin_id"] == "demo.owner")
+            .flat_map(|item| {
+                item["declaration"]["fragments"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+            })
+            .find(|fragment| fragment["name"] == original_command["fragment_name"])
+            .expect("renamed fragment must be in actual owner projection");
+        assert_eq!(fragment["tree"]["children"][0]["text"], changed["title"]);
+        assert_eq!(
+            fragment["tree"]["action"],
+            original_command["key"]["action_id"]
+        );
+    }
     let selections = observed["selections"].as_array().unwrap();
     assert_eq!(selections.len(), 2);
     let captured: Context = serde_json::from_value(selections[0]["context"].clone()).unwrap();
