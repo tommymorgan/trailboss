@@ -49,6 +49,8 @@ impl App {
             .retain(|key, _| self.state.installed_plugins.get(&key.0) == registry.get(&key.0));
         self.state.installed_plugins = registry;
         self.reconcile_plugin_ui();
+        self.render_dirty.request_generic();
+        self.render_notify.notify_one();
     }
 
     fn refresh_installed_plugins(&mut self) -> std::io::Result<()> {

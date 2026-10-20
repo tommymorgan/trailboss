@@ -67,6 +67,9 @@ projection. Do not reconstruct action IDs from titles or dotted strings.
 Resource commands belong under captured workspace/tab context; global and
 client-local commands belong outside resource wrappers and popup ancestry.
 Context hints are not an availability or permission check.
+Manifest changes discovered by the catalog also republish generated fragments
+to already-connected consumers. A title-only change retains the command's
+boot-scoped fragment identity and original action owner.
 
 Core publishes the interaction tree under its actual owner. Selection keeps
 the existing native name, confirmation, focus and detach flows, or invokes
