@@ -2389,3 +2389,159 @@ fn c20_native_nested_use_dispatches_explicit_child_scope_after_other_focus() {
         assert_ne!(records[0]["context"][field], captured(&other)[field]);
     }
 }
+
+#[test]
+fn c21_empty_eligible_plugin_set_keeps_full_core_inventory_and_real_targeted_focus() {
+    let core = support::Core::new();
+    let target = core.request(
+        "workspace.create",
+        json!({"label":"Review","cwd":core.home,"focus":true}),
+    );
+    core.request(
+        "tab.rename",
+        json!({"tab_id":target["tab"]["tab_id"],"label":"Target"}),
+    );
+    let other = core.request(
+        "workspace.create",
+        json!({"label":"Other","cwd":core.home,"focus":true}),
+    );
+    let context = json!({
+        "workspace_id":target["workspace"]["workspace_id"],
+        "tab_id":target["tab"]["tab_id"],"pane_id":target["root_pane"]["pane_id"],
+    });
+    let retired = core.home.join("retired-owner");
+    std::fs::create_dir_all(&retired).unwrap();
+    std::fs::write(retired.join("trailboss-plugin.toml"),
+        "id = \"fixture.retired\"\nname = \"Previously eligible owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"retired\"\ntitle = \"Retired plugin command\"\ncommand = [\"python3\", \"action.py\"]\n").unwrap();
+    std::fs::write(
+        retired.join("action.py"),
+        "open('executed','w').write('unexpected invocation')\n",
+    )
+    .unwrap();
+    core.request("plugin.link", json!({"path":retired,"enabled":true}));
+    let stale_key = json!({"kind":"plugin","plugin_id":"fixture.retired","action_id":"retired"});
+    assert!(core.request("ui.command.list", json!({}))["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command["key"] == stale_key));
+    core.request("plugin.disable", json!({"plugin_id":"fixture.retired"}));
+    let focus = json!({"kind":"core","action_id":"host:focus","mode":"targeted"});
+    let observed = probe_command_uses(&core, &context, &[focus]);
+    let commands = observed["catalog"]["commands"].as_array().unwrap();
+    // Source-independent inventory, including both distinct focus modes.
+    let inventory = [
+        ("host:new-space", None),
+        ("host:new", None),
+        ("host:new-tab", None),
+        ("host:rename-space", None),
+        ("host:rename-tab", None),
+        ("host:close-tab", None),
+        ("host:focus", Some("targeted")),
+        ("host:focus", Some("previous")),
+        ("host:restart-idle-agents", None),
+        ("host:detach", None),
+    ];
+    assert_eq!(
+        commands.len(),
+        inventory.len(),
+        "empty eligible plugin set must retain the complete Core inventory"
+    );
+    assert!(
+        commands
+            .iter()
+            .all(|command| command["key"]["kind"] == "core"),
+        "no stale plugin command may survive the transition to an empty eligible set"
+    );
+    for (action, mode) in inventory {
+        let mut key = json!({"kind":"core","action_id":action});
+        if let Some(mode) = mode {
+            key["mode"] = json!(mode);
+        }
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command["key"] == key)
+                .count(),
+            1,
+            "missing or duplicated Core command in the empty eligible set: {key}"
+        );
+    }
+    let selections = observed["selections"].as_array().unwrap();
+    assert_eq!(selections.len(), 1);
+    let selected = &selections[0];
+    assert_eq!(selected["plugin_id"], "trailboss.core");
+    assert_eq!(selected["action_id"], "host:focus");
+    assert_eq!(selected["context"], context);
+    let mut client = core.attach();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.boot_id.is_empty() || client.snapshot.is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "native Core snapshot was not received"
+        );
+        client.receive().unwrap();
+    }
+    let snapshot = client.snapshot.as_ref().unwrap();
+    assert_eq!(
+        snapshot.focused_tab_id.as_deref(),
+        other["tab"]["tab_id"].as_str(),
+        "the operation must change focus, not merely assert an already-focused target"
+    );
+    let mut native = NativeCore::default();
+    native.update_session(
+        snapshot.focused_workspace_id.clone(),
+        snapshot.focused_tab_id.clone(),
+        true,
+    );
+    let captured: Context = serde_json::from_value(selected["context"].clone()).unwrap();
+    let Effect::Request { method, params } = native.invoke(
+        selected["action_id"].as_str().unwrap(),
+        &captured,
+        Some(snapshot),
+    ) else {
+        panic!("ordinary generated Use did not select existing native Core dispatch");
+    };
+    client
+        .input()
+        .unwrap()
+        .request(&client.boot_id, method, params)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.snapshot.as_ref().unwrap().focused_tab_id.as_deref()
+        != target["tab"]["tab_id"].as_str()
+        && Instant::now() < deadline
+    {
+        if client.receive().is_err() {
+            break;
+        }
+    }
+    assert_eq!(
+        client.snapshot.as_ref().unwrap().focused_tab_id.as_deref(),
+        target["tab"]["tab_id"].as_str(),
+        "actual Core operation did not focus the captured target"
+    );
+    assert_eq!(
+        client
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .focused_workspace_id
+            .as_deref(),
+        target["workspace"]["workspace_id"].as_str()
+    );
+    let snapshot = core.request("session.snapshot", json!({}));
+    assert!(snapshot["snapshot"]["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tab| tab["tab_id"] == target["tab"]["tab_id"] && tab["focused"] == true));
+    assert!(
+        !retired.join("executed").exists(),
+        "a disabled owner must not run as fallback"
+    );
+    assert!(
+        !core.home.join("consumer/invocations").exists(),
+        "the actionless neutral consumer must not become an action owner"
+    );
+}
