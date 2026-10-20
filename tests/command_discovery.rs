@@ -619,3 +619,146 @@ fn assert_unavailable_command_rows(cases: &[(&str, &str)]) {
         }
     }
 }
+
+#[test]
+fn c07_duplicate_titles_and_dotted_names_invoke_only_the_selected_structured_owner() {
+    let identities = [("demo.alpha", "run"), ("demo", "alpha.run")];
+    let keys: Vec<_> = identities.iter().map(|(plugin_id, action_id)|
+        json!({"kind":"plugin","plugin_id":plugin_id,"action_id":action_id})).collect();
+    for selected_index in 0..identities.len() {
+        let core = support::Core::new();
+        let created = core.request(
+            "workspace.create",
+            json!({"label":"Review","cwd":core.home,"focus":true}),
+        );
+        let context = json!({
+            "workspace_id":created["workspace"]["workspace_id"],
+            "tab_id":created["tab"]["tab_id"],
+            "pane_id":created["root_pane"]["pane_id"],
+        });
+        let mut outputs = Vec::new();
+        for (index, (plugin_id, action_id)) in identities.iter().enumerate() {
+            let plugin = core.home.join(format!("dotted-owner-{index}"));
+            std::fs::create_dir_all(&plugin).unwrap();
+            std::fs::write(plugin.join("trailboss-plugin.toml"), format!(
+                "id = {plugin_id:?}\nname = \"Dotted owner fixture\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = {action_id:?}\ntitle = \"Run\"\ncommand = [\"python3\", \"record.py\"]\n"
+            )).unwrap();
+            std::fs::write(plugin.join("record.py"), format!(
+                "import json, os\nwith open('executed.jsonl', 'a') as output:\n output.write(json.dumps({{'owner':os.environ['HERDR_PLUGIN_ID'],'action':{action_id:?},'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON'])}})+'\\n')\n"
+            )).unwrap();
+            core.request("plugin.link", json!({"path":plugin,"enabled":true}));
+            outputs.push(plugin.join("executed.jsonl"));
+        }
+        let catalog = core.request("ui.command.list", json!({}));
+        let commands: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                catalog["commands"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|command| command["key"] == *key)
+                    .unwrap()
+            })
+            .collect();
+        assert_ne!(commands[0]["key"], commands[1]["key"]);
+        assert_eq!(
+            commands[0]["title"], commands[1]["title"],
+            "fixture must exercise duplicate display titles"
+        );
+        assert_ne!(
+            commands[0]["fragment_name"], commands[1]["fragment_name"],
+            "ambiguous dotted qualified strings must not collapse structured locators"
+        );
+        let observed = probe_command_uses(&core, &context, &keys);
+        let selection = &observed["selections"][selected_index];
+        assert_eq!(selection["plugin_id"], identities[selected_index].0);
+        assert_eq!(selection["action_id"], identities[selected_index].1);
+        let mut captured = selection["context"].clone();
+        captured["invocation_source"] = json!("plugin_ui");
+        let invoked = core.request("plugin.action.invoke", json!({
+            "plugin_id":selection["plugin_id"],"action_id":selection["action_id"],"context":captured,
+        }));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let logs = core.request(
+                "plugin.log.list",
+                json!({"plugin_id":identities[selected_index].0}),
+            );
+            if logs["logs"].as_array().unwrap().iter().any(|log| {
+                log["log_id"] == invoked["log"]["log_id"] && log["status"] == "succeeded"
+            }) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "selected real owner did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let text = std::fs::read_to_string(&outputs[selected_index]).unwrap();
+        let records: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["owner"], identities[selected_index].0);
+        assert_eq!(records[0]["action"], identities[selected_index].1);
+        for field in ["workspace_id", "tab_id", "pane_id"] {
+            assert_eq!(records[0]["context"][field], context[field]);
+        }
+        assert!(
+            !outputs[1 - selected_index].exists(),
+            "display-identical unselected owner executed"
+        );
+        assert!(
+            !core.home.join("consumer/invocations").exists(),
+            "neutral consumer executed as owner"
+        );
+    }
+}
+
+fn probe_command_uses(core: &support::Core, context: &Value, keys: &[Value]) -> Value {
+    let consumer = core.home.join("consumer");
+    std::fs::create_dir_all(&consumer).unwrap();
+    let config = consumer.join("config.json");
+    std::fs::write(
+        &config,
+        json!({"keys":keys,"context":context,
+        "consumer_invocations":consumer.join("invocations")})
+        .to_string(),
+    )
+    .unwrap();
+    let driver = format!(
+        "{}/tests/support/command_consumer.py",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::write(consumer.join("trailboss-plugin.toml"), format!(
+        "id = \"demo.consumer\"\nname = \"Neutral identity consumer\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[ui]]\nid = \"commands\"\nsurface = \"sidebar\"\ncommand = [\"python3\", {driver:?}, \"produce\", {:?}]\nstream = true\n",
+        config.to_str().unwrap()
+    )).unwrap();
+    core.request("plugin.link", json!({"path":consumer,"enabled":true}));
+    let api = core
+        .home
+        .join(format!("trailboss/sessions/{}/trailboss.sock", core.name));
+    let endpoint = core.home.join(format!(
+        "trailboss/sessions/{}/trailboss-client.sock",
+        core.name
+    ));
+    let evidence = core.home.join("identity-wire.json");
+    let output = Command::new("python3")
+        .arg(driver)
+        .arg("probe")
+        .arg(config)
+        .arg(api)
+        .arg(endpoint)
+        .arg(&evidence)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "independent identity consumer: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&std::fs::read(evidence).unwrap()).unwrap()
+}

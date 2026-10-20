@@ -453,7 +453,7 @@ fn validate_ui_actions(
 fn normalize_manifest_ui(
     entry: RawPluginManifestUi,
 ) -> Result<PluginManifestUi, (&'static str, String)> {
-    let id = normalize_action_id(&entry.id)
+    let id = normalize_local_id(&entry.id)
         .ok_or_else(|| ("invalid_plugin_ui_id", "invalid ui id".to_string()))?;
     let command = entry
         .command
@@ -544,7 +544,7 @@ fn normalize_manifest_action(
 fn normalize_manifest_pane(
     pane: RawPluginManifestPane,
 ) -> Result<PluginManifestPane, (&'static str, String)> {
-    let id = normalize_action_id(&pane.id)
+    let id = normalize_local_id(&pane.id)
         .ok_or_else(|| ("invalid_plugin_pane_id", "invalid pane id".to_string()))?;
     let title = non_empty_trimmed(
         &pane.title,
@@ -593,7 +593,7 @@ fn normalize_manifest_event(
 fn normalize_manifest_link_handler(
     handler: RawPluginManifestLinkHandler,
 ) -> Result<PluginManifestLinkHandler, (&'static str, String)> {
-    let id = normalize_action_id(&handler.id).ok_or_else(|| {
+    let id = normalize_local_id(&handler.id).ok_or_else(|| {
         (
             "invalid_plugin_link_handler_id",
             "invalid link handler id".to_string(),
@@ -721,6 +721,11 @@ pub(crate) fn normalize_plugin_id(value: &str) -> Option<String> {
 }
 
 pub(super) fn normalize_action_id(value: &str) -> Option<String> {
+    normalize_identifier(value, PLUGIN_ACTION_ID_MAX_CHARS)
+}
+
+/// UI, pane and link-handler entry names retain their original local grammar.
+pub(super) fn normalize_local_id(value: &str) -> Option<String> {
     normalize_local_identifier(value, PLUGIN_ACTION_ID_MAX_CHARS)
 }
 

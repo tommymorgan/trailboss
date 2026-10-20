@@ -17,7 +17,8 @@ use crate::api::schema::{
 use crate::app::App;
 pub(super) use manifest::normalize_plugin_id;
 use manifest::{
-    effective_platforms, ensure_platform_supported, normalize_action_id, normalize_plugin_source,
+    effective_platforms, ensure_platform_supported, normalize_action_id, normalize_local_id,
+    normalize_plugin_source,
 };
 
 #[cfg(test)]
@@ -505,7 +506,7 @@ impl App {
                 format!("plugin {plugin_id} is disabled"),
             );
         }
-        let Some(entrypoint) = normalize_action_id(&params.entrypoint) else {
+        let Some(entrypoint) = normalize_local_id(&params.entrypoint) else {
             return encode_error(id, "invalid_plugin_entrypoint", "invalid entrypoint id");
         };
         let Some(mut pane) = plugin
@@ -1773,7 +1774,7 @@ command = ["echo", "b"]
     }
 
     #[test]
-    fn link_rejects_dotted_action_ids() {
+    fn link_accepts_dotted_action_ids_without_flattening_them() {
         let root = unique_temp_path("plugin-dotted-action");
         write_manifest_content(
             &root,
@@ -1791,8 +1792,44 @@ command = ["echo", "build"]
 "#,
         );
 
-        let result = load_plugin_manifest(&root.display().to_string(), true);
-        assert!(matches!(result, Err(("invalid_plugin_action_id", _))));
+        let plugin = load_plugin_manifest(&root.display().to_string(), true).unwrap();
+        assert_eq!(plugin.actions.len(), 1);
+        assert_eq!(plugin.actions[0].id, "build.release");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dotted_action_acceptance_preserves_identifier_safety_and_local_entry_grammar() {
+        let root = unique_temp_path("plugin-action-id-safety");
+        let header = "id = \"example.id-safety\"\nname = \"Identifier safety\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.6.10\"\n";
+        for invalid in [
+            "",
+            "run task",
+            "run/task",
+            "run\\task",
+            "run\u{1b}",
+            "rún",
+            &"x".repeat(121),
+        ] {
+            let id = serde_json::to_string(invalid).unwrap();
+            write_manifest_content(&root, &format!("{header}\n[[actions]]\nid = {id}\ntitle = \"Run\"\ncommand = [\"echo\", \"run\"]\n"));
+            assert!(
+                matches!(
+                    load_plugin_manifest(&root.display().to_string(), true),
+                    Err(("invalid_plugin_action_id", _))
+                ),
+                "unsafe action id accepted: {invalid:?}"
+            );
+        }
+        for (entry, expected) in [
+            ("[[ui]]\nid = \"alpha.run\"\nsurface = \"sidebar\"\n", "invalid_plugin_ui_id"),
+            ("[[panes]]\nid = \"alpha.run\"\ntitle = \"Pane\"\ncommand = [\"echo\", \"pane\"]\n", "invalid_plugin_pane_id"),
+            ("[[link_handlers]]\nid = \"alpha.run\"\ntitle = \"Open link\"\npattern = \"https://example.com/*\"\naction = \"run\"\n", "invalid_plugin_link_handler_id"),
+        ] {
+            write_manifest_content(&root, &format!("{header}\n{entry}"));
+            assert!(matches!(load_plugin_manifest(&root.display().to_string(), true),
+                Err((code, _)) if code == expected), "local entry grammar changed: {entry}");
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

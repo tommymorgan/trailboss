@@ -28,14 +28,15 @@ def catalog(path):
     return result
 
 
-def selected(commands):
-    keys = [{'kind': 'core', 'action_id': 'host:focus', 'mode': 'targeted'},
-            {'kind': 'plugin', 'plugin_id': 'demo.owner', 'action_id': 'record-target'}]
+def selected(commands, keys=None):
+    if keys is None:
+        keys = [{'kind': 'core', 'action_id': 'host:focus', 'mode': 'targeted'},
+                {'kind': 'plugin', 'plugin_id': 'demo.owner', 'action_id': 'record-target'}]
     return [next(command for command in commands if command['key'] == key) for key in keys]
 
 
 def producer(config):
-    commands = selected(catalog(os.environ['HERDR_SOCKET_PATH'])['commands'])
+    commands = selected(catalog(os.environ['HERDR_SOCKET_PATH'])['commands'], config.get('keys'))
     tree = {'type': 'column', 'children': [
         {'type': 'row', 'context': config['context'], 'children': [
             {'type': 'use', 'name': command['fragment_name']}]} for command in commands]}
@@ -49,7 +50,7 @@ def producer(config):
 
 def probe(config, api, endpoint, output):
     discovered = catalog(api)
-    commands = selected(discovered['commands'])
+    commands = selected(discovered['commands'], config.get('keys'))
     for command in commands:
         assert all(field in command for field in ('key', 'title', 'contexts', 'target', 'fragment_name')), command
         assert command['title'] and command['fragment_name'], command
@@ -108,11 +109,14 @@ def probe(config, api, endpoint, output):
             if consumer:
                 for placement in consumer['zones']:
                     visit(placement['tree'], 'demo.consumer', {})
-            if len(found) == 2:
+            if len(found) == len(commands):
                 assert boot == discovered['boot_id'], 'catalog and actual projection belong to different boots'
                 assert [item['fragment_name'] for item in found] == [item['fragment_name'] for item in commands]
-                assert found[0]['action_id'] == 'host:focus', found
-                assert found[1]['plugin_id'] == 'demo.owner' and found[1]['action_id'] == 'record-target', found
+                for selection, command in zip(found, commands):
+                    key = command['key']
+                    assert selection['action_id'] == key['action_id'], found
+                    expected_owner = key['plugin_id'] if key['kind'] == 'plugin' else 'trailboss.core'
+                    assert selection['plugin_id'] == expected_owner, found
                 assert all(item['context'] == config['context'] for item in found), found
                 state['selections'] = found
                 with open(output, 'w', encoding='utf8') as artifact:
