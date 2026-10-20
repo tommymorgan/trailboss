@@ -952,3 +952,171 @@ fn c09_removed_explicit_rename_target_does_not_redirect_to_later_focus() {
         .iter()
         .any(|tab| tab["tab_id"] == other["tab"]["tab_id"] && tab["focused"] == true));
 }
+
+#[test]
+fn c10_published_action_uses_one_existing_stream_or_spawn_without_failure_retry() {
+    for (stream_count, fail_forward) in [(0, false), (1, false), (2, false), (1, true)] {
+        let core = support::Core::new();
+        let created = core.request(
+            "workspace.create",
+            json!({"label":"Review","cwd":core.home,"focus":true}),
+        );
+        let captured = json!({
+            "workspace_id":created["workspace"]["workspace_id"],
+            "tab_id":created["tab"]["tab_id"],"pane_id":created["root_pane"]["pane_id"],
+        });
+        let plugin = core.home.join("dispatch-owner");
+        std::fs::create_dir_all(&plugin).unwrap();
+        let mut manifest = "id = \"demo.owner\"\nname = \"Dispatch owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"record-target\"\ntitle = \"Record target\"\ncommand = [\"python3\", \"spawn.py\"]\n".to_owned();
+        for index in 0..stream_count {
+            manifest.push_str(&format!(
+                "\n[[ui]]\nid = \"stream-{index}\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"stream.py\", \"{index}\", \"{}\"]\nstream = true\nstream_actions = true\n",
+                if fail_forward { "closed" } else { "ready" }
+            ));
+        }
+        std::fs::write(plugin.join("trailboss-plugin.toml"), manifest).unwrap();
+        std::fs::write(plugin.join("spawn.py"), "import json, os\nwith open('spawn.jsonl', 'a') as output:\n output.write(json.dumps({'owner':os.environ['HERDR_PLUGIN_ID'],'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON'])})+'\\n')\n").unwrap();
+        std::fs::write(plugin.join("stream.py"), r#"import json, os, sys, time
+index, mode = sys.argv[1:]
+if mode == 'closed':
+    os.close(0)
+print(json.dumps({'herdr':'widget_tree','version':1,'zones':[],'fragments':[
+    {'name':'fixture.dispatch-stream.'+index,'priority':0,'tree':{'type':'label','role':'label','text':'Ready stream '+index}}
+]}), flush=True)
+if mode == 'closed':
+    while True:
+        time.sleep(0.01)
+for line in sys.stdin:
+    envelope = json.loads(line)
+    with open('stream-'+index+'.jsonl', 'a') as output:
+        output.write(json.dumps(envelope)+'\n')
+    print(json.dumps({'herdr':'action_result','id':envelope['id'],'ok':True}), flush=True)
+"#).unwrap();
+        core.request("plugin.link", json!({"path":plugin,"enabled":true}));
+        if stream_count > 0 {
+            let mut client = core.attach();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let ready = client.declarations.as_ref().is_some_and(|declarations| {
+                    (0..stream_count).all(|index| {
+                        declarations.iter().any(|(owner, declaration)| {
+                            owner == "demo.owner"
+                                && declaration.fragments.iter().any(|fragment| {
+                                    fragment.name == format!("fixture.dispatch-stream.{index}")
+                                })
+                        })
+                    })
+                });
+                if ready {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "real eligible owner streams did not publish readiness"
+                );
+                client.receive().unwrap();
+            }
+        }
+        let observed = probe_command_uses(
+            &core,
+            &captured,
+            &[json!({"kind":"plugin","plugin_id":"demo.owner","action_id":"record-target"})],
+        );
+        let selection = &observed["selections"][0];
+        let mut context = selection["context"].clone();
+        context["invocation_source"] = json!("plugin_ui");
+        let invoked = core.request("plugin.action.invoke", json!({
+            "plugin_id":selection["plugin_id"],"action_id":selection["action_id"],"context":context,
+        }));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let finished = loop {
+            let logs = core.request("plugin.log.list", json!({"plugin_id":"demo.owner"}));
+            let matching: Vec<_> = logs["logs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|log| log["log_id"] == invoked["log"]["log_id"])
+                .collect();
+            assert_eq!(
+                matching.len(),
+                1,
+                "invocation must have one correlated existing owner log"
+            );
+            if matching[0]["status"] != "running" {
+                break matching[0].clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "existing owner completion path did not settle"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let spawn: Vec<Value> = std::fs::read_to_string(plugin.join("spawn.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let forwarded: Vec<Value> = (0..stream_count)
+            .flat_map(|index| {
+                std::fs::read_to_string(plugin.join(format!("stream-{index}.jsonl")))
+                    .unwrap_or_default()
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect::<Vec<Value>>()
+            })
+            .collect();
+        if fail_forward {
+            assert_eq!(
+                finished["status"], "failed",
+                "broken eligible stream must surface failure"
+            );
+            assert!(
+                finished["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("forward write failed")),
+                "failure must come from the real closed producer input: {finished}"
+            );
+            assert!(
+                spawn.is_empty(),
+                "forwarding failure must not retry via an action process"
+            );
+            assert!(
+                forwarded.is_empty(),
+                "closed producer input cannot execute the operation"
+            );
+        } else {
+            assert_eq!(
+                finished["status"], "succeeded",
+                "owner operation failed: {finished}"
+            );
+            if stream_count == 0 {
+                assert_eq!(
+                    spawn.len(),
+                    1,
+                    "no eligible owner stream must spawn exactly one action process"
+                );
+                assert!(forwarded.is_empty());
+                assert_eq!(spawn[0]["owner"], "demo.owner");
+                for field in ["workspace_id", "tab_id", "pane_id"] {
+                    assert_eq!(spawn[0]["context"][field], captured[field]);
+                }
+            } else {
+                assert!(
+                    spawn.is_empty(),
+                    "eligible stream must not also spawn an action process"
+                );
+                assert_eq!(
+                    forwarded.len(),
+                    1,
+                    "one selection must reach exactly one eligible owner stream"
+                );
+                assert_eq!(forwarded[0]["id"], invoked["log"]["log_id"]);
+                assert_eq!(forwarded[0]["action_id"], "record-target");
+                for field in ["workspace_id", "tab_id", "pane_id"] {
+                    assert_eq!(forwarded[0]["context"][field], captured[field]);
+                }
+            }
+        }
+        assert!(!core.home.join("consumer/invocations").exists());
+    }
+}
