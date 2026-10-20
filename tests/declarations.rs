@@ -270,6 +270,118 @@ fn new_tab_edit_keeps_its_original_workspace_after_focus_changes() {
 }
 
 #[test]
+fn reserved_actions_keep_stock_requests_controls_and_plugin_validation() {
+    use trailboss::core::Effect;
+    let context = Context {
+        workspace_id: Some("captured-space".into()),
+        tab_id: Some("captured-tab".into()),
+        ..Default::default()
+    };
+    for (action, method, params) in [
+        (
+            "host:new-space",
+            "workspace.create",
+            json!({"label":"New space","focus":true}),
+        ),
+        (
+            "host:new-tab",
+            "tab.create",
+            json!({"workspace_id":"captured-space","label":"New tab","focus":true}),
+        ),
+        (
+            "host:close-tab",
+            "tab.close",
+            json!({"tab_id":"captured-tab"}),
+        ),
+        ("host:focus", "tab.focus", json!({"tab_id":"captured-tab"})),
+        ("host:restart-idle-agents", "agent.restart_idle", json!({})),
+    ] {
+        let mut core = Core::default();
+        core.update_session(Some("other-space".into()), Some("other-tab".into()), true);
+        let Effect::Request {
+            method: actual,
+            params: actual_params,
+        } = core.invoke(action, &context, None)
+        else {
+            panic!("{action} did not issue its stock request")
+        };
+        assert_eq!((actual, actual_params), (method, params), "{action}");
+        assert!(core.text("unrelated PTY input").is_none(), "{action}");
+    }
+    for workspace in [None, Some("native-space")] {
+        let mut core = Core::default();
+        core.update_session(workspace.map(str::to_owned), None, true);
+        core.invoke("host:new", &context, None);
+        core.update_session(Some("later-space".into()), None, true);
+        assert!(matches!(core.text("Entered"), Some(Effect::Consumed)));
+        let Some(Effect::Request { method, params }) = core.text("\r") else {
+            panic!("name interaction did not submit")
+        };
+        let expected = match workspace {
+            Some(id) => (
+                "tab.create",
+                json!({"workspace_id":id,"label":"Entered","focus":true}),
+            ),
+            None => ("workspace.create", json!({"label":"Entered","focus":true})),
+        };
+        assert_eq!((method, params), expected);
+        assert!(!core.editing());
+    }
+    for action in [
+        "host:new-space",
+        "host:new",
+        "host:new-tab",
+        "host:rename-space",
+        "host:rename-tab",
+        "host:close-tab",
+        "host:focus",
+        "host:restart-idle-agents",
+        "host:detach",
+        "host:create",
+        "host:cancel",
+        "plugin-action",
+        "host:unknown",
+        "host:Focus",
+        "focus",
+    ] {
+        let declaration: Declaration = serde_json::from_value(json!({
+            "herdr":"widget_tree","version":1,"zones":[],
+            "fragments":[{"name":"reserved-test","priority":0,"tree":{"type":"row","children":[],
+                "action":action}}]
+        }))
+        .unwrap();
+        let reserved =
+            action.starts_with("host:") && !matches!(action, "host:unknown" | "host:Focus");
+        assert_eq!(declaration.validate(|_| false), reserved, "{action}");
+        assert_eq!(
+            declaration.validate(|_| true),
+            !action.starts_with("host:") || reserved,
+            "{action}"
+        );
+    }
+    let mut core = Core::default();
+    core.update_session(None, None, true);
+    assert!(matches!(
+        core.invoke("plugin-action", &context, None),
+        Effect::Plugin
+    ));
+    assert!(matches!(
+        core.invoke("host:unknown", &context, None),
+        Effect::Plugin
+    ));
+    core.invoke("host:new", &context, None);
+    core.text("Cancelled");
+    core.invoke("host:cancel", &context, None);
+    assert!(!core.editing());
+    assert!(core.input_text.is_empty());
+    assert!(core.text("PTY input").is_none());
+    assert!(matches!(
+        core.invoke("host:create", &context, None),
+        Effect::Consumed
+    ));
+}
+
+#[test]
 fn public_declarations_are_the_only_visible_composition_in_all_four_states() {
     for (state, action, pane_y) in [
         ("no pane yet", None, None),

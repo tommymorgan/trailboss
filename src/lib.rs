@@ -1,4 +1,5 @@
 use std::{io, os::unix::net::UnixStream, path::Path};
+pub use trailboss_runtime::core_actions;
 use trailboss_runtime::protocol::{
     self, ClientMessage, ClientPaneInputEvent, ClientSurfaceSize, ServerMessage,
 };

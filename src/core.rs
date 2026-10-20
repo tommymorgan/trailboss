@@ -1,6 +1,7 @@
 //! Shared Core semantics and declaration selection. No renderer types or geometry.
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
+use trailboss_runtime::core_actions::CoreAction;
 use trailboss_runtime::protocol::widgets::{Condition, Context, Declaration, Node};
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -213,15 +214,17 @@ impl Core {
     }
     /// Prepare a palette name step without activating stock declaration forms.
     pub fn prepare_palette(&mut self, action: &str, context: &Context) -> Effect {
-        let interaction = match action {
-            "host:new-space" => Some(PaletteInteraction::NewSpace),
-            "host:new-tab" => context
-                .workspace_id
-                .as_ref()
-                .map(|id| PaletteInteraction::NewTab {
-                    workspace_id: id.clone(),
-                }),
-            "host:rename-space" => {
+        let interaction = match CoreAction::parse(action) {
+            Some(CoreAction::NewSpace) => Some(PaletteInteraction::NewSpace),
+            Some(CoreAction::NewTab) => {
+                context
+                    .workspace_id
+                    .as_ref()
+                    .map(|id| PaletteInteraction::NewTab {
+                        workspace_id: id.clone(),
+                    })
+            }
+            Some(CoreAction::RenameSpace) => {
                 context
                     .workspace_id
                     .as_ref()
@@ -229,7 +232,7 @@ impl Core {
                         workspace_id: id.clone(),
                     })
             }
-            "host:rename-tab" => context
+            Some(CoreAction::RenameTab) => context
                 .tab_id
                 .as_ref()
                 .map(|id| PaletteInteraction::RenameTab { tab_id: id.clone() }),
@@ -248,7 +251,10 @@ impl Core {
         context: &Context,
         snapshot: Option<&trailboss_runtime::protocol::ClientShellSnapshot>,
     ) -> Effect {
-        if action == "host:focus" && context.tab_id.is_none() {
+        let Some(action) = CoreAction::parse(action) else {
+            return Effect::Plugin;
+        };
+        if action == CoreAction::Focus && context.tab_id.is_none() {
             return snapshot
                 .and_then(|snapshot| self.previous_tab(snapshot))
                 .map_or(Effect::Consumed, |tab| Effect::Request {
@@ -257,28 +263,30 @@ impl Core {
                 });
         }
         match action {
-            "host:new-space" => {
+            CoreAction::NewSpace => {
                 self.interaction = Interaction::None;
                 Effect::Request {
                     method: "workspace.create",
                     params: json!({"label":"New space","focus":true}),
                 }
             }
-            "host:new" => {
+            CoreAction::New => {
                 self.interaction = Interaction::NewTab {
                     workspace_id: self.workspace_id.clone(),
                 };
                 self.input_text.clear();
                 Effect::Consumed
             }
-            "host:new-tab" => context
-                .workspace_id
-                .as_ref()
-                .map_or(Effect::Consumed, |workspace| Effect::Request {
-                    method: "tab.create",
-                    params: json!({"workspace_id":workspace,"label":"New tab","focus":true}),
-                }),
-            "host:rename-space" => {
+            CoreAction::NewTab => {
+                context
+                    .workspace_id
+                    .as_ref()
+                    .map_or(Effect::Consumed, |workspace| Effect::Request {
+                        method: "tab.create",
+                        params: json!({"workspace_id":workspace,"label":"New tab","focus":true}),
+                    })
+            }
+            CoreAction::RenameSpace => {
                 if let Some(workspace_id) = &context.workspace_id {
                     self.interaction = Interaction::RenameSpace {
                         workspace_id: workspace_id.clone(),
@@ -287,7 +295,7 @@ impl Core {
                 }
                 Effect::Consumed
             }
-            "host:rename-tab" => {
+            CoreAction::RenameTab => {
                 if let Some(tab_id) = &context.tab_id {
                     self.interaction = Interaction::RenameTab {
                         tab_id: tab_id.clone(),
@@ -296,7 +304,7 @@ impl Core {
                 }
                 Effect::Consumed
             }
-            "host:close-tab" => {
+            CoreAction::CloseTab => {
                 context
                     .tab_id
                     .as_ref()
@@ -305,23 +313,23 @@ impl Core {
                         params: json!({"tab_id":tab}),
                     })
             }
-            "host:restart-idle-agents" => {
+            CoreAction::RestartIdleAgents => {
                 self.interaction = Interaction::None;
                 Effect::Request {
                     method: "agent.restart_idle",
                     params: json!({}),
                 }
             }
-            "host:detach" => {
+            CoreAction::Detach => {
                 self.detach_requested = true;
                 Effect::Consumed
             }
-            "host:cancel" => {
+            CoreAction::Cancel => {
                 self.interaction = Interaction::None;
                 self.input_text.clear();
                 Effect::Consumed
             }
-            "host:create" => {
+            CoreAction::Create => {
                 if matches!(
                     self.interaction,
                     Interaction::RenameSpace { .. }
@@ -382,7 +390,7 @@ impl Core {
                     Interaction::None => Effect::Consumed,
                 }
             }
-            "host:focus" => {
+            CoreAction::Focus => {
                 context
                     .tab_id
                     .as_ref()
@@ -391,7 +399,6 @@ impl Core {
                         params: json!({"tab_id":tab}),
                     })
             }
-            _ => Effect::Plugin,
         }
     }
     /// Returns None only when text belongs to the focused PTY.
@@ -400,10 +407,10 @@ impl Core {
             return (!self.has_pane).then_some(Effect::Consumed);
         }
         if text == "\x1b" {
-            return Some(self.invoke("host:cancel", &Context::default(), None));
+            return Some(self.invoke(CoreAction::Cancel.id(), &Context::default(), None));
         }
         if text == "\r" {
-            return Some(self.invoke("host:create", &Context::default(), None));
+            return Some(self.invoke(CoreAction::Create.id(), &Context::default(), None));
         }
         if text == "\x7f" || text == "\x08" {
             self.input_text.pop();

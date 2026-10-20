@@ -10,6 +10,7 @@ pub mod cli;
 pub mod client;
 pub mod config;
 mod copy_mode;
+pub mod core_actions;
 mod detect;
 mod events;
 use ghostty_vt as ghostty;

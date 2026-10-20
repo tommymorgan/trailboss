@@ -1,4 +1,5 @@
 //! Renderer-neutral plugin declarations. Geometry belongs to the consuming client.
+use crate::core_actions::CoreAction;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,20 +165,7 @@ fn valid_node(node: &Node, actions: &impl Fn(&str) -> bool, depth: usize) -> boo
         } => {
             children.len() <= 128
                 && action.as_deref().is_none_or(|id| {
-                    matches!(
-                        id,
-                        "host:new"
-                            | "host:new-space"
-                            | "host:new-tab"
-                            | "host:rename-space"
-                            | "host:rename-tab"
-                            | "host:close-tab"
-                            | "host:restart-idle-agents"
-                            | "host:detach"
-                            | "host:cancel"
-                            | "host:create"
-                            | "host:focus"
-                    ) || (!id.starts_with("host:") && actions(id))
+                    CoreAction::parse(id).is_some() || (!id.starts_with("host:") && actions(id))
                 })
                 && [&context.workspace_id, &context.tab_id, &context.pane_id]
                     .into_iter()
