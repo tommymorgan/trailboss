@@ -848,3 +848,107 @@ fn c08_captured_use_targets_survive_focus_change_into_real_owner_invocation() {
     }
     assert!(!core.home.join("consumer/invocations").exists());
 }
+
+#[test]
+fn c09_removed_explicit_rename_target_does_not_redirect_to_later_focus() {
+    use trailboss_runtime::{
+        api_client::{ApiClient, ConnectionTarget},
+        api_schema::Request,
+    };
+    let core = support::Core::new();
+    let review = core.request(
+        "workspace.create",
+        json!({"label":"Review","cwd":core.home,"focus":true}),
+    );
+    let target = &review["tab"]["tab_id"];
+    core.request("tab.rename", json!({"tab_id":target,"label":"Target"}));
+    let captured = json!({
+        "workspace_id":review["workspace"]["workspace_id"],
+        "tab_id":target,"pane_id":review["root_pane"]["pane_id"],
+    });
+    let observed = probe_command_uses(
+        &core,
+        &captured,
+        &[json!({"kind":"core","action_id":"host:rename-tab"})],
+    );
+    let selection = &observed["selections"][0];
+    let fragment = observed["declarations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| {
+            item["declaration"]["fragments"]
+                .as_array()
+                .into_iter()
+                .flatten()
+        })
+        .find(|fragment| fragment["name"] == selection["fragment_name"])
+        .unwrap();
+    assert!(
+        fragment["tree"]["menu"]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["type"] == "input"),
+        "published rename must retain its native name step"
+    );
+    let context: Context = serde_json::from_value(selection["context"].clone()).unwrap();
+    let mut native = NativeCore::default();
+    native.update_session(context.workspace_id.clone(), context.tab_id.clone(), true);
+    assert!(matches!(
+        native.prepare_palette(selection["action_id"].as_str().unwrap(), &context),
+        Effect::Consumed
+    ));
+    let other = core.request(
+        "workspace.create",
+        json!({"label":"Other","cwd":core.home,"focus":true}),
+    );
+    core.request(
+        "tab.rename",
+        json!({"tab_id":other["tab"]["tab_id"],"label":"Other"}),
+    );
+    core.request("tab.close", json!({"tab_id":target}));
+    let before = core.request("tab.get", json!({"tab_id":other["tab"]["tab_id"]}));
+    native.update_session(
+        other["workspace"]["workspace_id"]
+            .as_str()
+            .map(str::to_owned),
+        other["tab"]["tab_id"].as_str().map(str::to_owned),
+        true,
+    );
+    assert!(matches!(
+        native.text("MUST NOT RENAME OTHER"),
+        Some(Effect::Consumed)
+    ));
+    let Some(Effect::Request { method, params }) = native.text("\r") else {
+        panic!("captured native rename interaction did not submit")
+    };
+    let request: Request = serde_json::from_value(
+        json!({"id":"removed-explicit-target","method":method,"params":params}),
+    )
+    .unwrap();
+    let api = ApiClient::for_target(ConnectionTarget::SocketPath(
+        core.home
+            .join(format!("trailboss/sessions/{}/trailboss.sock", core.name)),
+    ));
+    let reply = api
+        .request_value_with_timeout(&request, Duration::from_secs(5))
+        .unwrap();
+    let after = core.request("tab.get", json!({"tab_id":other["tab"]["tab_id"]}));
+    assert_eq!(
+        after["tab"]["label"], before["tab"]["label"],
+        "removed explicit rename target must not be replaced by the currently focused tab"
+    );
+    assert_eq!(reply["error"]["code"], "tab_not_found");
+    let snapshot = core.request("session.snapshot", json!({}));
+    assert!(!snapshot["snapshot"]["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tab| tab["tab_id"] == *target));
+    assert!(snapshot["snapshot"]["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tab| tab["tab_id"] == other["tab"]["tab_id"] && tab["focused"] == true));
+}
