@@ -723,7 +723,7 @@ fn try_parse_plugin_ui_rows(
 ) -> Result<Vec<EndpointPluginUiItem>, serde_json::Error> {
     if stdout.trim_start().starts_with('{') {
         let declaration: crate::protocol::widgets::Declaration = serde_json::from_str(stdout)?;
-        if !declaration.validate(|id| actions.iter().any(|action| action.id == id)) {
+        if !declaration.validate_producer(|id| actions.iter().any(|action| action.id == id)) {
             return Ok(Vec::new());
         }
         return Ok(vec![EndpointPluginUiItem {

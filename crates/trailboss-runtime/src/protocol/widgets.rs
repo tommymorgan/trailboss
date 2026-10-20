@@ -1,5 +1,5 @@
 //! Renderer-neutral plugin declarations. Geometry belongs to the consuming client.
-use crate::core_actions::CoreAction;
+use crate::core_actions::{CoreAction, COMMAND_FRAGMENT_PREFIX};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +150,15 @@ impl Declaration {
                 .composition
                 .as_ref()
                 .is_none_or(|c| valid_node(&c.tree, &actions, 0))
+    }
+
+    /// Producer ingress additionally excludes exports owned by Core itself.
+    /// Structural validation remains available for Core-generated declarations.
+    pub fn validate_producer(&self, actions: impl Fn(&str) -> bool) -> bool {
+        self.fragments
+            .iter()
+            .all(|fragment| !fragment.name.starts_with(COMMAND_FRAGMENT_PREFIX))
+            && self.validate(actions)
     }
 }
 fn valid_node(node: &Node, actions: &impl Fn(&str) -> bool, depth: usize) -> bool {

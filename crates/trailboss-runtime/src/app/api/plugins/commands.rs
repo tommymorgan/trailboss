@@ -7,7 +7,10 @@ use sha2::{Digest, Sha256};
 use crate::{
     api::schema::{ResponseResult, UiCommandInfo, UiCommandKey, UiCommandTarget},
     app::{App, AppState},
-    core_actions::{CoreCommandInteraction, CoreCommandTarget, CoreFocusMode, CORE_COMMANDS},
+    core_actions::{
+        CoreCommandInteraction, CoreCommandTarget, CoreFocusMode, COMMAND_FRAGMENT_PREFIX,
+        CORE_COMMANDS,
+    },
     protocol::{
         endpoint::EndpointPluginUiItem,
         widgets::{Context, Declaration, Fragment, Node},
@@ -37,7 +40,7 @@ fn locator(boot_id: &str, key: &UiCommandKey) -> String {
     // JSON preserves tuple boundaries, unlike a dotted qualified action string.
     let identity = serde_json::to_vec(key).expect("command identity is serializable");
     format!(
-        "trailboss.command.v1:{boot_id}:{:x}",
+        "{COMMAND_FRAGMENT_PREFIX}{boot_id}:{:x}",
         Sha256::digest(identity)
     )
 }

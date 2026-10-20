@@ -1,6 +1,9 @@
 //! Reserved Core identities shared by native dispatch and declaration validation.
 //! Descriptors describe user commands, not a new execution or registration route.
 
+/// Core-issued command fragments are locators, never producer override hooks.
+pub const COMMAND_FRAGMENT_PREFIX: &str = "trailboss.command.v1:";
+
 /// Resource policy for a user command. Native-scope and client-local commands
 /// must not inherit a resource menu's captured target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1225,3 +1225,155 @@ with open('executed', 'a') as output:
     );
     assert!(!core.home.join("consumer/invocations").exists());
 }
+
+#[test]
+fn c12_ordinary_producer_cannot_claim_issued_command_namespace_or_redirect_owner() {
+    let core = support::Core::new();
+    let created = core.request(
+        "workspace.create",
+        json!({"label":"Review","cwd":core.home,"focus":true}),
+    );
+    let captured = json!({"workspace_id":created["workspace"]["workspace_id"],
+        "tab_id":created["tab"]["tab_id"],"pane_id":created["root_pane"]["pane_id"]});
+    let owner = core.home.join("namespace-owner");
+    let attacker = core.home.join("namespace-attacker");
+    for (path, id, action) in [
+        (&owner, "demo.owner", "record-target"),
+        (&attacker, "demo.other", "hijack"),
+    ] {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(
+            path.join("action.py"),
+            "with open('executed', 'a') as output:\n output.write('executed\\n')\n",
+        )
+        .unwrap();
+        let ui = if id == "demo.owner" {
+            "[[ui]]\nid = \"ordinary\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"ordinary.py\"]\n"
+        } else {
+            ""
+        };
+        std::fs::write(path.join("trailboss-plugin.toml"), format!(
+            "id = {id:?}\nname = \"Namespace fixture\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = {action:?}\ntitle = \"Record target\"\ncommand = [\"python3\", \"action.py\"]\n{ui}"
+        )).unwrap();
+    }
+    let ordinary = |action: &str, priority| {
+        json!({"herdr":"widget_tree","version":1,"zones":[],
+        "fragments":[{"name":"fixture.ordinary.override","priority":priority,
+            "tree":{"type":"row","action":action,"children":[{"type":"label","role":"label","text":"Ordinary override"}]}}]})
+    };
+    std::fs::write(
+        owner.join("ordinary.py"),
+        format!("print({:?})\n", ordinary("record-target", 1).to_string()),
+    )
+    .unwrap();
+    core.request("plugin.link", json!({"path":owner,"enabled":true}));
+    let key = json!({"kind":"plugin","plugin_id":"demo.owner","action_id":"record-target"});
+    let catalog = core.request("ui.command.list", json!({}));
+    let issued = catalog["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["key"] == key)
+        .unwrap();
+    let locator = issued["fragment_name"].as_str().unwrap();
+    std::fs::write(
+        attacker.join("ordinary.py"),
+        format!("print({:?})\n", ordinary("hijack", 1000000).to_string()),
+    )
+    .unwrap();
+    let collision = json!({"herdr":"widget_tree","version":1,"zones":[],
+        "fragments":[{"name":locator,"priority":2000000,
+            "tree":{"type":"row","action":"hijack","children":[{"type":"label","role":"label","text":"Hijacked command"}]}}]});
+    std::fs::write(
+        attacker.join("collision.py"),
+        format!("print({:?})\n", collision.to_string()),
+    )
+    .unwrap();
+    let mut manifest = std::fs::read_to_string(attacker.join("trailboss-plugin.toml")).unwrap();
+    manifest.push_str("[[ui]]\nid = \"ordinary\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"ordinary.py\"]\n[[ui]]\nid = \"collision\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"collision.py\"]\n");
+    std::fs::write(attacker.join("trailboss-plugin.toml"), manifest).unwrap();
+    core.request("plugin.link", json!({"path":attacker,"enabled":true}));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let logs = core.request("plugin.log.list", json!({"plugin_id":"demo.other"}));
+        let finished = ["ordinary.py", "collision.py"].iter().all(|script| {
+            logs["logs"].as_array().unwrap().iter().any(|log| {
+                log["status"] == "succeeded"
+                    && log["command"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|arg| arg.as_str() == Some(*script))
+            })
+        });
+        if finished {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "real ordinary/colliding producer completion missing: {logs}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut client = core.attach();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.boot_id.is_empty() || client.declarations.is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "actual projection missing after producer completion"
+        );
+        client.receive().unwrap();
+    }
+    let declarations = client.declarations.as_ref().unwrap();
+    let native = NativeCore::default();
+    assert_eq!(
+        native
+            .fragment(declarations, "fixture.ordinary.override")
+            .unwrap()
+            .0,
+        "demo.other",
+        "unrelated ordinary overrides must retain public priority rules"
+    );
+    assert!(!declarations.iter().any(|(plugin, declaration)| plugin == "demo.other" &&
+        declaration.fragments.iter().any(|fragment| fragment.name == locator)),
+        "ordinary producer's claim of an issued command locator must be rejected by declaration validation");
+    assert_eq!(
+        native.fragment(declarations, locator).unwrap().0,
+        "demo.owner"
+    );
+    let observed = probe_command_uses(&core, &captured, &[key]);
+    let selection = &observed["selections"][0];
+    let mut context = selection["context"].clone();
+    context["invocation_source"] = json!("plugin_ui");
+    let invoked = core.request(
+        "plugin.action.invoke",
+        json!({"plugin_id":selection["plugin_id"],
+        "action_id":selection["action_id"],"context":context}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let logs = core.request("plugin.log.list", json!({"plugin_id":"demo.owner"}));
+        if logs["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|log| log["log_id"] == invoked["log"]["log_id"] && log["status"] == "succeeded")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actual selected owner did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        std::fs::read_to_string(owner.join("executed")).unwrap(),
+        "executed\n"
+    );
+    assert!(
+        !attacker.join("executed").exists(),
+        "colliding producer must not steal invocation"
+    );
+    assert!(!core.home.join("consumer/invocations").exists());
+}
