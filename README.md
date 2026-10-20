@@ -39,6 +39,20 @@ asking a public project to adopt my workflow:
 Everything here is tested against real agent sessions before it lands; the
 machine I am typing on is usually running the previous commit.
 
+## CLI help
+
+Run `trailboss --help` (or `trailboss help`) for local/SSH attach options
+and available commands. Use `trailboss help agent` or
+`trailboss agent restart-idle --help` for command-specific guidance.
+Help works without a running core or an interactive terminal.
+The inherited upstream updater and update-channel commands are unavailable;
+they must not replace a Trailboss installation with an upstream binary.
+
+Trailboss keeps the `HERDR_*` integration environment and existing socket
+overrides compatible with running agents. New session files use the
+`trailboss` namespace; changing product labels does not migrate an existing
+session or its socket. See [runtime provenance](docs/runtime-provenance.md#trailboss-naming-cutover).
+
 ## Thanks
 
 Trailboss stands on [herdr](https://github.com/herdrdev/herdr) and its

@@ -44,6 +44,11 @@ fn main() -> std::process::ExitCode {
 
 fn run() -> io::Result<()> {
     let raw: Vec<String> = std::env::args().collect();
+    if let Some(outcome) = trailboss_runtime::cli::maybe_run_machine(&raw) {
+        if let trailboss_runtime::cli::CommandOutcome::Handled(code) = outcome? {
+            std::process::exit(code);
+        }
+    }
     let (raw, remote) =
         trailboss_runtime::remote::extract_remote_args(&raw).map_err(io::Error::other)?;
     let mut args =
@@ -73,10 +78,19 @@ fn run() -> io::Result<()> {
         }
         _ => {}
     }
+    // Keep inherited binary-update routes outside the Trailboss entry point.
     if matches!(
         args.get(1).map(String::as_str),
         Some(
-            "api"
+            "--help"
+                | "-h"
+                | "help"
+                | "completion"
+                | "completions"
+                | "config"
+                | "machine"
+                | "terminal"
+                | "api"
                 | "status"
                 | "server"
                 | "session"

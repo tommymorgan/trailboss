@@ -7,7 +7,12 @@ mod machine;
 
 pub(super) fn command() -> Command {
     let command = Command::new("trailboss")
-        .about("terminal workspace manager for AI coding agents")
+        .about("Trailboss — terminal workspace manager for AI coding agents")
+        .after_help(
+            "With no command, attach to the local session (starting its core if needed).\n\
+             Examples:\n  trailboss --session daily\n  trailboss --remote junkman --session daily\n  trailboss agent list\n  trailboss help agent\n\n\
+             Use trailboss <command> --help for command options.",
+        )
         .disable_help_flag(true)
         .disable_version_flag(true)
         .arg(help_flag())
@@ -15,25 +20,18 @@ pub(super) fn command() -> Command {
         .arg(option("machine", "LABEL-OR-ID").help("Run an API command on a saved SSH machine"))
         .arg(option("remote", "TARGET").help("Attach through SSH to a remote Trailboss server"))
         .arg(
+            option("remote-executable", "PATH")
+                .help("Use this Trailboss executable on the remote machine (requires --remote)"),
+        )
+        .arg(
             option("remote-keybindings", "MODE")
                 .value_parser(["local", "server"])
                 .help("Choose local or server keybindings for remote attach"),
         )
-        .arg(flag("handoff").help("Opt into live handoff for update or remote attach"))
-        .arg(flag("default-config").help("Print default configuration and exit"))
-        .arg(flag("skill").help("Print the agent skill file and exit"))
-        .arg(
-            Arg::new("version")
-                .short('V')
-                .long("version")
-                .action(ArgAction::SetTrue)
-                .help("Print version and exit"),
-        )
+        .arg(flag("handoff").help("Opt into live handoff for remote attach (requires --remote)"))
         .subcommand(completion::command())
-        .subcommand(update_command())
         .subcommand(status_command())
         .subcommand(config_command())
-        .subcommand(channel_command())
         .subcommand(machine::command())
         .subcommand(server_command())
         .subcommand(api_command())
@@ -76,34 +74,33 @@ fn write_requested_help(
     output: &mut impl Write,
     before_write: impl FnOnce(),
 ) -> std::io::Result<bool> {
-    let Some(help_index) = args
-        .iter()
-        .position(|arg| matches!(arg.as_str(), "--help" | "-h"))
-    else {
-        return Ok(false);
+    let segments = if args.get(1).is_some_and(|arg| arg == "help") {
+        &args[2..]
+    } else {
+        let Some(help_index) = args
+            .iter()
+            .position(|arg| matches!(arg.as_str(), "--help" | "-h"))
+        else {
+            return Ok(false);
+        };
+        if help_index == 0 || args[1..help_index].iter().any(|arg| arg == "--") {
+            return Ok(false);
+        }
+        &args[1..help_index]
     };
-    if help_index < 2 {
-        return Ok(false);
-    }
-    if args[1..help_index].iter().any(|arg| arg == "--") {
-        return Ok(false);
-    }
 
     let mut root = command();
     root.build();
     let mut selected = &mut root;
     let mut path = vec!["trailboss".to_string()];
-    for segment in &args[1..help_index] {
+    for segment in segments {
         if selected.find_subcommand(segment).is_none() {
-            break;
+            return Ok(false);
         }
         path.push(segment.clone());
         selected = selected
             .find_subcommand_mut(segment)
             .expect("subcommand checked immediately before mutable lookup");
-    }
-    if path.len() == 1 || help_index != path.len() {
-        return Ok(false);
     }
 
     selected.set_bin_name(path.join(" "));
@@ -111,12 +108,6 @@ fn write_requested_help(
     selected.write_long_help(&mut *output)?;
     writeln!(output)?;
     Ok(true)
-}
-
-fn update_command() -> Command {
-    Command::new("update")
-        .about("Download and install the latest version")
-        .arg(flag("handoff").help("Try live handoff after installing"))
 }
 
 fn status_command() -> Command {
@@ -140,20 +131,6 @@ fn config_command() -> Command {
         .about("Manage local configuration")
         .subcommand(Command::new("check").about("Validate config.toml and print diagnostics"))
         .subcommand(Command::new("reset-keys").about("Reset custom keybindings"))
-}
-
-fn channel_command() -> Command {
-    Command::new("channel")
-        .about("Manage stable and preview update channels")
-        .subcommand(Command::new("show").about("Print the configured update channel"))
-        .subcommand(
-            Command::new("set").about("Choose the update channel").arg(
-                Arg::new("channel")
-                    .value_name("CHANNEL")
-                    .required(true)
-                    .value_parser(["stable", "preview"]),
-            ),
-        )
 }
 
 fn server_command() -> Command {
