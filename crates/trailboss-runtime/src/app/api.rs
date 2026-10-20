@@ -1302,6 +1302,9 @@ impl App {
             Method::PluginDisable(params) => {
                 return self.handle_plugin_disable(request.id, params);
             }
+            Method::UiCommandList(_) => {
+                return self.handle_ui_command_list(request.id);
+            }
             Method::PluginActionList(params) => {
                 return self.handle_plugin_action_list(request.id, params);
             }

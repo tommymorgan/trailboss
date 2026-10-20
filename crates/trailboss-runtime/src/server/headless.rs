@@ -309,7 +309,7 @@ impl HeadlessServer {
     /// 2. Binds the client socket listener
     /// 3. Returns the server ready to run
     pub fn new(
-        app: app::App,
+        mut app: app::App,
         config_diagnostics: &[String],
         api_tx: Option<api::ApiRequestSender>,
         api_server: Option<api::ServerHandle>,
@@ -339,6 +339,15 @@ impl HeadlessServer {
             server_config_diagnostic_summaries(config_diagnostics);
         #[cfg(not(unix))]
         let _ = api_tx;
+        let client_shell_boot_id = format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        app.state.command_boot_id.clone_from(&client_shell_boot_id);
         Ok(Self {
             app,
             #[cfg(unix)]
@@ -355,14 +364,7 @@ impl HeadlessServer {
             foreground_client_id: None,
             tab_geometry_controllers: HashMap::new(),
             popup_owner_tab_id: None,
-            client_shell_boot_id: format!(
-                "{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            ),
+            client_shell_boot_id,
             sent_window_title: None,
             api_window_title: None,
             server_keybindings,

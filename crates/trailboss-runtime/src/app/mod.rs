@@ -63,7 +63,10 @@ pub(crate) fn load_plugin_manifest(
 pub(crate) fn sidebar_plugin_ui_rows(
     app: &crate::app::App,
 ) -> Vec<crate::protocol::endpoint::EndpointPluginUiItem> {
-    api::plugins::sidebar_ui_rows(&app.state.installed_plugins, &app.state.plugin_ui_dynamic)
+    let mut rows =
+        api::plugins::sidebar_ui_rows(&app.state.installed_plugins, &app.state.plugin_ui_dynamic);
+    rows.extend(api::plugins::commands::projection(&app.state).1);
+    rows
 }
 
 /// Full application: AppState + runtime concerns (event channels, async I/O).
@@ -572,6 +575,7 @@ impl App {
             integration_recommendations: crate::integration::integration_recommendations(),
             agent_manifest_summaries,
             agent_manifest_update_status: crate::detect::manifest_update::load_status(),
+            command_boot_id: String::new(),
             installed_plugins: load_plugin_registry(
                 policy.persist_plugin_registry,
                 &mut plugin_installation_leases,

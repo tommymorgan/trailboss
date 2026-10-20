@@ -251,6 +251,10 @@ pub enum ResponseResult {
     PluginDisabled {
         plugin: InstalledPluginInfo,
     },
+    UiCommandList {
+        boot_id: String,
+        commands: Vec<super::plugins::UiCommandInfo>,
+    },
     PluginActionList {
         actions: Vec<PluginActionInfo>,
     },

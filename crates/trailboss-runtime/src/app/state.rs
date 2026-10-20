@@ -869,6 +869,8 @@ pub struct AppState {
     pub agent_manifest_summaries: Vec<crate::detect::manifest::AgentManifestSummary>,
     /// Cached remote detection manifest update diagnostics for runtime/API status.
     pub agent_manifest_update_status: crate::detect::manifest_update::ManifestUpdateStatus,
+    /// The existing client-shell boot identity, supplied by HeadlessServer.
+    pub(crate) command_boot_id: String,
     /// Installed or linked plugins known to this running Trailboss instance.
     pub(crate) installed_plugins: InstalledPluginRegistry,
     /// Pane ids opened through the plugin pane API.
@@ -1120,6 +1122,7 @@ impl AppState {
             agent_manifest_summaries: Vec::new(),
             agent_manifest_update_status:
                 crate::detect::manifest_update::ManifestUpdateStatus::default(),
+            command_boot_id: String::new(),
             installed_plugins: std::collections::HashMap::new(),
             plugin_panes: std::collections::HashMap::new(),
             popup_pane: None,

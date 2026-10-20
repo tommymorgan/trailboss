@@ -1,3 +1,4 @@
+pub(crate) mod commands;
 mod context;
 mod env;
 mod manifest;

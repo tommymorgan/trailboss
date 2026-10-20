@@ -482,6 +482,42 @@ pub struct PluginInvocationContext {
     pub link_handler_id: Option<String>,
 }
 
+/// Structured execution identity; dotted owner/action spellings are not keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UiCommandKey {
+    Core {
+        action_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mode: Option<String>,
+    },
+    Plugin {
+        plugin_id: String,
+        action_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UiCommandTarget {
+    Owner,
+    Global,
+    Workspace,
+    Tab,
+    ClientLocal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UiCommandInfo {
+    pub key: UiCommandKey,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub contexts: Vec<PluginActionContext>,
+    pub target: UiCommandTarget,
+    pub fragment_name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginActionInfo {
     pub plugin_id: String,

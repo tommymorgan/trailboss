@@ -245,6 +245,8 @@ pub enum Method {
     PluginEnable(PluginSetEnabledParams),
     #[serde(rename = "plugin.disable")]
     PluginDisable(PluginSetEnabledParams),
+    #[serde(rename = "ui.command.list")]
+    UiCommandList(EmptyParams),
     #[serde(rename = "plugin.action.list")]
     PluginActionList(PluginActionListParams),
     #[serde(rename = "plugin.action.invoke")]
