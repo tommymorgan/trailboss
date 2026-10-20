@@ -1120,3 +1120,108 @@ for line in sys.stdin:
         assert!(!core.home.join("consumer/invocations").exists());
     }
 }
+
+#[test]
+fn c11_context_hints_do_not_probe_or_override_private_owner_availability() {
+    let core = support::Core::new();
+    let created = core.request(
+        "workspace.create",
+        json!({"label":"Review","cwd":core.home,"focus":true}),
+    );
+    let captured = json!({
+        "workspace_id":created["workspace"]["workspace_id"],
+        "tab_id":created["tab"]["tab_id"],"pane_id":created["root_pane"]["pane_id"],
+    });
+    let plugin = core.home.join("private-owner");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(plugin.join("trailboss-plugin.toml"), "id = \"demo.owner\"\nname = \"Private availability owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"record-target\"\ntitle = \"Record target\"\ncontexts = [\"pane\"]\ncommand = [\"python3\", \"private.py\"]\n").unwrap();
+    std::fs::write(
+        plugin.join("private.py"),
+        r#"import json, os, pathlib, sys
+with open('attempts.jsonl', 'a') as output:
+    output.write(json.dumps(json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON']))+'\n')
+if not pathlib.Path('owner-unlocked').exists():
+    print('private owner state is locked', file=sys.stderr)
+    sys.exit(23)
+with open('executed', 'a') as output:
+    output.write('private operation performed\n')
+"#,
+    )
+    .unwrap();
+    core.request("plugin.link", json!({"path":plugin,"enabled":true}));
+    let key = json!({"kind":"plugin","plugin_id":"demo.owner","action_id":"record-target"});
+    let catalog = core.request("ui.command.list", json!({}));
+    let command = catalog["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["key"] == key)
+        .unwrap();
+    assert_eq!(
+        command["contexts"],
+        json!(["pane"]),
+        "legacy context hints must survive discovery unchanged"
+    );
+    assert!(
+        !plugin.join("attempts.jsonl").exists(),
+        "discovery must not probe the owner action"
+    );
+    let observed = probe_command_uses(&core, &captured, &[key]);
+    assert!(
+        !plugin.join("attempts.jsonl").exists(),
+        "publication/Use resolution must not execute an availability probe"
+    );
+    let selection = &observed["selections"][0];
+    let mut context = selection["context"].clone();
+    context["invocation_source"] = json!("plugin_ui");
+    let invoked = core.request(
+        "plugin.action.invoke",
+        json!({
+            "plugin_id":selection["plugin_id"],"action_id":selection["action_id"],"context":context,
+        }),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let finished = loop {
+        let logs = core.request("plugin.log.list", json!({"plugin_id":"demo.owner"}));
+        let log = logs["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|log| log["log_id"] == invoked["log"]["log_id"])
+            .unwrap();
+        if log["status"] != "running" {
+            break log.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "private owner failure was not surfaced"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        finished["status"], "failed",
+        "catalog membership cannot turn private failure into success"
+    );
+    assert_eq!(finished["exit_code"], 23);
+    assert!(finished["stderr"]
+        .as_str()
+        .is_some_and(|stderr| stderr.contains("private owner state is locked")));
+    let attempts = std::fs::read_to_string(plugin.join("attempts.jsonl")).unwrap();
+    let attempts: Vec<Value> = attempts
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        attempts.len(),
+        1,
+        "only selection may invoke the actual owner"
+    );
+    for field in ["workspace_id", "tab_id", "pane_id"] {
+        assert_eq!(attempts[0][field], captured[field]);
+    }
+    assert!(
+        !plugin.join("executed").exists(),
+        "private rejection must prevent the operation"
+    );
+    assert!(!core.home.join("consumer/invocations").exists());
+}
