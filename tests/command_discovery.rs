@@ -427,3 +427,152 @@ fn c03_core_inventory_resolves_to_native_actions_without_controls_or_rpc_command
         }
     }
 }
+
+#[test]
+fn c05_withdrawn_action_or_owner_has_no_executable_locator_or_fallback_owner() {
+    use trailboss_runtime::{
+        api_client::{ApiClient, ConnectionTarget},
+        api_schema::Request,
+    };
+    for (withdrawal, expected_error) in [
+        ("action", "plugin_action_not_found"),
+        ("owner", "plugin_not_found"),
+        ("manifest", "plugin_manifest_unavailable"),
+    ] {
+        let core = support::Core::new();
+        let owner = core.home.join("owner");
+        let other = core.home.join("other");
+        for (path, id) in [(&owner, "demo.owner"), (&other, "demo.other")] {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(path.join("trailboss-plugin.toml"), format!(
+                "id = {id:?}\nname = \"Withdrawal fixture\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"record-target\"\ntitle = \"Record target\"\ncommand = [\"python3\", \"action.py\"]\n"
+            )).unwrap();
+            std::fs::write(
+                path.join("action.py"),
+                "with open('executed', 'a') as output:\n output.write('executed\\n')\n",
+            )
+            .unwrap();
+            core.request("plugin.link", json!({"path":path,"enabled":true}));
+            // Positive control: both real handlers must be capable of producing
+            // their observable effect before testing the stale negative route.
+            core.request(
+                "plugin.action.invoke",
+                json!({"plugin_id":id,"action_id":"record-target"}),
+            );
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while std::fs::read_to_string(path.join("executed"))
+                .ok()
+                .as_deref()
+                != Some("executed\n")
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "positive owner operation failed for {id}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::fs::remove_file(path.join("executed")).unwrap();
+        }
+        let key = json!({"kind":"plugin","plugin_id":"demo.owner","action_id":"record-target"});
+        let initial = core.request("ui.command.list", json!({}));
+        let issued = initial["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| command["key"] == key)
+            .unwrap();
+        let locator = issued["fragment_name"].as_str().unwrap();
+        let consumer = core.home.join("consumer");
+        std::fs::create_dir_all(&consumer).unwrap();
+        std::fs::write(consumer.join("trailboss-plugin.toml"), "id = \"demo.consumer\"\nname = \"Withdrawal consumer\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[ui]]\nid = \"stale-use\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"producer.py\"]\nstream = true\n").unwrap();
+        let declaration = json!({"herdr":"widget_tree","version":1,"zones":[{"zone":"list","tree":{"type":"use","name":locator}}]});
+        std::fs::write(consumer.join("producer.py"), format!(
+            "import sys\nprint({:?}, flush=True)\nfor line in sys.stdin:\n with open('executed', 'a') as output:\n  output.write(line)\n", declaration.to_string()
+        )).unwrap();
+        core.request("plugin.link", json!({"path":consumer,"enabled":true}));
+        let native = NativeCore::default();
+        let mut before = core.attach();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while before.declarations.as_ref().is_none_or(|declarations| {
+            !declarations
+                .iter()
+                .any(|(owner, _)| owner == "demo.consumer")
+        }) {
+            assert!(
+                Instant::now() < deadline,
+                "consumer's actual Use projection missing"
+            );
+            before.receive().unwrap();
+        }
+        assert_eq!(
+            native
+                .fragment(before.declarations.as_ref().unwrap(), locator)
+                .unwrap()
+                .0,
+            "demo.owner"
+        );
+        match withdrawal {
+            "action" => {
+                std::fs::write(owner.join("trailboss-plugin.toml"), "id = \"demo.owner\"\nname = \"Withdrawal fixture\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n").unwrap();
+            }
+            "owner" => {
+                core.request("plugin.unlink", json!({"plugin_id":"demo.owner"}));
+            }
+            "manifest" => {
+                std::fs::remove_file(owner.join("trailboss-plugin.toml")).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let current = core.request("ui.command.list", json!({}));
+        assert!(
+            !current["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command["key"] == key),
+            "{withdrawal}: removed action must leave the current catalog"
+        );
+        assert!(current["commands"].as_array().unwrap().iter().any(|command|
+            command["key"] == json!({"kind":"plugin","plugin_id":"demo.other","action_id":"record-target"})),
+            "{withdrawal}: same-title other owner must remain available");
+        let mut after = core.attach();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while after.declarations.as_ref().is_none_or(|declarations| {
+            !declarations
+                .iter()
+                .any(|(owner, _)| owner == "demo.consumer")
+        }) {
+            assert!(
+                Instant::now() < deadline,
+                "current actual consumer projection missing"
+            );
+            after.receive().unwrap();
+        }
+        assert!(
+            native
+                .fragment(after.declarations.as_ref().unwrap(), locator)
+                .is_none(),
+            "{withdrawal}: stale ordinary Use must not resolve to another command or owner"
+        );
+        let api = ApiClient::for_target(ConnectionTarget::SocketPath(
+            core.home
+                .join(format!("trailboss/sessions/{}/trailboss.sock", core.name)),
+        ));
+        let request: Request = serde_json::from_value(json!({"id":"stale-command",
+            "method":"plugin.action.invoke","params":{"plugin_id":"demo.owner","action_id":"record-target",
+            "context":{"invocation_source":"plugin_ui"}}})).unwrap();
+        let reply = api
+            .request_value_with_timeout(&request, Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(
+            reply["error"]["code"], expected_error,
+            "{withdrawal}: stale owner invocation must be rejected"
+        );
+        for path in [&owner, &other, &consumer] {
+            assert!(
+                !path.join("executed").exists(),
+                "{withdrawal}: no owner or consumer may execute as fallback"
+            );
+        }
+    }
+}
