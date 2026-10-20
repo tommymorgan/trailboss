@@ -3283,6 +3283,35 @@ fn omp_handler(event: &str) -> &'static str {
 }
 
 #[test]
+fn omp_async_work_end_reports_distinct_background_waiting_state() {
+    let end_handler = omp_handler("agent_end");
+    end_handler
+        .find("event?.awaitingAsyncWork === true")
+        .expect("async-work ends should take the background branch");
+    end_handler
+        .find("backgroundAwait = true;")
+        .expect("async-work ends should mark the pane background-awaiting");
+    end_handler
+        .find("agentActive = false;\n        backgroundAwait = true;")
+        .expect("async-work ends should settle the foreground turn");
+    end_handler
+        .find("backgroundAwait = false;")
+        .expect("ordinary ends should clear the background wait");
+
+    end_handler
+        .find("willContinue !== true && backgroundAwait")
+        .expect("final ends should clear the background wait after the foreground settled");
+    let start_handler = omp_handler("agent_start");
+    start_handler
+        .find("backgroundAwait = false;")
+        .expect("new turns should clear the background wait");
+
+    OMP_EXTENSION_ASSET
+        .find("if (backgroundAwait) {\n      return { state: \"waiting\" as const, message: \"awaiting background work\" };")
+        .expect("background waiting should publish a distinct waiting state");
+}
+
+#[test]
 fn omp_root_activation_requires_ui_context() {
     let activator = OMP_EXTENSION_ASSET
         .find("function activateRootSession(ctx: any, sessionStartSource = \"startup\"): boolean")

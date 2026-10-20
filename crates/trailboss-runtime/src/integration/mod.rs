@@ -39,7 +39,7 @@ const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/trailboss-agent-state.t
 const PI_INTEGRATION_VERSION: u32 = 9;
 const OMP_EXTENSION_INSTALL_NAME: &str = "trailboss-omp-agent-state.ts";
 const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/trailboss-agent-state.ts");
-const OMP_INTEGRATION_VERSION: u32 = 15;
+const OMP_INTEGRATION_VERSION: u32 = 16;
 const CLAUDE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "trailboss-agent-state.ps1"
 } else {

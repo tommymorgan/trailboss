@@ -2,7 +2,7 @@
 // managed by trailboss; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // TRAILBOSS_INTEGRATION_ID=omp
-// TRAILBOSS_INTEGRATION_VERSION=15
+// TRAILBOSS_INTEGRATION_VERSION=16
 // @ts-nocheck
 
 import net, { type Server, type Socket } from "node:net";
@@ -266,6 +266,7 @@ export default function (pi) {
   }
 
   let agentActive = false;
+  let backgroundAwait = false;
   let retryHoldActive = false;
   let failureBlocked = false;
   let failureMessage: string | undefined;
@@ -666,6 +667,9 @@ export default function (pi) {
     if (failureBlocked) {
       return { state: "blocked" as const, message: failureMessage };
     }
+    if (backgroundAwait) {
+      return { state: "waiting" as const, message: "awaiting background work" };
+    }
     if (agentActive || retryHoldActive) {
       return { state: "working" as const, message: undefined };
     }
@@ -786,6 +790,7 @@ export default function (pi) {
     void reportSession();
     clearPendingTimers();
     clearFailureState();
+    backgroundAwait = false;
     agentActive = true;
     publishState();
   });
@@ -838,15 +843,31 @@ export default function (pi) {
       // OMP can emit duplicate/late end events while auto-retry is already
       // holding the pane in Working. Do not let an unqualified duplicate end
       // cancel the retry hold and publish a false Idle.
+      if (event?.willContinue !== true && backgroundAwait) {
+        // The awaited background work settled with its own final end.
+        backgroundAwait = false;
+        scheduleIdle();
+      }
       return;
     }
     if (event?.willContinue === true) {
+      if (event?.awaitingAsyncWork === true) {
+        // The visible reply ended; OMP stays busy only awaiting background
+        // results. Settle the foreground turn and surface the background
+        // wait as a distinct waiting state instead of yellow Working.
+        agentActive = false;
+        backgroundAwait = true;
+        clearPendingTimers();
+        publishState(true);
+        return;
+      }
       // A continuation is already scheduled, so this end is not a settle.
       // Older builds omit the field and fall through as before.
       return;
     }
 
     agentActive = false;
+    backgroundAwait = false;
 
     const retryableMessage = retryableErrorMessage(event);
     if (retryableMessage) {
