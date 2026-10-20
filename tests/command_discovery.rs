@@ -762,3 +762,89 @@ fn probe_command_uses(core: &support::Core, context: &Value, keys: &[Value]) -> 
     );
     serde_json::from_slice(&std::fs::read(evidence).unwrap()).unwrap()
 }
+
+#[test]
+fn c08_captured_use_targets_survive_focus_change_into_real_owner_invocation() {
+    let core = support::Core::new();
+    let review = core.request(
+        "workspace.create",
+        json!({"label":"Review","cwd":core.home,"focus":true}),
+    );
+    let captured = json!({
+        "workspace_id":review["workspace"]["workspace_id"],
+        "tab_id":review["tab"]["tab_id"],
+        "pane_id":review["root_pane"]["pane_id"],
+    });
+    let plugin = core.home.join("capture-owner");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(plugin.join("trailboss-plugin.toml"), "id = \"demo.owner\"\nname = \"Captured target owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"record-target\"\ntitle = \"Record target\"\ncontexts = [\"pane\"]\ncommand = [\"python3\", \"record.py\"]\n").unwrap();
+    std::fs::write(plugin.join("record.py"), "import json, os\nwith open('captured.jsonl', 'a') as output:\n output.write(json.dumps({'owner':os.environ['HERDR_PLUGIN_ID'],'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON'])})+'\\n')\n").unwrap();
+    core.request("plugin.link", json!({"path":plugin,"enabled":true}));
+    let observed = probe_command_uses(
+        &core,
+        &captured,
+        &[json!({"kind":"plugin","plugin_id":"demo.owner","action_id":"record-target"})],
+    );
+    let selection = &observed["selections"][0];
+    // The ordinary Use has already resolved under the captured resource wrapper.
+    // Move all three current-resource identities before the selected action runs.
+    let other = core.request(
+        "workspace.create",
+        json!({"label":"Other","cwd":core.home,"focus":true}),
+    );
+    let focused = core.request("session.snapshot", json!({}));
+    assert!(focused["snapshot"]["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tab| tab["tab_id"] == other["tab"]["tab_id"] && tab["focused"] == true));
+    for (field, other_value) in [
+        ("workspace_id", &other["workspace"]["workspace_id"]),
+        ("tab_id", &other["tab"]["tab_id"]),
+        ("pane_id", &other["root_pane"]["pane_id"]),
+    ] {
+        assert_ne!(
+            captured[field], *other_value,
+            "fixture must change actual current {field}"
+        );
+    }
+    let mut context = selection["context"].clone();
+    context["invocation_source"] = json!("plugin_ui");
+    let invoked = core.request(
+        "plugin.action.invoke",
+        json!({
+            "plugin_id":selection["plugin_id"],"action_id":selection["action_id"],"context":context,
+        }),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let logs = core.request("plugin.log.list", json!({"plugin_id":"demo.owner"}));
+        if logs["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|log| log["log_id"] == invoked["log"]["log_id"] && log["status"] == "succeeded")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "captured-context owner action did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let text = std::fs::read_to_string(plugin.join("captured.jsonl")).unwrap();
+    let records: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["owner"], "demo.owner");
+    for field in ["workspace_id", "tab_id", "pane_id"] {
+        assert_eq!(
+            records[0]["context"][field], captured[field],
+            "actual owner must retain the opening scope's captured {field}, not later focus"
+        );
+    }
+    assert!(!core.home.join("consumer/invocations").exists());
+}
