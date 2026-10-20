@@ -528,8 +528,24 @@ impl HeadlessServer {
         let mut broken_clients: Vec<u64> = Vec::new();
         let plugin_ui_rows = crate::app::sidebar_plugin_ui_rows(&self.app);
         let plugin_ui_projection: Option<&[crate::protocol::endpoint::EndpointPluginUiItem]> =
-            (!plugin_ui_rows.is_empty()).then_some(plugin_ui_rows.as_slice());
+            plugin_ui_rows
+                .as_ref()
+                .ok()
+                .filter(|rows| !rows.is_empty())
+                .map(Vec::as_slice);
         for (client_id, (cols, rows), cell_size, _is_foreground, mode) in render_targets {
+            if matches!(mode, ClientConnectionMode::ClientShell) {
+                if let Err(error) = &plugin_ui_rows {
+                    self.send_to_client(
+                        client_id,
+                        ServerMessage::ClientShellError {
+                            message: error.clone(),
+                        },
+                    );
+                    broken_clients.push(client_id);
+                    continue;
+                }
+            }
             #[cfg(unix)]
             if matches!(mode, ClientConnectionMode::TerminalObserve { .. })
                 && self

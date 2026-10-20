@@ -1,6 +1,9 @@
 //! Discovery and ordinary Use exports derived from the same current registry.
 //! Execution stays in native Core dispatch and plugin.action.invoke.
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, HashSet},
+    io,
+};
 
 use sha2::{Digest, Sha256};
 
@@ -12,8 +15,9 @@ use crate::{
         CORE_COMMANDS,
     },
     protocol::{
-        endpoint::EndpointPluginUiItem,
+        endpoint::{EndpointPluginUi, EndpointPluginUiItem, PLUGIN_UI_KIND},
         widgets::{Context, Declaration, Fragment, Node},
+        ServerMessage, MAX_FRAME_SIZE,
     },
 };
 
@@ -27,7 +31,10 @@ impl App {
         }
         let ordinary =
             super::sidebar_ui_rows(&self.state.installed_plugins, &self.state.plugin_ui_dynamic);
-        let (commands, _) = projection(&self.state, &ordinary);
+        let (commands, _) = match projection(&self.state, ordinary) {
+            Ok(publication) => publication,
+            Err(error) => return encode_error(id, "ui_command_projection_failed", error),
+        };
         encode_success(
             id,
             ResponseResult::UiCommandList {
@@ -38,12 +45,13 @@ impl App {
     }
 }
 
-fn locator(boot_id: &str, key: &UiCommandKey) -> String {
+fn locator(boot_id: &str, key: &UiCommandKey) -> (String, [u8; 32]) {
     // JSON preserves tuple boundaries, unlike a dotted qualified action string.
     let identity = serde_json::to_vec(key).expect("command identity is serializable");
-    format!(
-        "{COMMAND_FRAGMENT_PREFIX}{boot_id}:{:x}",
-        Sha256::digest(identity)
+    let digest = Sha256::digest(identity);
+    (
+        format!("{COMMAND_FRAGMENT_PREFIX}{boot_id}:{digest:x}"),
+        digest.into(),
     )
 }
 
@@ -112,26 +120,85 @@ fn confirmation<'a>(
     Ok(&export.tree)
 }
 
+#[derive(Default)]
+struct FrameJson {
+    bytes: Vec<u8>,
+}
+
+impl io::Write for FrameJson {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > MAX_FRAME_SIZE.saturating_sub(self.bytes.len()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("complete command publication exceeds maximum {MAX_FRAME_SIZE}"),
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn bounded_publication(
+    boot_id: &str,
+    rows: Vec<EndpointPluginUiItem>,
+) -> Result<Vec<EndpointPluginUiItem>, String> {
+    // Reserve the largest existing revision encoding, so the same complete
+    // publication fits every client's current paired snapshot/UI revision.
+    let publication = EndpointPluginUi {
+        boot_id: boot_id.to_owned(),
+        revision: u64::MAX,
+        ui: rows,
+    };
+    let mut json = FrameJson::default();
+    serde_json::to_writer(&mut json, &publication).map_err(|error| error.to_string())?;
+    let message = ServerMessage::EndpointControl {
+        kind: PLUGIN_UI_KIND.to_owned(),
+        data: String::from_utf8(json.bytes).expect("serde_json emits UTF-8"),
+    };
+    let mut size = bincode::enc::write::SizeWriter::default();
+    bincode::serde::encode_into_writer(&message, &mut size, bincode::config::standard())
+        .map_err(|error| error.to_string())?;
+    if size.bytes_written > MAX_FRAME_SIZE {
+        return Err(crate::protocol::FramingError::Oversized {
+            claimed: size.bytes_written,
+            max: MAX_FRAME_SIZE,
+        }
+        .to_string());
+    }
+    Ok(publication.ui)
+}
+
 pub(crate) fn projection(
     state: &AppState,
-    ordinary: &[EndpointPluginUiItem],
-) -> (Vec<UiCommandInfo>, Vec<EndpointPluginUiItem>) {
+    ordinary: Vec<EndpointPluginUiItem>,
+) -> Result<(Vec<UiCommandInfo>, Vec<EndpointPluginUiItem>), String> {
     if state.command_boot_id.is_empty() {
-        return (Vec::new(), Vec::new());
+        return Ok((Vec::new(), ordinary));
     }
     let mut commands = Vec::new();
     let mut owners: BTreeMap<String, Vec<Fragment>> = BTreeMap::new();
-    let mut publish = |owner: &str, mut command: UiCommandInfo, tree: Option<Node>| {
-        command.fragment_name = locator(&state.command_boot_id, &command.key);
-        if let Some(tree) = tree {
-            owners.entry(owner.to_owned()).or_default().push(Fragment {
-                name: command.fragment_name.clone(),
-                priority: 0,
-                tree,
-            });
-        }
-        commands.push(command);
-    };
+    let mut issued = HashSet::new();
+    let mut publish =
+        |owner: &str, mut command: UiCommandInfo, tree: Option<Node>| -> Result<(), String> {
+            let (name, digest) = locator(&state.command_boot_id, &command.key);
+            if !issued.insert(digest) {
+                return Err("command locator collision prevents complete publication".to_owned());
+            }
+            command.fragment_name = name;
+            if let Some(tree) = tree {
+                owners.entry(owner.to_owned()).or_default().push(Fragment {
+                    name: command.fragment_name.clone(),
+                    priority: 0,
+                    tree,
+                });
+            }
+            commands.push(command);
+            Ok(())
+        };
     for descriptor in CORE_COMMANDS {
         let action = descriptor.action.id();
         let menu = match descriptor.interaction {
@@ -181,7 +248,7 @@ pub(crate) fn projection(
                     .then_some(action),
                 menu,
             )),
-        );
+        )?;
     }
     let host = manifest::current_platform();
     let mut plugins: Vec<_> = state.installed_plugins.values().collect();
@@ -199,7 +266,7 @@ pub(crate) fn projection(
             }
             let (tree, diagnostic) = match action.confirmation_fragment.as_deref() {
                 None => (Some(row(&action.title, Some(&action.id), None)), None),
-                Some(name) => match confirmation(ordinary, &plugin.plugin_id, &action.id, name) {
+                Some(name) => match confirmation(&ordinary, &plugin.plugin_id, &action.id, name) {
                     Ok(menu) => (Some(row(&action.title, None, Some(menu.clone()))), None),
                     Err(reason) => (
                         None,
@@ -222,15 +289,30 @@ pub(crate) fn projection(
                     diagnostic,
                 },
                 tree,
-            );
+            )?;
         }
     }
-    let mut rows = Vec::new();
+    let ordinary_ids: HashSet<_> = ordinary
+        .iter()
+        .map(|item| (item.plugin_id.as_str(), item.ui_id.as_str()))
+        .collect();
+    let mut generated = Vec::new();
     for (owner, fragments) in owners {
-        for (chunk, fragments) in fragments.chunks(128).enumerate() {
-            rows.push(EndpointPluginUiItem {
+        let mut fragments = fragments.into_iter();
+        for chunk in 0usize.. {
+            let fragments: Vec<_> = fragments.by_ref().take(128).collect();
+            if fragments.is_empty() {
+                break;
+            }
+            let ui_id = format!("trailboss.command.v1:{chunk}");
+            if ordinary_ids.contains(&(owner.as_str(), ui_id.as_str())) {
+                return Err(
+                    "command UI identity collision prevents complete publication".to_owned(),
+                );
+            }
+            generated.push(EndpointPluginUiItem {
                 plugin_id: owner.clone(),
-                ui_id: format!("trailboss.command.v1:{chunk}"),
+                ui_id,
                 title: String::new(),
                 action: None,
                 tab_id: None,
@@ -242,10 +324,13 @@ pub(crate) fn projection(
                     version: 1,
                     zones: Vec::new(),
                     composition: None,
-                    fragments: fragments.to_vec(),
+                    fragments,
                 }),
             });
         }
     }
-    (commands, rows)
+    drop(ordinary_ids);
+    let mut rows = ordinary;
+    rows.extend(generated);
+    Ok((commands, bounded_publication(&state.command_boot_id, rows)?))
 }

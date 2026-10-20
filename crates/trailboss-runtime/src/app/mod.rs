@@ -62,12 +62,10 @@ pub(crate) fn load_plugin_manifest(
 
 pub(crate) fn sidebar_plugin_ui_rows(
     app: &crate::app::App,
-) -> Vec<crate::protocol::endpoint::EndpointPluginUiItem> {
-    let mut rows =
+) -> Result<Vec<crate::protocol::endpoint::EndpointPluginUiItem>, String> {
+    let rows =
         api::plugins::sidebar_ui_rows(&app.state.installed_plugins, &app.state.plugin_ui_dynamic);
-    let generated = api::plugins::commands::projection(&app.state, &rows).1;
-    rows.extend(generated);
-    rows
+    api::plugins::commands::projection(&app.state, rows).map(|(_, rows)| rows)
 }
 
 /// Full application: AppState + runtime concerns (event channels, async I/O).

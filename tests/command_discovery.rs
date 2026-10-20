@@ -2079,3 +2079,116 @@ fn c17_actual_paired_revisions_refresh_owners_and_restart_invalidates_old_locato
         assert_eq!(records[0]["context"][field], captured[field]);
     }
 }
+
+#[test]
+fn c19_twenty_thousand_valid_actions_surface_a_complete_publication_failure_without_fallback() {
+    use std::fmt::Write as _;
+    use trailboss_runtime::{
+        api_client::{ApiClient, ConnectionTarget},
+        api_schema::Request,
+        protocol::MAX_FRAME_SIZE,
+    };
+    let core = support::Core::new();
+    let survivor = core.request(
+        "workspace.create",
+        json!({"label":"Survivor","cwd":core.home,"focus":true}),
+    );
+    let mut live = core.attach();
+    let ready = Instant::now() + Duration::from_secs(5);
+    while live.declarations.is_none() {
+        assert!(
+            Instant::now() < ready,
+            "initial complete Core-only publication missing"
+        );
+        live.receive().unwrap();
+    }
+    let previous = live.declarations.clone();
+    let owner = core.home.join("oversized-owner");
+    std::fs::create_dir_all(&owner).unwrap();
+    let mut manifest = String::with_capacity(3 * 1024 * 1024);
+    manifest.push_str("id = \"fixture.oversized\"\nname = \"Oversized owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n");
+    for index in 0..20000 {
+        writeln!(manifest, "[[actions]]\nid = \"action-{index:05}\"\ntitle = \"Valid action {index:05}\"\ncommand = [\"python3\", \"record.py\"]").unwrap();
+    }
+    std::fs::write(owner.join("trailboss-plugin.toml"), manifest).unwrap();
+    std::fs::write(
+        owner.join("record.py"),
+        "from pathlib import Path\nPath('unexpected-fallback').write_text('invoked')\n",
+    )
+    .unwrap();
+    core.request("plugin.link", json!({"path":owner,"enabled":true}));
+    let legacy = core.request(
+        "plugin.action.list",
+        json!({"plugin_id":"fixture.oversized"}),
+    );
+    assert_eq!(
+        legacy["actions"].as_array().unwrap().len(),
+        20000,
+        "all fixture declarations must be accepted as valid, not filtered to manufacture a limit"
+    );
+    let api = ApiClient::for_target(ConnectionTarget::SocketPath(
+        core.home
+            .join(format!("trailboss/sessions/{}/trailboss.sock", core.name)),
+    ));
+    let request: Request = serde_json::from_value(json!({
+        "id":"complete-discovery", "method":"ui.command.list", "params":{},
+    }))
+    .unwrap();
+    let reply = api
+        .request_value_with_timeout(&request, Duration::from_secs(10))
+        .unwrap();
+    let error = reply.get("error").expect(
+        "the oversized complete projection must fail, not advertise a successful usable catalog",
+    );
+    assert!(
+        reply.get("result").is_none(),
+        "a failed complete publication has no partial success"
+    );
+    let bound = format!("exceeds maximum {MAX_FRAME_SIZE}");
+    assert!(
+        error["message"].as_str().unwrap().contains(&bound),
+        "{error}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "already-connected endpoint must surface complete publication failure"
+        );
+        if let Err(error) = live.receive() {
+            assert!(error.to_string().contains(&bound), "{error}");
+            break;
+        }
+        assert_eq!(
+            live.declarations, previous,
+            "an oversized refresh must not substitute a partial successful owner set"
+        );
+    }
+    let mut client = core.attach();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "oversized owner declarations must surface a bounded endpoint failure"
+        );
+        if let Err(error) = client.receive() {
+            assert!(
+                error.to_string().contains(&bound),
+                "actual endpoint error must expose the existing frame bound: {error}"
+            );
+            break;
+        }
+        assert!(client.declarations.is_none(),
+            "an incomplete generated owner set must not be presented as a usable declaration projection");
+    }
+    assert!(
+        !owner.join("unexpected-fallback").exists(),
+        "publication failure must never invoke an action"
+    );
+    let after = core.request("session.snapshot", json!({}));
+    assert!(after["snapshot"]["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|workspace| workspace["workspace_id"] == survivor["workspace"]["workspace_id"]));
+}

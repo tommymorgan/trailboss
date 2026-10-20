@@ -95,6 +95,7 @@
   {"id":"contract:plugin.unlink","method":"plugin.unlink","params":{"plugin_id":"missing"}},
   {"id":"contract:plugin.enable","method":"plugin.enable","params":{"plugin_id":"missing"}},
   {"id":"contract:plugin.disable","method":"plugin.disable","params":{"plugin_id":"missing"}},
+  {"id":"contract:ui.command.list","method":"ui.command.list","params":{}},
   {"id":"contract:plugin.action.list","method":"plugin.action.list","params":{}},
   {"id":"contract:plugin.action.invoke","method":"plugin.action.invoke","params":{"action_id":"missing"}},
   {"id":"contract:plugin.log.list","method":"plugin.log.list","params":{}},
