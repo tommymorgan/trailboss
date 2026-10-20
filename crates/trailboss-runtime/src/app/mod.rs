@@ -65,7 +65,8 @@ pub(crate) fn sidebar_plugin_ui_rows(
 ) -> Vec<crate::protocol::endpoint::EndpointPluginUiItem> {
     let mut rows =
         api::plugins::sidebar_ui_rows(&app.state.installed_plugins, &app.state.plugin_ui_dynamic);
-    rows.extend(api::plugins::commands::projection(&app.state).1);
+    let generated = api::plugins::commands::projection(&app.state, &rows).1;
+    rows.extend(generated);
     rows
 }
 

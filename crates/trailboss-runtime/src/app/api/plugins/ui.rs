@@ -1224,6 +1224,7 @@ command = ["sh", "-c", "printf '[{\"title\":\"%s\"}]\\n' \"$$\"; exec sleep 30"]
             id: id.to_string(),
             title: id.to_string(),
             description: None,
+            confirmation_fragment: None,
             contexts: Vec::new(),
             platforms: None,
             command: vec!["true".to_string()],

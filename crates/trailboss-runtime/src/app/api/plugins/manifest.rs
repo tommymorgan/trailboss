@@ -56,6 +56,8 @@ struct RawPluginManifestAction {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
+    confirmation_fragment: Option<String>,
+    #[serde(default)]
     contexts: Vec<crate::api::schema::PluginActionContext>,
     #[serde(default)]
     platforms: Option<Vec<RawPlatform>>,
@@ -535,6 +537,7 @@ fn normalize_manifest_action(
         id,
         title,
         description,
+        confirmation_fragment: action.confirmation_fragment,
         contexts: action.contexts,
         platforms,
         command,

@@ -8,6 +8,7 @@ platforms = ["linux", "macos"]
 [[actions]]
 id = "close-space"
 title = "Close space"
+confirmation_fragment = "commands.confirm-space"
 command = ["bun", "menus.ts", "--close-space"]
 
 [[ui]]

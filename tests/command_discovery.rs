@@ -1501,3 +1501,307 @@ fn c13_all_129_owner_actions_have_bounded_exports_and_action_129_executes() {
         assert_eq!(records[0]["context"][field], captured[field]);
     }
 }
+
+#[test]
+fn c16_confirmation_copies_the_current_owner_export_without_an_outer_action() {
+    use trailboss_runtime::protocol::widgets::Node;
+    let core = support::Core::new();
+    let owner = core.home.join("confirmation-owner");
+    std::fs::create_dir_all(&owner).unwrap();
+    std::fs::write(owner.join("trailboss-plugin.toml"),
+        "id = \"fixture.confirmation\"\nname = \"Confirmation owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"close-space\"\ntitle = \"Close owned space\"\nconfirmation_fragment = \"commands.confirm-space\"\ncommand = [\"python3\", \"record.py\"]\n[[ui]]\nid = \"confirmation\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"confirmation.py\"]\n").unwrap();
+    std::fs::write(
+        owner.join("record.py"),
+        "raise SystemExit('opening a confirmation must never invoke its owner')\n",
+    )
+    .unwrap();
+    let confirmation = json!({"type":"column","children":[
+        {"type":"label","text":"Owner confirmation","role":"heading"},
+        {"type":"row","children":[{"type":"label","text":"Cancel","role":"primary"}],"action":"host:cancel"},
+        {"type":"row","children":[{"type":"label","text":"Confirm original owner","role":"primary"}],"action":"close-space"}
+    ]});
+    let declaration = json!({"herdr":"widget_tree","version":1,"zones":[],
+        "fragments":[{"name":"commands.confirm-space","priority":0,"tree":confirmation}]});
+    std::fs::write(
+        owner.join("confirmation.py"),
+        format!("print({:?}, flush=True)\n", declaration.to_string()),
+    )
+    .unwrap();
+    core.request("plugin.link", json!({"path":owner,"enabled":true}));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let logs = core.request(
+            "plugin.log.list",
+            json!({"plugin_id":"fixture.confirmation"}),
+        );
+        if logs["logs"].as_array().unwrap().iter().any(|log| {
+            log["status"] == "succeeded"
+                && log["command"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|arg| arg == "confirmation.py")
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actual confirmation producer did not complete: {logs}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let catalog = core.request("ui.command.list", json!({}));
+    let command = catalog["commands"].as_array().unwrap().iter().find(|command|
+        command["key"] == json!({"kind":"plugin","plugin_id":"fixture.confirmation","action_id":"close-space"})).unwrap();
+    let mut client = core.attach();
+    while client.boot_id.is_empty() || client.declarations.is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "actual confirmation projection missing"
+        );
+        client.receive().unwrap();
+    }
+    let declarations = client.declarations.as_ref().unwrap();
+    let native = NativeCore::default();
+    let (provider, tree) = native
+        .fragment(declarations, command["fragment_name"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(provider, "fixture.confirmation");
+    let Node::Row {
+        action,
+        context,
+        menu,
+        ..
+    } = tree
+    else {
+        panic!("generated owner confirmation must be an ordinary row");
+    };
+    assert_eq!(
+        action, &None,
+        "opening confirmation must not execute the destructive action"
+    );
+    assert_eq!(
+        context,
+        &Context::default(),
+        "owner export must not replace captured scope"
+    );
+    let expected: Node = serde_json::from_value(confirmation).unwrap();
+    assert_eq!(menu.as_deref().expect("owner confirmation menu"), &expected);
+    let logs = core.request(
+        "plugin.log.list",
+        json!({"plugin_id":"fixture.confirmation"}),
+    );
+    assert!(!logs["logs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|log| log["command"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|arg| arg == "record.py")));
+}
+
+#[test]
+fn c16_invalid_or_ambiguous_owner_confirmations_withdraw_and_ordinary_publication_recovers() {
+    use trailboss_runtime::protocol::widgets::Node;
+    let core = support::Core::new();
+    let owner = core.home.join("confirmation-owner");
+    std::fs::create_dir_all(&owner).unwrap();
+    let header = "id = \"fixture.confirmation\"\nname = \"Confirmation owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"close-space\"\ntitle = \"Close owned space\"\nconfirmation_fragment = \"commands.confirm-space\"\ncommand = [\"python3\", \"record.py\"]\n[[actions]]\nid = \"other\"\ntitle = \"Other action\"\ncommand = [\"python3\", \"record.py\"]\n";
+    std::fs::write(owner.join("trailboss-plugin.toml"), format!("{header}[[ui]]\nid = \"confirmation\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"confirmation.py\", \"current.json\"]\nstream = true\n[[ui]]\nid = \"duplicate\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"confirmation.py\", \"duplicate.json\"]\nstream = true\n")).unwrap();
+    std::fs::write(owner.join("confirmation.py"),
+        "import pathlib, sys, time\npath = pathlib.Path(sys.argv[1])\nlast = None\nwhile True:\n text = path.read_text()\n if text != last:\n  print(text, flush=True)\n  last = text\n time.sleep(0.02)\n").unwrap();
+    std::fs::write(
+        owner.join("record.py"),
+        "raise SystemExit('unavailable confirmation must not dispatch')\n",
+    )
+    .unwrap();
+    let label = |text: &str| json!({"type":"label","text":text,"role":"primary"});
+    let terminal = |action: &str| json!({"type":"row","children":[label(action)],"action":action});
+    let valid = json!({"type":"column","children":[label("Owner confirmation"),
+        terminal("host:cancel"),terminal("close-space")]});
+    let publication = |marker: &str, tree: Option<Value>| {
+        json!({
+            "herdr":"widget_tree","version":1,
+            "zones":[{"zone":"footer","tree":label(marker)}],
+            "fragments":tree.map(|tree| vec![json!({"name":"commands.confirm-space","priority":0,"tree":tree})]).unwrap_or_default()
+        })
+    };
+    std::fs::write(
+        owner.join("current.json"),
+        publication("pending", None).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        owner.join("duplicate.json"),
+        publication("duplicate-empty", None).to_string(),
+    )
+    .unwrap();
+    core.request("plugin.link", json!({"path":owner,"enabled":true}));
+
+    // A higher-priority, valid export from another owner must never satisfy the
+    // annotation while this owner's own export is absent.
+    let foreign = core.home.join("foreign-confirmation");
+    std::fs::create_dir_all(&foreign).unwrap();
+    std::fs::write(foreign.join("trailboss-plugin.toml"),
+        "id = \"fixture.foreign\"\nname = \"Foreign confirmation\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"close-space\"\ntitle = \"Foreign close\"\ncommand = [\"python3\", \"foreign.py\"]\n[[ui]]\nid = \"confirmation\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"foreign.py\"]\n").unwrap();
+    let mut foreign_declaration = publication("foreign", Some(valid.clone()));
+    foreign_declaration["fragments"][0]["priority"] = json!(1000000);
+    std::fs::write(
+        foreign.join("foreign.py"),
+        format!("print({:?}, flush=True)\n", foreign_declaration.to_string()),
+    )
+    .unwrap();
+    core.request("plugin.link", json!({"path":foreign,"enabled":true}));
+    let observed = |marker: &str| {
+        let mut client = core.attach();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(declarations) = &client.declarations {
+                if declarations.iter().any(|(provider, declaration)| {
+                    provider == "fixture.confirmation"
+                        && declaration.zones.iter().any(
+                            |zone| matches!(&zone.tree, Node::Label { text, .. } if text == marker),
+                        )
+                }) {
+                    return declarations.clone();
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "ordinary producer state {marker} was not projected"
+            );
+            client.receive().unwrap();
+        }
+    };
+    let key = json!({"kind":"plugin","plugin_id":"fixture.confirmation","action_id":"close-space"});
+    let mut locator = None;
+    let mut check = |marker: &str, usable: bool| {
+        let declarations = observed(marker);
+        let catalog = core.request("ui.command.list", json!({}));
+        let command = catalog["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| command["key"] == key)
+            .unwrap();
+        assert_eq!(command["title"], "Close owned space");
+        if let Some(previous) = &locator {
+            assert_eq!(command["fragment_name"].as_str().unwrap(), previous);
+        } else {
+            locator = Some(command["fragment_name"].as_str().unwrap().to_owned());
+        }
+        let native = NativeCore::default();
+        let resolved = native.fragment(&declarations, command["fragment_name"].as_str().unwrap());
+        if usable {
+            assert!(command.get("diagnostic").is_none(), "{marker}: {command}");
+            let (provider, tree) =
+                resolved.expect("valid ordinary owner publication restores its Use");
+            assert_eq!(provider, "fixture.confirmation");
+            let Node::Row {
+                action,
+                context,
+                menu,
+                ..
+            } = tree
+            else {
+                panic!("confirmation wrapper")
+            };
+            assert!(action.is_none());
+            assert_eq!(context, &Context::default());
+            assert_eq!(
+                menu.as_deref(),
+                Some(&serde_json::from_value::<Node>(valid.clone()).unwrap())
+            );
+        } else {
+            let diagnostic = command["diagnostic"]
+                .as_str()
+                .expect("unavailable owner/action diagnostic");
+            assert!(
+                diagnostic.contains("fixture.confirmation/close-space"),
+                "{diagnostic}"
+            );
+            assert!(
+                resolved.is_none(),
+                "{marker}: no direct-action fallback or priority substitution"
+            );
+        }
+    };
+    check("pending", false);
+    std::fs::write(
+        owner.join("current.json"),
+        publication("valid-first", Some(valid.clone())).to_string(),
+    )
+    .unwrap();
+    check("valid-first", true);
+    let mut wrong_action = valid.clone();
+    wrong_action["children"][2]["action"] = json!("other");
+    let mut target_override = valid.clone();
+    target_override["children"][2]["context"] = json!({"tab_id":"replacement-target"});
+    let mut row_menu = valid.clone();
+    row_menu["children"][2]["menu"] = json!({"type":"column","children":[terminal("close-space")]});
+    let mut extra_affirmative = valid.clone();
+    extra_affirmative["children"]
+        .as_array_mut()
+        .unwrap()
+        .push(terminal("close-space"));
+    let mut no_cancel = valid.clone();
+    no_cancel["children"].as_array_mut().unwrap().remove(1);
+    for (index, tree) in [
+        None,
+        Some(wrong_action),
+        Some(target_override),
+        Some(row_menu),
+        Some(extra_affirmative),
+        Some(no_cancel),
+        Some(json!({"type":"column","children":[{"type":"input"},terminal("host:cancel"),terminal("close-space")]})),
+        Some(json!({"type":"column","children":[{"type":"use","name":"commands.confirm-space"},terminal("host:cancel"),terminal("close-space")]})),
+        Some(json!({"type":"column","children":[{"type":"column","children":[terminal("host:cancel"),terminal("close-space")]}]})),
+    ].into_iter().enumerate() {
+        let marker = format!("invalid-{index}");
+        std::fs::write(owner.join("current.json"), publication(&marker, tree).to_string()).unwrap();
+        check(&marker, false);
+    }
+    std::fs::write(
+        owner.join("current.json"),
+        publication("before-duplicate", Some(valid.clone())).to_string(),
+    )
+    .unwrap();
+    check("before-duplicate", true);
+    std::fs::write(
+        owner.join("duplicate.json"),
+        publication("duplicate-present", Some(valid.clone())).to_string(),
+    )
+    .unwrap();
+    check("duplicate-present", false);
+    std::fs::write(
+        owner.join("duplicate.json"),
+        publication("duplicate-withdrawn", None).to_string(),
+    )
+    .unwrap();
+    check("duplicate-withdrawn", true);
+    let action_list = core.request(
+        "plugin.action.list",
+        json!({"plugin_id":"fixture.confirmation"}),
+    );
+    assert!(action_list["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|action| action.get("confirmation_fragment").is_none()
+            && action.get("diagnostic").is_none()));
+    let logs = core.request(
+        "plugin.log.list",
+        json!({"plugin_id":"fixture.confirmation"}),
+    );
+    assert!(!logs["logs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|log| log["command"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|arg| arg == "record.py")));
+}

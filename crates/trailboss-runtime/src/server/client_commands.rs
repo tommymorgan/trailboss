@@ -13,6 +13,7 @@ pub(crate) const MAX_ENDPOINT_REQUEST_ID_BYTES: usize = 128;
 const ENDPOINT_RESPONSE_CHUNK_BYTES: usize = 512 * 1024;
 
 const CLIENT_SHELL_METHODS: &[&str] = &[
+    "agent.restart_idle",
     "client_shell.surface.set",
     "command.invoke",
     "integration.install",
@@ -236,6 +237,9 @@ mod tests {
             })
         ));
         assert!(supports_client_shell_method(&Method::ServerReloadConfig(
+            crate::api::schema::EmptyParams::default(),
+        )));
+        assert!(supports_client_shell_method(&Method::AgentRestartIdle(
             crate::api::schema::EmptyParams::default(),
         )));
         assert!(supports_client_shell_method(&Method::PaneLinkActivate(

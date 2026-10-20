@@ -115,7 +115,7 @@ def run_case(args, label, expected_title, stale_fragment=None):
                     projection = until(projected, f'{label}: actual fixed consumer publication')
                 except (AssertionError, OSError):
                     diagnostics = {
-                        'plugin_ui': request(api, 'plugin.ui.list'),
+                        'logs': request(api, 'plugin.log.list', {'plugin_id': 'fixture.definition-consumer'}),
                         'plugins': request(api, 'plugin.list'),
                         'endpoint_projection': last_projection,
                     }

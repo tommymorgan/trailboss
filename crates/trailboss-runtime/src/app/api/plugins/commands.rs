@@ -25,7 +25,9 @@ impl App {
         if let Err(error) = self.refresh_installed_plugins() {
             return encode_error(id, "plugin_registry_load_failed", error.to_string());
         }
-        let (commands, _) = projection(&self.state);
+        let ordinary =
+            super::sidebar_ui_rows(&self.state.installed_plugins, &self.state.plugin_ui_dynamic);
+        let (commands, _) = projection(&self.state, &ordinary);
         encode_success(
             id,
             ResponseResult::UiCommandList {
@@ -58,19 +60,76 @@ fn row(title: &str, action: Option<&str>, menu: Option<Node>) -> Node {
     }
 }
 
-pub(crate) fn projection(state: &AppState) -> (Vec<UiCommandInfo>, Vec<EndpointPluginUiItem>) {
+fn confirmation<'a>(
+    ordinary: &'a [EndpointPluginUiItem],
+    owner: &str,
+    action: &str,
+    name: &str,
+) -> Result<&'a Node, &'static str> {
+    let mut exports = ordinary
+        .iter()
+        .filter(|item| item.plugin_id == owner)
+        .filter_map(|item| item.declaration.as_ref())
+        .flat_map(|declaration| &declaration.fragments)
+        .filter(|fragment| fragment.name == name);
+    let export = exports
+        .next()
+        .ok_or("confirmation export is not published")?;
+    if exports.next().is_some() {
+        return Err("confirmation export is ambiguous");
+    }
+    let Node::Column { children } = &export.tree else {
+        return Err("confirmation export must be a self-contained Column");
+    };
+    let mut cancel = 0;
+    let mut affirmative = 0;
+    for child in children {
+        match child {
+            Node::Label { .. } => {}
+            Node::Row {
+                children,
+                action: row_action,
+                context,
+                menu,
+            } if menu.is_none()
+                && *context == Context::default()
+                && children
+                    .iter()
+                    .all(|child| matches!(child, Node::Label { .. })) =>
+            {
+                match row_action.as_deref() {
+                    Some("host:cancel") => cancel += 1,
+                    Some(id) if id == action => affirmative += 1,
+                    _ => return Err("confirmation export contains another executable action"),
+                }
+            }
+            _ => return Err("confirmation export contains unsupported content or target context"),
+        }
+    }
+    if cancel != 1 || affirmative != 1 {
+        return Err("confirmation export requires exactly one Cancel and one affirmative row");
+    }
+    Ok(&export.tree)
+}
+
+pub(crate) fn projection(
+    state: &AppState,
+    ordinary: &[EndpointPluginUiItem],
+) -> (Vec<UiCommandInfo>, Vec<EndpointPluginUiItem>) {
     if state.command_boot_id.is_empty() {
         return (Vec::new(), Vec::new());
     }
     let mut commands = Vec::new();
     let mut owners: BTreeMap<String, Vec<Fragment>> = BTreeMap::new();
-    let mut publish = |owner: &str, mut command: UiCommandInfo, tree: Node| {
+    let mut publish = |owner: &str, mut command: UiCommandInfo, tree: Option<Node>| {
         command.fragment_name = locator(&state.command_boot_id, &command.key);
-        owners.entry(owner.to_owned()).or_default().push(Fragment {
-            name: command.fragment_name.clone(),
-            priority: 0,
-            tree,
-        });
+        if let Some(tree) = tree {
+            owners.entry(owner.to_owned()).or_default().push(Fragment {
+                name: command.fragment_name.clone(),
+                priority: 0,
+                tree,
+            });
+        }
         commands.push(command);
     };
     for descriptor in CORE_COMMANDS {
@@ -114,13 +173,14 @@ pub(crate) fn projection(state: &AppState) -> (Vec<UiCommandInfo>, Vec<EndpointP
                 contexts: Vec::new(),
                 target,
                 fragment_name: String::new(),
+                diagnostic: None,
             },
-            row(
+            Some(row(
                 descriptor.title,
                 (!matches!(descriptor.interaction, CoreCommandInteraction::Confirm))
                     .then_some(action),
                 menu,
-            ),
+            )),
         );
     }
     let host = manifest::current_platform();
@@ -137,6 +197,16 @@ pub(crate) fn projection(state: &AppState) -> (Vec<UiCommandInfo>, Vec<EndpointP
             {
                 continue;
             }
+            let (tree, diagnostic) = match action.confirmation_fragment.as_deref() {
+                None => (Some(row(&action.title, Some(&action.id), None)), None),
+                Some(name) => match confirmation(ordinary, &plugin.plugin_id, &action.id, name) {
+                    Ok(menu) => (Some(row(&action.title, None, Some(menu.clone()))), None),
+                    Err(reason) => (
+                        None,
+                        Some(format!("{}/{}: {reason}", plugin.plugin_id, action.id)),
+                    ),
+                },
+            };
             publish(
                 &plugin.plugin_id,
                 UiCommandInfo {
@@ -149,8 +219,9 @@ pub(crate) fn projection(state: &AppState) -> (Vec<UiCommandInfo>, Vec<EndpointP
                     contexts: action.contexts.clone(),
                     target: UiCommandTarget::Owner,
                     fragment_name: String::new(),
+                    diagnostic,
                 },
-                row(&action.title, Some(&action.id), None),
+                tree,
             );
         }
     }
