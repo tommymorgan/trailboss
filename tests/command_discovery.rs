@@ -1377,3 +1377,127 @@ fn c12_ordinary_producer_cannot_claim_issued_command_namespace_or_redirect_owner
     );
     assert!(!core.home.join("consumer/invocations").exists());
 }
+
+#[test]
+fn c13_all_129_owner_actions_have_bounded_exports_and_action_129_executes() {
+    use std::collections::BTreeSet;
+    let core = support::Core::new();
+    let created = core.request(
+        "workspace.create",
+        json!({"label":"Review","cwd":core.home,"focus":true}),
+    );
+    let captured = json!({"workspace_id":created["workspace"]["workspace_id"],
+        "tab_id":created["tab"]["tab_id"],"pane_id":created["root_pane"]["pane_id"]});
+    let plugin = core.home.join("large-owner");
+    std::fs::create_dir_all(&plugin).unwrap();
+    let mut manifest = "id = \"demo.owner\"\nname = \"Large command owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n".to_owned();
+    for index in 1..=129 {
+        manifest.push_str(&format!(
+            "\n[[actions]]\nid = \"action-{index}\"\ntitle = \"Operation {index}\"\ncommand = [\"python3\", \"record.py\", \"action-{index}\"]\n"
+        ));
+    }
+    std::fs::write(plugin.join("trailboss-plugin.toml"), manifest).unwrap();
+    std::fs::write(plugin.join("record.py"), "import json, os, sys\nwith open('executed.jsonl', 'a') as output:\n output.write(json.dumps({'action':sys.argv[1],'owner':os.environ['HERDR_PLUGIN_ID'],'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON'])})+'\\n')\n").unwrap();
+    core.request("plugin.link", json!({"path":plugin,"enabled":true}));
+    let catalog = core.request("ui.command.list", json!({}));
+    let commands: Vec<_> = catalog["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|command| {
+            command["key"]["kind"] == "plugin" && command["key"]["plugin_id"] == "demo.owner"
+        })
+        .collect();
+    assert_eq!(
+        commands.len(),
+        129,
+        "the owner must not be truncated to one declaration"
+    );
+    let names: BTreeSet<_> = commands
+        .iter()
+        .map(|command| command["fragment_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names.len(),
+        129,
+        "every structured action needs its own locator"
+    );
+    assert!(names.iter().all(|name| name.chars().count() <= 200));
+    let mut client = core.attach();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.boot_id.is_empty() || client.declarations.is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "actual large-owner projection missing"
+        );
+        client.receive().unwrap();
+    }
+    let declarations: Vec<_> = client
+        .declarations
+        .as_ref()
+        .unwrap()
+        .iter()
+        .filter(|(owner, _)| owner == "demo.owner")
+        .map(|(_, declaration)| declaration)
+        .collect();
+    let exported: BTreeSet<_> = declarations
+        .iter()
+        .flat_map(|declaration| {
+            declaration
+                .fragments
+                .iter()
+                .map(|fragment| fragment.name.as_str())
+        })
+        .collect();
+    assert_eq!(
+        exported, names,
+        "actual projection must export the complete advertised owner inventory"
+    );
+    for declaration in declarations {
+        assert!(declaration.fragments.len() <= 128);
+        assert!(declaration.zones.is_empty() && declaration.composition.is_none());
+        assert!(declaration
+            .validate(|action| (1..=129).any(|index| action == format!("action-{index}"))));
+    }
+    let observed = probe_command_uses(
+        &core,
+        &captured,
+        &[json!({"kind":"plugin","plugin_id":"demo.owner","action_id":"action-129"})],
+    );
+    let selection = &observed["selections"][0];
+    let mut context = selection["context"].clone();
+    context["invocation_source"] = json!("plugin_ui");
+    let invoked = core.request(
+        "plugin.action.invoke",
+        json!({"plugin_id":selection["plugin_id"],
+        "action_id":selection["action_id"],"context":context}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let logs = core.request("plugin.log.list", json!({"plugin_id":"demo.owner"}));
+        if logs["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|log| log["log_id"] == invoked["log"]["log_id"] && log["status"] == "succeeded")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "action 129 actual owner did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let text = std::fs::read_to_string(plugin.join("executed.jsonl")).unwrap();
+    let records: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["owner"], "demo.owner");
+    assert_eq!(records[0]["action"], "action-129");
+    for field in ["workspace_id", "tab_id", "pane_id"] {
+        assert_eq!(records[0]["context"][field], captured[field]);
+    }
+}
