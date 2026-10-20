@@ -430,15 +430,27 @@ fn c03_core_inventory_resolves_to_native_actions_without_controls_or_rpc_command
 
 #[test]
 fn c05_withdrawn_action_or_owner_has_no_executable_locator_or_fallback_owner() {
+    assert_unavailable_command_rows(&[
+        ("action", "plugin_action_not_found"),
+        ("owner", "plugin_not_found"),
+        ("manifest", "plugin_manifest_unavailable"),
+    ]);
+}
+
+#[test]
+fn c06_disabled_or_unsupported_action_is_hidden_and_stale_invocation_is_rejected() {
+    assert_unavailable_command_rows(&[
+        ("disabled", "plugin_disabled"),
+        ("platform", "platform_unsupported"),
+    ]);
+}
+
+fn assert_unavailable_command_rows(cases: &[(&str, &str)]) {
     use trailboss_runtime::{
         api_client::{ApiClient, ConnectionTarget},
         api_schema::Request,
     };
-    for (withdrawal, expected_error) in [
-        ("action", "plugin_action_not_found"),
-        ("owner", "plugin_not_found"),
-        ("manifest", "plugin_manifest_unavailable"),
-    ] {
+    for &(withdrawal, expected_error) in cases {
         let core = support::Core::new();
         let owner = core.home.join("owner");
         let other = core.home.join("other");
@@ -521,6 +533,23 @@ fn c05_withdrawn_action_or_owner_has_no_executable_locator_or_fallback_owner() {
             "manifest" => {
                 std::fs::remove_file(owner.join("trailboss-plugin.toml")).unwrap();
             }
+            "disabled" => {
+                core.request("plugin.disable", json!({"plugin_id":"demo.owner"}));
+            }
+            "platform" => {
+                let unsupported = if cfg!(target_os = "windows") {
+                    "linux"
+                } else {
+                    "windows"
+                };
+                let manifest =
+                    std::fs::read_to_string(owner.join("trailboss-plugin.toml")).unwrap();
+                std::fs::write(
+                    owner.join("trailboss-plugin.toml"),
+                    format!("{manifest}\nplatforms = [{unsupported:?}]\n"),
+                )
+                .unwrap();
+            }
             _ => unreachable!(),
         }
         let current = core.request("ui.command.list", json!({}));
@@ -535,6 +564,20 @@ fn c05_withdrawn_action_or_owner_has_no_executable_locator_or_fallback_owner() {
         assert!(current["commands"].as_array().unwrap().iter().any(|command|
             command["key"] == json!({"kind":"plugin","plugin_id":"demo.other","action_id":"record-target"})),
             "{withdrawal}: same-title other owner must remain available");
+        if matches!(withdrawal, "disabled" | "platform") {
+            let inventory = core.request("plugin.action.list", json!({"plugin_id":"demo.owner"}));
+            let actions = inventory["actions"].as_array().unwrap();
+            assert_eq!(
+                actions.len(),
+                1,
+                "legacy inventory must retain declared unavailable actions"
+            );
+            assert_eq!(actions[0]["plugin_id"], "demo.owner");
+            assert_eq!(actions[0]["action_id"], "record-target");
+            if withdrawal == "platform" {
+                assert!(!actions[0]["platforms"].as_array().unwrap().is_empty());
+            }
+        }
         let mut after = core.attach();
         let deadline = Instant::now() + Duration::from_secs(5);
         while after.declarations.as_ref().is_none_or(|declarations| {
