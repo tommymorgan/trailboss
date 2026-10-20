@@ -2545,3 +2545,274 @@ fn c21_empty_eligible_plugin_set_keeps_full_core_inventory_and_real_targeted_foc
         "the actionless neutral consumer must not become an action owner"
     );
 }
+
+#[test]
+fn c22_printable_250_scalar_titles_keep_metadata_and_invoke_distinct_native_owners() {
+    unusual_title_native_invocations(
+        [
+            "界".repeat(250),
+            format!("{}別", "界".repeat(249)),
+            "界".repeat(200),
+        ],
+        [format!("{}…", "界".repeat(199)), "界".repeat(200)],
+    );
+}
+
+#[test]
+fn c22_embedded_controls_escape_at_token_boundaries_without_changing_owner_or_metadata() {
+    let prefix = format!("Read\n\u{1b}[31m {}", "界".repeat(181));
+    unusual_title_native_invocations(
+        [
+            format!("{prefix}\n{} first", "界".repeat(50)),
+            format!("{prefix}\n{} second", "界".repeat(50)),
+            format!("Read\n\u{1b}[31m {}\n終", "界".repeat(180)),
+        ],
+        [
+            format!("Read\\n\\u{{1b}}[31m {}…", "界".repeat(181)),
+            format!("Read\\n\\u{{1b}}[31m {}\\n終", "界".repeat(180)),
+        ],
+    );
+}
+
+fn unusual_title_native_invocations(titles: [String; 3], display: [String; 2]) {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use trailboss::terminal::{
+        menus::{Controls, Response},
+        Rect,
+    };
+    use trailboss_runtime::protocol::widgets::{Declaration, Node};
+    let core = support::Core::new();
+    let target = core.request(
+        "workspace.create",
+        json!({"label":"Review","cwd":core.home,"focus":true}),
+    );
+    let other = core.request(
+        "workspace.create",
+        json!({"label":"Other","cwd":core.home,"focus":true}),
+    );
+    let context = json!({"workspace_id":target["workspace"]["workspace_id"],
+        "tab_id":target["tab"]["tab_id"],"pane_id":target["root_pane"]["pane_id"]});
+    let owner = core.home.join("unusual-titles");
+    std::fs::create_dir_all(&owner).unwrap();
+    let actions = ["first", "second", "unshortened"];
+    let mut manifest = String::from(
+        "id = \"fixture.titles\"\nname = \"Unusual title owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n");
+    for (action, title) in actions.iter().zip(&titles) {
+        manifest.push_str(&format!(
+            "[[actions]]\nid = {action:?}\ntitle = {}\ncontexts = [\"pane\"]\ncommand = [\"python3\", \"record.py\"]\n",
+            json!(format!("  {title}  "))));
+    }
+    std::fs::write(owner.join("trailboss-plugin.toml"), manifest).unwrap();
+    std::fs::write(owner.join("record.py"),
+        "import json, os\nwith open('executed.jsonl','a') as output:\n output.write(json.dumps({'owner':os.environ['HERDR_PLUGIN_ID'],'action':os.environ['HERDR_PLUGIN_ACTION_ID'],'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON'])})+'\\n')\n").unwrap();
+    core.request("plugin.link", json!({"path":owner,"enabled":true}));
+    let legacy = core.request("plugin.action.list", json!({}));
+    for (action, title) in actions.iter().zip(&titles) {
+        assert!(
+            legacy["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["plugin_id"] == "fixture.titles"
+                    && item["action_id"] == *action
+                    && item["title"] == *title),
+            "the unchanged legacy manifest normalizer must accept and retain {action}'s title"
+        );
+    }
+    let catalog = core.request("ui.command.list", json!({}));
+    let commands: Vec<_> = actions
+        .iter()
+        .zip(&titles)
+        .map(|(action, title)| {
+            let key = json!({"kind":"plugin","plugin_id":"fixture.titles","action_id":action});
+            let command = catalog["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|command| command["key"] == key)
+                .expect("valid unusual title omitted from discovery");
+            assert_eq!(
+                command["title"], *title,
+                "discovery metadata must keep the full normalized title"
+            );
+            assert!(
+                command["diagnostic"].is_null(),
+                "displayable title must not make an action unavailable"
+            );
+            command
+        })
+        .collect();
+    assert_ne!(commands[0]["key"], commands[1]["key"]);
+    assert_ne!(commands[0]["fragment_name"], commands[1]["fragment_name"]);
+    let consumer = core.home.join("title-consumer");
+    std::fs::create_dir_all(&consumer).unwrap();
+    let declaration = json!({"herdr":"widget_tree","version":1,"zones":[],
+    "fragments":[{"name":"command-palette","priority":1000000,"tree":{"type":"column","children":[{
+        "type":"row","children":[{"type":"label","text":"Captured target","role":"primary"}],
+        "context":context,"menu":{"type":"column","children":commands.iter().map(|command|
+            json!({"type":"use","name":command["fragment_name"]})).collect::<Vec<_>>()}
+    }]}}]});
+    std::fs::write(consumer.join("trailboss-plugin.toml"),
+        "id = \"fixture.title-consumer\"\nname = \"Neutral title consumer\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[ui]]\nid = \"commands\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"consumer.py\"]\n").unwrap();
+    std::fs::write(
+        consumer.join("consumer.py"),
+        format!("print({:?}, flush=True)\n", declaration.to_string()),
+    )
+    .unwrap();
+    core.request("plugin.link", json!({"path":consumer,"enabled":true}));
+    let mut client = core.attach();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.boot_id.is_empty()
+        || client.snapshot.is_none()
+        || !client.declarations.as_ref().is_some_and(|declarations| {
+            declarations.iter().any(|(owner, declaration)| {
+                owner == "fixture.title-consumer"
+                    && declaration
+                        .fragments
+                        .iter()
+                        .any(|fragment| fragment.name == "command-palette")
+            })
+        })
+    {
+        assert!(
+            Instant::now() < deadline,
+            "actual native unusual-title publication not received"
+        );
+        client.receive().unwrap();
+    }
+    let declarations = client.declarations.as_ref().unwrap();
+    let mut native = NativeCore::default();
+    let snapshot = client.snapshot.as_ref().unwrap();
+    assert_eq!(
+        snapshot.focused_tab_id.as_deref(),
+        other["tab"]["tab_id"].as_str()
+    );
+    native.update_session(
+        snapshot.focused_workspace_id.clone(),
+        snapshot.focused_tab_id.clone(),
+        true,
+    );
+    for (index, command) in commands.iter().enumerate() {
+        let (actual_owner, tree) = native
+            .fragment(declarations, command["fragment_name"].as_str().unwrap())
+            .expect("issued unusual-title Use must resolve");
+        assert_eq!(actual_owner, "fixture.titles");
+        let Node::Row { children, .. } = tree else {
+            panic!("generated action must remain an ordinary Row")
+        };
+        let Node::Label { text, .. } = &children[0] else {
+            panic!("generated action must have its real display label")
+        };
+        assert_eq!(
+            text,
+            &display[usize::from(index == 2)],
+            "safe display must preserve Unicode scalars and whole escape tokens"
+        );
+        assert!(text.chars().count() <= 200 && !text.chars().any(char::is_control));
+        assert_eq!(
+            text.ends_with('…'),
+            index != 2,
+            "ellipsis is only for a shortened label"
+        );
+    }
+    for invalid in ["x".repeat(201), "Read\n\u{1b}[31m title".to_owned()] {
+        let ordinary: Declaration = serde_json::from_value(json!({
+            "herdr":"widget_tree","version":1,"zones":[{"zone":"list",
+                "tree":{"type":"label","text":invalid,"role":"primary"}}]
+        }))
+        .unwrap();
+        assert!(
+            !ordinary.validate_producer(|_| false),
+            "display formatting is not permission to accept arbitrary invalid producer labels"
+        );
+    }
+    let viewport = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 24,
+    };
+    let mut input = client.input().unwrap();
+    for (index, action) in actions.iter().enumerate() {
+        let mut controls = Controls::default();
+        assert!(controls.open_palette(&native, declarations, None));
+        assert!(matches!(
+            controls.key(
+                &native,
+                declarations,
+                viewport,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+            ),
+            Response::Consumed
+        ));
+        for _ in 0..index {
+            assert!(matches!(
+                controls.key(
+                    &native,
+                    declarations,
+                    viewport,
+                    KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)
+                ),
+                Response::Consumed
+            ));
+        }
+        let Response::Invoke(selected) = controls.key(
+            &native,
+            declarations,
+            viewport,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ) else {
+            panic!("native ordinary Use did not select the unusual-title owner action");
+        };
+        assert!(matches!(
+            native.invoke(&selected.action, &selected.context, Some(snapshot)),
+            Effect::Plugin
+        ));
+        input
+            .invoke(
+                &client.boot_id,
+                &selected.plugin,
+                &selected.action,
+                &selected.context,
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let logs = core.request("plugin.log.list", json!({"plugin_id":"fixture.titles"}));
+            if logs["logs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|log| log["action_id"] == *action && log["status"] == "succeeded")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "real unusual-title action {action} did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let records: Vec<Value> = std::fs::read_to_string(owner.join("executed.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), actions.len());
+    for action in actions {
+        let matching: Vec<_> = records
+            .iter()
+            .filter(|record| record["action"] == action)
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "a display-identical row must invoke only its actual action once"
+        );
+        assert_eq!(matching[0]["owner"], "fixture.titles");
+        for field in ["workspace_id", "tab_id", "pane_id"] {
+            assert_eq!(matching[0]["context"][field], context[field]);
+        }
+    }
+}

@@ -55,10 +55,41 @@ fn locator(boot_id: &str, key: &UiCommandKey) -> (String, [u8; 32]) {
     )
 }
 
+fn command_label(title: &str) -> String {
+    // Public Labels allow 200 Unicode scalars. Build only that bounded display,
+    // retaining each printable control escape as an indivisible token.
+    const LIMIT: usize = 200;
+    let mut bytes = [0u8; LIMIT * 4];
+    let mut used = 0;
+    let mut scalars = 0;
+    let mut chars = title.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let escaped = ch.is_control().then(|| ch.escape_debug());
+        let token_len = escaped.as_ref().map_or(1, |token| token.clone().count());
+        // A final token may fill all 200 scalars; otherwise reserve the ellipsis.
+        let budget = LIMIT - usize::from(chars.peek().is_some());
+        if scalars + token_len > budget {
+            used += '…'.encode_utf8(&mut bytes[used..]).len();
+            break;
+        }
+        if let Some(token) = escaped {
+            for part in token {
+                used += part.encode_utf8(&mut bytes[used..]).len();
+            }
+        } else {
+            used += ch.encode_utf8(&mut bytes[used..]).len();
+        }
+        scalars += token_len;
+    }
+    std::str::from_utf8(&bytes[..used])
+        .expect("command labels contain only encoded Unicode scalars")
+        .to_owned()
+}
+
 fn row(title: &str, action: Option<&str>, menu: Option<Node>) -> Node {
     Node::Row {
         children: vec![Node::Label {
-            text: title.to_owned(),
+            text: command_label(title),
             role: "label".to_owned(),
             tone: None,
         }],

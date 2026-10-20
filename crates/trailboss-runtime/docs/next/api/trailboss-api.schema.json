@@ -6390,6 +6390,22 @@
         {
           "properties": {
             "method": {
+              "const": "ui.command.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "plugin.action.list",
               "type": "string"
             },
@@ -9118,6 +9134,12 @@
               },
               "type": "array"
             },
+            "confirmation_fragment": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "contexts": {
               "items": {
                 "$ref": "#/schemas/success_response/$defs/PluginActionContext"
@@ -10622,6 +10644,29 @@
             },
             {
               "properties": {
+                "boot_id": {
+                  "type": "string"
+                },
+                "commands": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/UiCommandInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "ui_command_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "boot_id",
+                "commands"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "actions": {
                   "items": {
                     "$ref": "#/schemas/success_response/$defs/PluginActionInfo"
@@ -10985,6 +11030,105 @@
             "agent_status"
           ],
           "type": "object"
+        },
+        "UiCommandInfo": {
+          "properties": {
+            "contexts": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/PluginActionContext"
+              },
+              "type": "array"
+            },
+            "description": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "diagnostic": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "fragment_name": {
+              "type": "string"
+            },
+            "key": {
+              "$ref": "#/schemas/success_response/$defs/UiCommandKey"
+            },
+            "target": {
+              "$ref": "#/schemas/success_response/$defs/UiCommandTarget"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "title",
+            "contexts",
+            "target",
+            "fragment_name"
+          ],
+          "type": "object"
+        },
+        "UiCommandKey": {
+          "description": "Structured execution identity; dotted owner/action spellings are not keys.",
+          "oneOf": [
+            {
+              "properties": {
+                "action_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "core",
+                  "type": "string"
+                },
+                "mode": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "action_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "action_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "plugin",
+                  "type": "string"
+                },
+                "plugin_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "plugin_id",
+                "action_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "UiCommandTarget": {
+          "enum": [
+            "owner",
+            "global",
+            "workspace",
+            "tab",
+            "client_local"
+          ],
+          "type": "string"
         },
         "WorkspaceInfo": {
           "properties": {
