@@ -53,6 +53,33 @@ overrides compatible with running agents. New session files use the
 `trailboss` namespace; changing product labels does not migrate an existing
 session or its socket. See [runtime provenance](docs/runtime-provenance.md#trailboss-naming-cutover).
 
+## Command discovery for UI plugins
+
+The socket API method `ui.command.list` takes empty parameters and returns the
+current `boot_id` and `commands`. It includes user-facing Core commands and
+actions from enabled, platform-compatible plugin manifests; plugins do not
+register a second command catalog.
+
+Each command has a structured `key`, its original `title`, optional
+`description`, context hints, a `target` and an opaque `fragment_name`.
+Render an ordinary `Use` of that fragment from the matching live declaration
+projection. Do not reconstruct action IDs from titles or dotted strings.
+Resource commands belong under captured workspace/tab context; global and
+client-local commands belong outside resource wrappers and popup ancestry.
+Context hints are not an availability or permission check.
+
+Core publishes the interaction tree under its actual owner. Selection keeps
+the existing native name, confirmation, focus and detach flows, or invokes
+the original plugin action. The generation-1 declaration protocol and
+`plugin.action.list` / `plugin.action.invoke` remain unchanged.
+
+A plugin action may set `confirmation_fragment` to one of its own ordinary
+confirmation exports. The export must contain labels and exactly two terminal
+rows: `host:cancel` and that action, with no target override or nested behavior.
+Opening it does not invoke the action. Missing, invalid or ambiguous exports
+leave the command listed with a `diagnostic` but no actionable generated
+wrapper; consumers must not substitute a direct invocation.
+
 ## Thanks
 
 Trailboss stands on [herdr](https://github.com/herdrdev/herdr) and its

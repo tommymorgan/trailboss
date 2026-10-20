@@ -1805,3 +1805,277 @@ fn c16_invalid_or_ambiguous_owner_confirmations_withdraw_and_ordinary_publicatio
             .iter()
             .any(|arg| arg == "record.py")));
 }
+
+#[test]
+fn c17_actual_paired_revisions_refresh_owners_and_restart_invalidates_old_locators() {
+    use std::os::unix::net::UnixStream;
+    use trailboss_runtime::protocol::{
+        self,
+        endpoint::{
+            EndpointClientHello, EndpointPluginUi, ENDPOINT_HELLO_KIND, ENDPOINT_SNAPSHOT_KIND,
+            PLUGIN_UI_KIND,
+        },
+        widgets::{Declaration, Node},
+        ClientMessage, ClientShellSnapshot, ClientSurfaceSize, ServerMessage,
+    };
+    fn connect(core: &support::Core) -> UnixStream {
+        let mut stream = UnixStream::connect(core.home.join(format!(
+            "trailboss/sessions/{}/trailboss-client.sock",
+            core.name
+        )))
+        .unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let hello = EndpointClientHello {
+            generation: 1,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            surface_size: ClientSurfaceSize { cols: 80, rows: 24 },
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: false,
+            surface_active: false,
+            surface_reuse: false,
+            surface_delta: false,
+            surface_scroll: false,
+            snapshot_codecs: vec!["shell.snapshot.v1".into()],
+            surface_codecs: vec!["shell.surface.v1".into()],
+            input_codecs: vec!["shell.input.semantic.v1".into()],
+            blob_codecs: vec!["shell.blob.v1".into()],
+        };
+        protocol::write_message(
+            &mut stream,
+            &ClientMessage::EndpointControl {
+                kind: ENDPOINT_HELLO_KIND.into(),
+                data: serde_json::to_string(&hello).unwrap(),
+            },
+        )
+        .unwrap();
+        stream
+    }
+    fn paired(
+        stream: &mut UnixStream,
+        ready: impl Fn(&EndpointPluginUi) -> bool,
+    ) -> (ClientShellSnapshot, EndpointPluginUi) {
+        let mut snapshot: Option<ClientShellSnapshot> = None;
+        let mut pending_ui: Option<EndpointPluginUi> = None;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "matching refreshed snapshot/UI pair did not arrive"
+            );
+            let message: ServerMessage =
+                protocol::read_message(stream, protocol::MAX_GRAPHICS_FRAME_SIZE).unwrap();
+            if let ServerMessage::EndpointControl { kind, data } = message {
+                if kind == ENDPOINT_SNAPSHOT_KIND {
+                    snapshot = Some(serde_json::from_str(&data).unwrap());
+                } else if kind == PLUGIN_UI_KIND {
+                    pending_ui = Some(serde_json::from_str(&data).unwrap());
+                }
+                // The existing reliable control batch publishes UI before its
+                // snapshot; consumers pair identities, not message ordering.
+                if let (Some(snapshot), Some(ui)) = (&snapshot, &pending_ui) {
+                    if ui.boot_id == snapshot.boot_id
+                        && ui.revision == snapshot.revision
+                        && ready(ui)
+                    {
+                        return (snapshot.clone(), pending_ui.take().unwrap());
+                    }
+                }
+            }
+        }
+    }
+    fn declarations(ui: &EndpointPluginUi) -> Vec<(String, Declaration)> {
+        ui.ui
+            .iter()
+            .filter_map(|item| {
+                item.declaration
+                    .as_ref()
+                    .map(|tree| (item.plugin_id.clone(), tree.clone()))
+            })
+            .collect()
+    }
+    fn assert_catalog(catalog: &Value, ui: &EndpointPluginUi) {
+        assert_eq!(catalog["boot_id"], ui.boot_id);
+        let declarations = declarations(ui);
+        let native = NativeCore::default();
+        let mut issued = std::collections::BTreeSet::new();
+        for command in catalog["commands"].as_array().unwrap() {
+            let name = command["fragment_name"].as_str().unwrap();
+            assert!(
+                issued.insert(name),
+                "distinct structured commands must not share a locator"
+            );
+            let (owner, _) = native
+                .fragment(&declarations, name)
+                .expect("current advertised locator resolves");
+            let expected = command["key"]["plugin_id"]
+                .as_str()
+                .unwrap_or("trailboss.core");
+            assert_eq!(
+                owner, expected,
+                "only the actual owner may provide this current locator"
+            );
+        }
+    }
+    let mut core = support::Core::new();
+    let target = core.request(
+        "workspace.create",
+        json!({"label":"Captured","cwd":core.home,"focus":true}),
+    );
+    let owner = core.home.join("refresh-owner");
+    std::fs::create_dir_all(&owner).unwrap();
+    let manifest = |title: &str, added: bool| {
+        format!(
+        "id = \"fixture.refresh\"\nname = \"Refresh owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"first\"\ntitle = \"{title}\"\ncommand = [\"python3\", \"record.py\"]\n{}",
+        if added { "[[actions]]\nid = \"second\"\ntitle = \"New live command\"\ncommand = [\"python3\", \"record.py\"]\n" } else { "" })
+    };
+    std::fs::write(
+        owner.join("trailboss-plugin.toml"),
+        manifest("Original owner title", false),
+    )
+    .unwrap();
+    std::fs::write(owner.join("record.py"),
+        "import json, os\nwith open('executed.jsonl','a') as output:\n output.write(json.dumps({'owner':os.environ['HERDR_PLUGIN_ID'],'action':os.environ['HERDR_PLUGIN_ACTION_ID'],'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON'])})+'\\n')\n").unwrap();
+    core.request("plugin.link", json!({"path":owner,"enabled":true}));
+    let before = core.request("ui.command.list", json!({}));
+    let mut stream = connect(&core);
+    let (before_snapshot, before_ui) = paired(&mut stream, |_| true);
+    assert_catalog(&before, &before_ui);
+    let first_key = json!({"kind":"plugin","plugin_id":"fixture.refresh","action_id":"first"});
+    let second_key = json!({"kind":"plugin","plugin_id":"fixture.refresh","action_id":"second"});
+    let first = before["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["key"] == first_key)
+        .unwrap();
+    let old_declarations = declarations(&before_ui);
+    std::fs::write(
+        owner.join("trailboss-plugin.toml"),
+        manifest("Refreshed owner title", true),
+    )
+    .unwrap();
+    let refreshed = core.request("ui.command.list", json!({}));
+    let second = refreshed["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["key"] == second_key)
+        .unwrap();
+    let renamed = refreshed["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["key"] == first_key)
+        .unwrap();
+    assert_eq!(first["fragment_name"], renamed["fragment_name"]);
+    assert_eq!(renamed["title"], "Refreshed owner title");
+    let second_name = second["fragment_name"].as_str().unwrap();
+    let native = NativeCore::default();
+    assert!(
+        native.fragment(&old_declarations, second_name).is_none(),
+        "a fresh catalog with a pending old projection must not guess an executable row"
+    );
+    assert!(
+        !owner.join("executed.jsonl").exists(),
+        "unresolved pending Use must not dispatch"
+    );
+    let (refreshed_snapshot, refreshed_ui) = paired(&mut stream, |ui| {
+        ui.ui
+            .iter()
+            .filter_map(|item| item.declaration.as_ref())
+            .flat_map(|tree| &tree.fragments)
+            .any(|fragment| fragment.name == second_name)
+    });
+    assert!(refreshed_snapshot.revision > before_snapshot.revision);
+    assert_catalog(&refreshed, &refreshed_ui);
+    let refreshed_declarations = declarations(&refreshed_ui);
+    let (_, renamed_tree) = native
+        .fragment(
+            &refreshed_declarations,
+            renamed["fragment_name"].as_str().unwrap(),
+        )
+        .unwrap();
+    let Node::Row { children, .. } = renamed_tree else {
+        panic!("ordinary generated row")
+    };
+    assert!(matches!(&children[0], Node::Label { text, .. } if text == "Refreshed owner title"));
+    let old_names: Vec<_> = refreshed["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|command| command["fragment_name"].as_str().unwrap().to_owned())
+        .collect();
+    drop(stream);
+    core.restart();
+    let restarted = core.request("ui.command.list", json!({}));
+    assert_ne!(
+        refreshed["boot_id"], restarted["boot_id"],
+        "new Core process must have a new actual boot identity"
+    );
+    let mut stream = connect(&core);
+    let (_, restarted_ui) = paired(&mut stream, |_| true);
+    assert_catalog(&restarted, &restarted_ui);
+    let restarted_declarations = declarations(&restarted_ui);
+    for old_name in old_names {
+        assert!(
+            native
+                .fragment(&restarted_declarations, &old_name)
+                .is_none(),
+            "old-boot locator must never retarget to a current command"
+        );
+    }
+    let current = restarted["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["key"] == second_key)
+        .unwrap();
+    assert_ne!(second["fragment_name"], current["fragment_name"]);
+    let (provider, tree) = native
+        .fragment(
+            &restarted_declarations,
+            current["fragment_name"].as_str().unwrap(),
+        )
+        .unwrap();
+    let Node::Row {
+        action: Some(action),
+        ..
+    } = tree
+    else {
+        panic!("current actual owner action")
+    };
+    let captured = json!({"workspace_id":target["workspace"]["workspace_id"],
+        "tab_id":target["tab"]["tab_id"],"pane_id":target["root_pane"]["pane_id"],"invocation_source":"plugin_ui"});
+    core.request(
+        "plugin.action.invoke",
+        json!({"plugin_id":provider,"action_id":action,"context":captured}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let records = loop {
+        if let Ok(text) = std::fs::read_to_string(owner.join("executed.jsonl")) {
+            let records: Vec<Value> = text
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            if !records.is_empty() {
+                break records;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "current locator's actual owner did not execute"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(records.len(), 1, "only current selection invokes once");
+    assert_eq!(records[0]["owner"], "fixture.refresh");
+    assert_eq!(records[0]["action"], "second");
+    for field in ["workspace_id", "tab_id", "pane_id"] {
+        assert_eq!(records[0]["context"][field], captured[field]);
+    }
+}

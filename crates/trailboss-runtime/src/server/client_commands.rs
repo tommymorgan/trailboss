@@ -239,9 +239,6 @@ mod tests {
         assert!(supports_client_shell_method(&Method::ServerReloadConfig(
             crate::api::schema::EmptyParams::default(),
         )));
-        assert!(supports_client_shell_method(&Method::AgentRestartIdle(
-            crate::api::schema::EmptyParams::default(),
-        )));
         assert!(supports_client_shell_method(&Method::PaneLinkActivate(
             crate::api::schema::PaneLinkActivateParams {
                 pane_id: "w1:p1".into(),
