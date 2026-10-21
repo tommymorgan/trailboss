@@ -9,7 +9,7 @@ depends=('glibc' 'gcc-libs' 'openssh')
 optdepends=('xclip: clipboard images on X11' 'wl-clipboard: clipboard images on Wayland')
 options=('!strip' '!debug')
 source=("trailboss-${pkgver}-x86_64.tar.zst")
-sha256sums=('8597eaa0fec1ebdd2ebc7072f2aaf2d0b925d7d693994ec1a4c0b16766702f89')
+sha256sums=('9f79d414900d4d8a01e88a417fca619aaded2cb33b1c1dfc28127b4f7e7c04fa')
 
 package() {
   install -Dm755 "$srcdir/payload/trailboss" "$pkgdir/usr/bin/trailboss"
@@ -20,6 +20,8 @@ package() {
   install -Dm644 "$srcdir/payload/plugins/agent-tree/trailboss-plugin.toml" "$pkgdir/usr/lib/trailboss/plugins/agent-tree/trailboss-plugin.toml"
   install -Dm755 "$srcdir/payload/plugins/sidebar-menus/sidebar-menus" "$pkgdir/usr/lib/trailboss/plugins/sidebar-menus/sidebar-menus"
   install -Dm644 "$srcdir/payload/plugins/sidebar-menus/trailboss-plugin.toml" "$pkgdir/usr/lib/trailboss/plugins/sidebar-menus/trailboss-plugin.toml"
+  install -Dm755 "$srcdir/payload/plugins/command-palette/command-palette" "$pkgdir/usr/lib/trailboss/plugins/command-palette/command-palette"
+  install -Dm644 "$srcdir/payload/plugins/command-palette/trailboss-plugin.toml" "$pkgdir/usr/lib/trailboss/plugins/command-palette/trailboss-plugin.toml"
   install -Dm644 "$srcdir/payload/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 "$srcdir/payload/BUN-LICENSE.md" "$pkgdir/usr/share/licenses/$pkgname/BUN-LICENSE.md"
 }

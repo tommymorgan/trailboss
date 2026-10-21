@@ -84,7 +84,8 @@ impl Client {
                 "native client socket connection failed"
             );
         })?;
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .inspect_err(|failure| {
                 tracing::error!(
                     event = "native_client_attach_failed",
@@ -123,7 +124,9 @@ impl Client {
         .inspect_err(|failure| {
             let (failure_kind, io_kind, raw_os_error) = match failure {
                 protocol::FramingError::UnexpectedEof => ("unexpected_eof", None, None),
-                protocol::FramingError::Io(error) => ("io", Some(error.kind()), error.raw_os_error()),
+                protocol::FramingError::Io(error) => {
+                    ("io", Some(error.kind()), error.raw_os_error())
+                }
                 protocol::FramingError::Oversized { .. } => ("oversized", None, None),
                 protocol::FramingError::Bincode(_) => ("encode", None, None),
             };
@@ -155,32 +158,32 @@ impl Client {
         })
     }
     pub fn receive(&mut self) -> io::Result<()> {
-        let message: ServerMessage = match protocol::read_message(
-            &mut self.stream,
-            protocol::MAX_GRAPHICS_FRAME_SIZE,
-        ) {
-            Ok(message) => message,
-            Err(failure) => {
-                let (failure_kind, io_kind, raw_os_error) = match &failure {
-                    protocol::FramingError::UnexpectedEof => ("unexpected_eof", None, None),
-                    protocol::FramingError::Io(error) => ("io", Some(error.kind()), error.raw_os_error()),
-                    protocol::FramingError::Oversized { .. } => ("oversized", None, None),
-                    protocol::FramingError::Bincode(_) => ("decode", None, None),
-                };
-                tracing::error!(
-                    event = "native_client_receive_failed",
-                    phase = "read_frame",
-                    failure_kind,
-                    ?io_kind,
-                    ?raw_os_error,
-                    received_messages = self.received_messages,
-                    received_surface_frames = self.received_surface_frames,
-                    last_message_kind = self.last_message_kind,
-                    "native client frame receive failed (payload omitted)"
-                );
-                return Err(error(failure));
-            }
-        };
+        let message: ServerMessage =
+            match protocol::read_message(&mut self.stream, protocol::MAX_GRAPHICS_FRAME_SIZE) {
+                Ok(message) => message,
+                Err(failure) => {
+                    let (failure_kind, io_kind, raw_os_error) = match &failure {
+                        protocol::FramingError::UnexpectedEof => ("unexpected_eof", None, None),
+                        protocol::FramingError::Io(error) => {
+                            ("io", Some(error.kind()), error.raw_os_error())
+                        }
+                        protocol::FramingError::Oversized { .. } => ("oversized", None, None),
+                        protocol::FramingError::Bincode(_) => ("decode", None, None),
+                    };
+                    tracing::error!(
+                        event = "native_client_receive_failed",
+                        phase = "read_frame",
+                        failure_kind,
+                        ?io_kind,
+                        ?raw_os_error,
+                        received_messages = self.received_messages,
+                        received_surface_frames = self.received_surface_frames,
+                        last_message_kind = self.last_message_kind,
+                        "native client frame receive failed (payload omitted)"
+                    );
+                    return Err(error(failure));
+                }
+            };
         self.received_messages = self.received_messages.saturating_add(1);
         self.last_message_kind = match &message {
             ServerMessage::Welcome { .. } => "welcome",
@@ -199,15 +202,32 @@ impl Client {
             ServerMessage::PaneSurface(_) => "pane_surface",
             ServerMessage::SemanticNotification(_) => "semantic_notification",
             ServerMessage::ClientShellError { .. } => "client_shell_error",
-            ServerMessage::DirectTerminalKeyboardProtocol { .. } => "direct_terminal_keyboard_protocol",
-            ServerMessage::ClientShellKeyboardReportAll { .. } => "client_shell_keyboard_report_all",
-            ServerMessage::ClientShellEndpointResponseChunk { .. } => "client_shell_endpoint_response_chunk",
+            ServerMessage::DirectTerminalKeyboardProtocol { .. } => {
+                "direct_terminal_keyboard_protocol"
+            }
+            ServerMessage::ClientShellKeyboardReportAll { .. } => {
+                "client_shell_keyboard_report_all"
+            }
+            ServerMessage::ClientShellEndpointResponseChunk { .. } => {
+                "client_shell_endpoint_response_chunk"
+            }
             ServerMessage::PaneSurfacePatch(_) => "pane_surface_patch",
-            ServerMessage::EndpointControl { kind, .. } if kind == protocol::endpoint::PLUGIN_UI_KIND => "endpoint_plugin_ui",
-            ServerMessage::EndpointControl { kind, .. } if kind == protocol::endpoint::ENDPOINT_SNAPSHOT_KIND => "endpoint_snapshot",
+            ServerMessage::EndpointControl { kind, .. }
+                if kind == protocol::endpoint::PLUGIN_UI_KIND =>
+            {
+                "endpoint_plugin_ui"
+            }
+            ServerMessage::EndpointControl { kind, .. }
+                if kind == protocol::endpoint::ENDPOINT_SNAPSHOT_KIND =>
+            {
+                "endpoint_snapshot"
+            }
             ServerMessage::EndpointControl { .. } => "endpoint_control",
         };
-        if matches!(&message, ServerMessage::PaneSurface(_) | ServerMessage::PaneSurfacePatch(_)) {
+        if matches!(
+            &message,
+            ServerMessage::PaneSurface(_) | ServerMessage::PaneSurfacePatch(_)
+        ) {
             self.received_surface_frames = self.received_surface_frames.saturating_add(1);
         }
         self.apply_message(message).inspect_err(|failure| {

@@ -1,14 +1,6 @@
 import { createTrailbossStore, type EntityRow } from '@trailboss/store'
 import { z } from 'zod'
-import {
-  type Fragment,
-  label,
-  row,
-  type Use,
-  type Widget,
-  type WidgetColumn,
-  WidgetDeclaration,
-} from '../agent-tree/widgets'
+import { type Fragment, label, row, WidgetDeclaration } from '../agent-tree/widgets'
 
 function nameFragment(create: boolean): z.infer<typeof Fragment> {
   return {
@@ -42,141 +34,6 @@ function confirmationFragment(kind: 'space' | 'tab'): z.infer<typeof Fragment> {
   }
 }
 
-function palette(entities: EntityRow[]): z.infer<typeof Fragment> {
-  const spaces = entities
-    .filter((entity) => entity.kind === 'workspace')
-    .sort((a, b) => a.position - b.position)
-  const column = (children: Widget[]): z.infer<typeof WidgetColumn> => ({
-    type: 'column',
-    children,
-  })
-  const name = (create: boolean): z.infer<typeof Use> => ({
-    type: 'use',
-    name: create ? 'commands.name-new' : 'commands.name-existing',
-  })
-  const spaceChoices = (choose: (space: EntityRow) => Widget) =>
-    column(spaces.length ? spaces.map(choose) : [label('No spaces available', 'muted')])
-  const tabChoices = (space: EntityRow, action: string, menu?: Parameters<typeof row>[3]) => {
-    const tabs = entities
-      .filter((entity) => entity.kind === 'tab' && entity.workspaceId === space.workspaceId)
-      .sort((a, b) => a.position - b.position)
-    return column(
-      tabs.length
-        ? tabs.map((tab) => {
-            if (tab.tabId === null) throw new Error('Tab entity has no tab identity')
-            const context = { workspace_id: space.workspaceId, tab_id: tab.tabId }
-            const next = action === 'host:close-tab' ? confirmation('tab', tab) : menu
-            return row(
-              [label(`${action === 'host:focus' ? '  ' : ''}${tab.label}`)],
-              next && action === 'host:close-tab' ? undefined : action,
-              context,
-              next,
-            )
-          })
-        : [label('No tabs in this space', 'muted')],
-    )
-  }
-  const confirmation = (kind: 'space' | 'tab', entity: EntityRow) =>
-    column([
-      label(`Close ${kind} “${entity.label}”?`, 'muted'),
-      { type: 'use', name: `commands.confirm-${kind}` },
-    ])
-  return {
-    name: 'command-palette',
-    priority: 0,
-    tree: column([
-      row(
-        [label('Rename space')],
-        undefined,
-        undefined,
-        spaceChoices((space) =>
-          row(
-            [label(space.label)],
-            'host:rename-space',
-            { workspace_id: space.workspaceId },
-            name(false),
-          ),
-        ),
-      ),
-      row(
-        [label('Rename tab')],
-        undefined,
-        undefined,
-        spaceChoices((space) =>
-          row(
-            [label(space.label)],
-            undefined,
-            { workspace_id: space.workspaceId },
-            tabChoices(space, 'host:rename-tab', name(false)),
-          ),
-        ),
-      ),
-      row(
-        [label('Switch tab')],
-        undefined,
-        undefined,
-        spaceChoices((space) =>
-          column([
-            label(space.label, 'heading'),
-            ...tabChoices(space, 'host:focus').children.filter((node) => node.type === 'row'),
-          ]),
-        ),
-      ),
-      row([label('Previous tab')], 'host:focus'),
-      row([label('New space')], 'host:new-space', undefined, name(true)),
-      row(
-        [label('New tab')],
-        undefined,
-        undefined,
-        spaceChoices((space) =>
-          row(
-            [label(space.label)],
-            'host:new-tab',
-            { workspace_id: space.workspaceId },
-            name(true),
-          ),
-        ),
-      ),
-      row(
-        [label('Close tab')],
-        undefined,
-        undefined,
-        spaceChoices((space) =>
-          row(
-            [label(space.label)],
-            undefined,
-            { workspace_id: space.workspaceId },
-            tabChoices(space, 'host:close-tab'),
-          ),
-        ),
-      ),
-      row(
-        [label('Close space')],
-        undefined,
-        undefined,
-        spaceChoices((space) =>
-          row(
-            [label(space.label)],
-            undefined,
-            { workspace_id: space.workspaceId },
-            confirmation('space', space),
-          ),
-        ),
-      ),
-      row([label('Expand space')], undefined, undefined, {
-        type: 'use',
-        name: 'commands.expand-space',
-      }),
-      row([label('Collapse space')], undefined, undefined, {
-        type: 'use',
-        name: 'commands.collapse-space',
-      }),
-      row([label('Restart idle agents')], 'host:restart-idle-agents'),
-      row([label('Detach from session')], 'host:detach'),
-    ]),
-  }
-}
-
 export function declareMenus(entities: EntityRow[]) {
   const fragments: z.infer<typeof Fragment>[] = [
     {
@@ -192,7 +49,6 @@ export function declareMenus(entities: EntityRow[]) {
         ],
       },
     },
-    palette(entities),
     nameFragment(true),
     nameFragment(false),
     confirmationFragment('space'),

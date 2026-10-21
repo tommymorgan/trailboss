@@ -83,7 +83,7 @@ impl PluginUiForward {
     }
 }
 
-const PLUGIN_UI_STREAM_MAX_BYTES: usize = 64 * 1024;
+const PLUGIN_UI_STREAM_MAX_BYTES: usize = 512 * 1024;
 const PLUGIN_UI_MAX_STREAMS: usize = 32;
 
 impl App {
@@ -367,7 +367,7 @@ async fn read_plugin_ui_line(
         return Ok(false);
     }
     if n > PLUGIN_UI_STREAM_MAX_BYTES {
-        return Err(std::io::Error::other("plugin UI line exceeds 64 KiB"));
+        return Err(std::io::Error::other("plugin UI line exceeds 512 KiB"));
     }
     if line.last() != Some(&b'\n') {
         return Err(std::io::Error::other(
@@ -1021,7 +1021,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn plugin_ui_stream_invalid_and_oversized_lines_stop_and_reap_producer() {
-        for invalid in ["printf 'not-json\\n'", "head -c 65537 /dev/zero"] {
+        let oversized = format!("head -c {} /dev/zero", PLUGIN_UI_STREAM_MAX_BYTES + 1);
+        for invalid in ["printf 'not-json\\n'", oversized.as_str()] {
             let (tx, mut rx) = tokio::sync::mpsc::channel(4);
             let script = format!(r#"printf '[{{"title":"%s"}}]\n' "$$"; {invalid}; exec sleep 30"#);
             let (_stop, _forward) = start_plugin_ui_stream(

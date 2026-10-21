@@ -1930,7 +1930,10 @@ fn prepare_remote_bridge_stream(
 
 impl Drop for SshStdioBridge {
     fn drop(&mut self) {
-        tracing::info!(reason = "local_owner_drop", "remote SSH bridge detach requested");
+        tracing::info!(
+            reason = "local_owner_drop",
+            "remote SSH bridge detach requested"
+        );
         self.should_stop.store(true, Ordering::Release);
         #[cfg(unix)]
         let _ = crate::ipc::remove_socket_file_if_owned(&self.local_socket, &self.socket_identity);
@@ -2180,7 +2183,9 @@ fn bridge_connection(
                 client_closed = upload_client_closed.load(Ordering::Acquire),
                 "remote SSH bridge transfer ended"
             ),
-            Err(err) => tracing::warn!(direction = "local_to_ssh", error_kind = ?err.kind(), "remote SSH bridge transfer failed"),
+            Err(err) => {
+                tracing::warn!(direction = "local_to_ssh", error_kind = ?err.kind(), "remote SSH bridge transfer failed")
+            }
         }
         upload_failed_worker.store(result.is_err(), Ordering::Release);
         result
@@ -2193,9 +2198,8 @@ fn bridge_connection(
     let download = thread::spawn(move || {
         let _entered = download_span.enter();
         let mut child_stdout = io::BufReader::new(child_stdout);
-        let result = discard_remote_output_preamble(&mut child_stdout).map_err(|err| {
+        let result = discard_remote_output_preamble(&mut child_stdout).inspect_err(|err| {
             tracing::warn!(error_kind = ?err.kind(), phase = "output_preamble", "remote SSH bridge download failed");
-            err
         }).and_then(|()| {
             copy_reader_to_local_stream(
                 &mut child_stdout,
@@ -2212,7 +2216,9 @@ fn bridge_connection(
                 bridge_stopping = download_bridge_stop.load(Ordering::Acquire),
                 "remote SSH bridge transfer ended"
             ),
-            Err(err) => tracing::warn!(direction = "ssh_to_local", error_kind = ?err.kind(), "remote SSH bridge transfer failed"),
+            Err(err) => {
+                tracing::warn!(direction = "ssh_to_local", error_kind = ?err.kind(), "remote SSH bridge transfer failed")
+            }
         }
         download_done_worker.store(true, Ordering::Release);
         download_upload_stop.cancel();
@@ -2246,7 +2252,10 @@ fn bridge_connection(
             }
         }
         if bridge_stop.load(Ordering::Acquire) {
-            tracing::info!(reason = "local_bridge_drop", "remote SSH bridge stopping before cleanup");
+            tracing::info!(
+                reason = "local_bridge_drop",
+                "remote SSH bridge stopping before cleanup"
+            );
             connection_stop.store(true, Ordering::Release);
             upload_stop.cancel();
             let _ = child.kill();
@@ -2274,8 +2283,12 @@ fn bridge_connection(
         thread::sleep(BRIDGE_ACCEPT_POLL);
     };
     match &status_result {
-        Ok(status) => tracing::info!(status = %status, child_exited, cleanup_terminated = !child_exited, "remote SSH bridge process reaped"),
-        Err(err) => tracing::warn!(error_kind = ?err.kind(), "remote SSH bridge process status unavailable"),
+        Ok(status) => {
+            tracing::info!(status = %status, child_exited, cleanup_terminated = !child_exited, "remote SSH bridge process reaped")
+        }
+        Err(err) => {
+            tracing::warn!(error_kind = ?err.kind(), "remote SSH bridge process status unavailable")
+        }
     }
     upload_stop.cancel();
     if !child_exited {
@@ -2371,10 +2384,22 @@ fn classify_ssh_stderr(stderr: &[u8]) -> &'static str {
         return "empty";
     }
     for (needle, classification) in [
-        (&b"permission denied"[..], "authentication_or_permission_denied"),
-        (&b"host key verification failed"[..], "host_key_verification_failed"),
-        (&b"remote host identification has changed"[..], "host_key_changed"),
-        (&b"could not resolve hostname"[..], "hostname_resolution_failed"),
+        (
+            &b"permission denied"[..],
+            "authentication_or_permission_denied",
+        ),
+        (
+            &b"host key verification failed"[..],
+            "host_key_verification_failed",
+        ),
+        (
+            &b"remote host identification has changed"[..],
+            "host_key_changed",
+        ),
+        (
+            &b"could not resolve hostname"[..],
+            "hostname_resolution_failed",
+        ),
         (&b"connection refused"[..], "connection_refused"),
         (&b"connection timed out"[..], "connection_timed_out"),
         (&b"connection reset"[..], "connection_reset"),
@@ -2382,7 +2407,10 @@ fn classify_ssh_stderr(stderr: &[u8]) -> &'static str {
         (&b"connection closed"[..], "connection_closed"),
         (&b"no route to host"[..], "no_route_to_host"),
     ] {
-        if stderr.windows(needle.len()).any(|window| window.eq_ignore_ascii_case(needle)) {
+        if stderr
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+        {
             return classification;
         }
     }
@@ -2433,7 +2461,11 @@ fn discard_remote_output_preamble(reader: &mut impl io::BufRead) -> io::Result<(
 }
 
 fn terminate_bridge_child(mut child: std::process::Child, message: &'static str) -> io::Result<()> {
-    tracing::warn!(reason = message, ssh_pid = child.id(), "remote SSH bridge setup failed before cleanup");
+    tracing::warn!(
+        reason = message,
+        ssh_pid = child.id(),
+        "remote SSH bridge setup failed before cleanup"
+    );
     let _ = child.kill();
     let _ = child.wait();
     Err(io::Error::new(io::ErrorKind::BrokenPipe, message))
@@ -2451,7 +2483,11 @@ fn copy_reader_to_local_stream<R: io::Read>(
     loop {
         let read = match reader.read(&mut buffer) {
             Ok(0) => {
-                tracing::info!(direction = "ssh_to_local", bytes = total, "remote SSH bridge transfer EOF");
+                tracing::info!(
+                    direction = "ssh_to_local",
+                    bytes = total,
+                    "remote SSH bridge transfer EOF"
+                );
                 return Ok(total);
             }
             Ok(read) => read,
@@ -2506,7 +2542,11 @@ fn copy_local_stream_to_writer<W: io::Write>(
                 connection_stop.wake.wait(&stream)?;
             }
             crate::ipc::LocalStreamReadCount::Closed => {
-                tracing::info!(direction = "local_to_ssh", bytes = total, "remote SSH bridge transfer EOF");
+                tracing::info!(
+                    direction = "local_to_ssh",
+                    bytes = total,
+                    "remote SSH bridge transfer EOF"
+                );
                 client_closed.store(true, Ordering::Release);
                 break;
             }

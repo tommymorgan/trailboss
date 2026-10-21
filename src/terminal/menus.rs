@@ -29,17 +29,27 @@ enum PopupChoice {
     Invoke(Action),
     Open(MenuLevel),
 }
+enum PopupSource {
+    Row(Node),
+    Command(Box<super::palette::Handoff>),
+}
 struct Popup {
     origin: Origin,
-    tree: Node,
+    source: PopupSource,
     selected: usize,
     path: Vec<MenuLevel>,
 }
 impl Popup {
+    fn tree(&self) -> &Node {
+        match &self.source {
+            PopupSource::Row(tree) => tree,
+            PopupSource::Command(handoff) => &handoff.tree,
+        }
+    }
     fn content(&self) -> (&str, &Node) {
         self.path
             .last()
-            .map_or((&self.origin.plugin, &self.tree), |level| {
+            .map_or((&self.origin.plugin, self.tree()), |level| {
                 (&level.plugin, &level.tree)
             })
     }
@@ -50,9 +60,21 @@ impl Popup {
             .find(|level| level.context != Context::default())
             .map_or(&self.origin.context, |level| &level.context)
     }
+    fn refresh(&mut self, core: &Core, declarations: &Declarations, viewport: Rect) -> bool {
+        if let PopupSource::Command(handoff) = &mut self.source {
+            if !handoff.refresh(core, declarations, viewport) {
+                return false;
+            }
+        }
+        self.valid(core, declarations, viewport)
+    }
     fn valid(&self, core: &Core, declarations: &Declarations, viewport: Rect) -> bool {
+        if matches!(&self.source, PopupSource::Command(handoff) if !handoff.valid(core, declarations, viewport))
+        {
+            return false;
+        }
         let mut plugin = self.origin.plugin.as_str();
-        let mut tree = &self.tree;
+        let mut tree = self.tree();
         for level in &self.path {
             let mut found = false;
             walk(
@@ -127,6 +149,7 @@ pub struct Controls {
     focus: Option<Origin>,
     popup: Option<Popup>,
     palette: Option<super::palette::Palette>,
+    interaction: Option<super::palette::Handoff>,
     pub list_offset: u16,
     pub(super) dialog_focus: usize,
 }
@@ -176,6 +199,44 @@ pub(crate) fn menu_cell(rect: Rect) -> Option<u16> {
     (rect.width >= 3).then(|| rect.x + rect.width - 2)
 }
 impl Controls {
+    pub(super) fn interaction_dialog<'a>(
+        &'a self,
+        core: &Core,
+        declarations: &Declarations,
+        viewport: Rect,
+    ) -> Option<super::modals::Dialog<'a>> {
+        self.interaction.as_ref().map(|interaction| {
+            super::modals::from_tree(
+                core,
+                declarations,
+                &interaction.plugin,
+                &interaction.tree,
+                viewport,
+            )
+        })
+    }
+    fn invalidate_interaction(
+        &mut self,
+        core: &Core,
+        declarations: &Declarations,
+        viewport: Rect,
+    ) -> Option<Response> {
+        if self
+            .interaction
+            .as_mut()
+            .is_some_and(|interaction| !interaction.refresh(core, declarations, viewport))
+        {
+            let interaction = self.interaction.take().expect("invalid interaction");
+            self.dialog_focus = 0;
+            Some(Response::Invoke(Action {
+                plugin: interaction.plugin,
+                action: "host:cancel".into(),
+                context: Context::default(),
+            }))
+        } else {
+            None
+        }
+    }
     pub fn revealed(
         &self,
         core: &Core,
@@ -190,7 +251,7 @@ impl Controls {
             && matches!(node, Node::Row {menu:Some(tree),..} if extent(core,declarations,tree,false).0>0)
     }
     pub fn modal(&self) -> bool {
-        self.palette.is_some() || self.popup.is_some()
+        self.palette.is_some() || self.popup.is_some() || self.interaction.is_some()
     }
     pub fn captures_input(&self) -> bool {
         self.modal() || self.focus.is_some()
@@ -211,7 +272,7 @@ impl Controls {
     pub fn paste(&mut self, text: &str) -> bool {
         self.palette
             .as_mut()
-            .is_some_and(|palette| palette.paste(text, palette.editing()))
+            .is_some_and(|palette| palette.paste(text))
     }
     pub fn scroll_list(
         &mut self,
@@ -265,6 +326,24 @@ impl Controls {
         self.palette = None;
         self.popup = None;
         self.focus = None;
+        self.interaction = None;
+    }
+    fn accept_handoff(&mut self, handoff: super::palette::Handoff) {
+        if handoff.input {
+            self.interaction = Some(handoff);
+            self.dialog_focus = 0;
+        } else {
+            self.focus = None;
+            self.popup = Some(Popup {
+                origin: Origin {
+                    plugin: handoff.plugin.clone(),
+                    context: handoff.context.clone(),
+                },
+                source: PopupSource::Command(Box::new(handoff)),
+                selected: 0,
+                path: Vec::new(),
+            });
+        }
     }
     fn open(&mut self, plugin: &str, node: &Node) {
         if let Node::Row {
@@ -280,7 +359,7 @@ impl Controls {
             self.focus = Some(origin.clone());
             self.popup = Some(Popup {
                 origin,
-                tree: *tree.clone(),
+                source: PopupSource::Row(*tree.clone()),
                 selected: 0,
                 path: Vec::new(),
             });
@@ -290,9 +369,32 @@ impl Controls {
         self.list_offset = self.list_offset.min(
             super::list_viewport(core, declarations, viewport).map_or(0, |(_, maximum)| maximum),
         );
+        if !core.editing() {
+            self.interaction = None;
+        }
+        if let Some(interaction) = &mut self.interaction {
+            interaction.refresh(core, declarations, viewport);
+            self.focus = None;
+            self.popup = None;
+            return;
+        }
         if let Some(palette) = &mut self.palette {
             palette.reconcile(core, declarations);
             palette.layout(viewport);
+            return;
+        }
+        if self
+            .popup
+            .as_ref()
+            .is_some_and(|popup| matches!(&popup.source, PopupSource::Command(_)))
+        {
+            if self
+                .popup
+                .as_mut()
+                .is_some_and(|popup| !popup.refresh(core, declarations, viewport))
+            {
+                self.popup = None;
+            }
             return;
         }
         if super::modals::dialog(core, declarations, viewport).is_some() {
@@ -315,7 +417,7 @@ impl Controls {
                 focus_exists |= self.focus.as_ref().is_some_and(|f| f.matches(plugin, node));
                 popup_exists |= self.popup.as_ref().is_some_and(|p| {
                     p.origin.matches(plugin, node)
-                        && matches!(node, Node::Row { menu: Some(tree), .. } if **tree == p.tree)
+                        && matches!(node, Node::Row { menu: Some(tree), .. } if tree.as_ref() == p.tree())
                 });
             },
         );
@@ -458,10 +560,30 @@ impl Controls {
                 return Response::Consumed;
             }
             let (response, close) = palette.click(core, declarations, viewport, x, y);
+            let handoff = palette.take_handoff();
             if close {
                 self.palette = None;
             }
+            if let Some(handoff) = handoff {
+                self.accept_handoff(handoff);
+            }
             return response;
+        }
+        if let Some(response) = self.invalidate_interaction(core, declarations, viewport) {
+            return response;
+        }
+        if let Some(interaction) = &self.interaction {
+            if context_menu {
+                return Response::Consumed;
+            }
+            let dialog = super::modals::from_tree(
+                core,
+                declarations,
+                &interaction.plugin,
+                &interaction.tree,
+                viewport,
+            );
+            return super::modals::click(core, declarations, dialog, x, y, &mut self.dialog_focus);
         }
         if let Some(dialog) = super::modals::dialog(core, declarations, viewport) {
             if context_menu {
@@ -527,10 +649,27 @@ impl Controls {
     ) -> Response {
         if let Some(palette) = &mut self.palette {
             let (response, close) = palette.key(core, declarations, viewport, key);
+            let handoff = palette.take_handoff();
             if close {
                 self.palette = None;
             }
+            if let Some(handoff) = handoff {
+                self.accept_handoff(handoff);
+            }
             return response;
+        }
+        if let Some(response) = self.invalidate_interaction(core, declarations, viewport) {
+            return response;
+        }
+        if let Some(interaction) = &self.interaction {
+            let dialog = super::modals::from_tree(
+                core,
+                declarations,
+                &interaction.plugin,
+                &interaction.tree,
+                viewport,
+            );
+            return super::modals::key(core, declarations, dialog, key, &mut self.dialog_focus);
         }
         if let Some(dialog) = super::modals::dialog(core, declarations, viewport) {
             return super::modals::key(core, declarations, dialog, key, &mut self.dialog_focus);
@@ -644,6 +783,10 @@ impl Controls {
             return Some(palette.rect(viewport));
         }
         let popup = self.popup.as_ref()?;
+        if matches!(&popup.source, PopupSource::Command(_)) {
+            return centered_popup(core, declarations, popup.content().1, viewport);
+        }
+        let (width, height) = popup_size(core, declarations, popup.content().1, viewport)?;
         let mut anchor = None;
         triggers(
             core,
@@ -657,18 +800,6 @@ impl Controls {
             },
         );
         let anchor = anchor?;
-        if viewport.width < 3 || viewport.height < 3 {
-            return None;
-        }
-        let width = extent(core, declarations, popup.content().1, true)
-            .0
-            .saturating_add(4)
-            .max(8)
-            .min(viewport.width);
-        let height = extent(core, declarations, popup.content().1, false)
-            .0
-            .saturating_add(2)
-            .min(viewport.height);
         let x =
             (anchor.x + anchor.width.saturating_sub(2)).min(viewport.x + viewport.width - width);
         let below = anchor.y.saturating_add(1);
@@ -747,6 +878,7 @@ impl Controls {
                 }
                 let (children, active) = match node {
                     Node::Row { children, .. } => (children.as_slice(), selectable(node)),
+                    Node::Label { .. } => (std::slice::from_ref(node), false),
                     _ => return,
                 };
                 let selected = active && index == popup.selected;
@@ -819,6 +951,115 @@ impl Controls {
         Ok(Some(rect))
     }
 }
+fn popup_size(
+    core: &Core,
+    declarations: &Declarations,
+    tree: &Node,
+    viewport: Rect,
+) -> Option<(u16, u16)> {
+    if viewport.width < 3 || viewport.height < 3 {
+        return None;
+    }
+    Some((
+        extent(core, declarations, tree, true)
+            .0
+            .saturating_add(4)
+            .max(8)
+            .min(viewport.width),
+        extent(core, declarations, tree, false)
+            .0
+            .saturating_add(2)
+            .min(viewport.height),
+    ))
+}
+fn centered_popup(
+    core: &Core,
+    declarations: &Declarations,
+    tree: &Node,
+    viewport: Rect,
+) -> Option<Rect> {
+    let (width, height) = popup_size(core, declarations, tree, viewport)?;
+    Some(Rect {
+        x: viewport.x + (viewport.width - width) / 2,
+        y: viewport.y + (viewport.height - height) / 2,
+        width,
+        height,
+    })
+}
+
+pub(super) fn visit_interaction_choices(
+    core: &Core,
+    declarations: &Declarations,
+    content: (&str, &Node),
+    viewport: Rect,
+    input: bool,
+    visit: &mut dyn FnMut(usize, &str, &Node, bool) -> bool,
+) -> bool {
+    fn level(
+        core: &Core,
+        declarations: &Declarations,
+        content: (&str, &Node),
+        viewport: Rect,
+        input: bool,
+        depth: usize,
+        visit: &mut dyn FnMut(usize, &str, &Node, bool) -> bool,
+    ) -> bool {
+        if depth > 32 {
+            return false;
+        }
+        let mut valid = true;
+        let mut inspect = |owner, node: &Node, _| {
+            if !valid {
+                return;
+            }
+            let focusable = if input {
+                super::modals::actionable(node)
+            } else {
+                selectable(node)
+            };
+            valid = visit(depth, owner, node, focusable);
+            if !input {
+                if let Node::Row {
+                    menu: Some(menu), ..
+                } = node
+                {
+                    valid = valid
+                        && level(
+                            core,
+                            declarations,
+                            (owner, menu),
+                            viewport,
+                            false,
+                            depth + 1,
+                            visit,
+                        );
+                }
+            }
+        };
+        if input {
+            let dialog =
+                super::modals::from_tree(core, declarations, content.0, content.1, viewport);
+            super::modals::visit(core, declarations, dialog, &mut inspect);
+        } else {
+            let Some(rect) = centered_popup(core, declarations, content.1, viewport) else {
+                return false;
+            };
+            walk(
+                core,
+                declarations,
+                content.0,
+                content.1,
+                interior(rect),
+                0,
+                0,
+                &mut inspect,
+            );
+        }
+        valid
+    }
+    level(core, declarations, content, viewport, input, 0, visit)
+}
+
 fn interior(rect: Rect) -> Rect {
     Rect {
         x: rect.x + 1,

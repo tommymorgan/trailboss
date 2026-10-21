@@ -79,14 +79,13 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
         index += 1;
     }
 
-
     // Mixed-version compatibility: a pre-rename Trailboss core exports its
     // session as HERDR_SESSION. Children running this build — notably a
     // handoff import server spawned by an old core — must target that same
     // session instead of silently falling back to the default one.
     if std::env::var_os(SESSION_ENV_VAR).is_none() {
         if let Some(legacy) = std::env::var_os("HERDR_SESSION") {
-            if let Some(legacy) = legacy.into_string().ok() {
+            if let Ok(legacy) = legacy.into_string() {
                 if normalize_name(&legacy).is_ok() {
                     std::env::set_var(SESSION_ENV_VAR, &legacy);
                 }

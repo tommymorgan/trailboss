@@ -12,49 +12,9 @@ use crossterm::{
 };
 use std::io::{self, Write};
 use trailboss_runtime::{
-    core_actions::COMMAND_FRAGMENT_PREFIX,
+    core_actions::{CoreAction, COMMAND_FRAGMENT_PREFIX},
     protocol::widgets::{Context, Node},
 };
-use unicode_width::UnicodeWidthChar;
-
-fn draw_input(out: &mut impl Write, rect: Rect, text: &str) -> io::Result<()> {
-    if rect.height < 2 || rect.width < 3 {
-        return Ok(());
-    }
-    let width = usize::from(rect.width - 2);
-    queue!(out, cursor::MoveTo(rect.x + 1, rect.y + 1))?;
-    if width < 3 {
-        queue!(out, Print("▏"))?;
-        return Ok(());
-    }
-    let capacity = width - 3;
-    // Input is append/backspace-only: keep the end and its caret visible.
-    let mut start = text.len();
-    let mut cells = 0;
-    for (index, ch) in text.char_indices().rev() {
-        let next = ch.width().unwrap_or(0);
-        if cells + next > capacity {
-            break;
-        }
-        cells += next;
-        start = index;
-    }
-    queue!(out, Print("["))?;
-    let printed = crate::sidebar::prefix(out, &text[start..], capacity)?;
-    queue!(out, Print("▏"))?;
-    let remaining = capacity.saturating_sub(printed);
-    let placeholder = if text.is_empty() {
-        queue!(out, SetForegroundColor(Color::DarkGrey))?;
-        crate::sidebar::clipped(out, " Type text…", remaining)?
-    } else {
-        0
-    };
-    for _ in placeholder..remaining {
-        queue!(out, Print(' '))?;
-    }
-    queue!(out, SetForegroundColor(Color::White), Print("]"))?;
-    Ok(())
-}
 
 #[derive(Clone, PartialEq, Eq)]
 struct Identity {
@@ -74,6 +34,27 @@ struct Entry<'a> {
 impl Entry<'_> {
     fn selectable(&self) -> bool {
         matches!(self.node, Node::Row { .. })
+    }
+    fn context<'a>(&'a self, path: &'a [Identity], opened: &'a Context) -> &'a Context {
+        let Node::Row { context, .. } = self.node else {
+            unreachable!()
+        };
+        if *context != Context::default() {
+            return context;
+        }
+        path.iter()
+            .rev()
+            .find(|ancestor| ancestor.context != Context::default())
+            .map_or_else(
+                || {
+                    if self.plugin == "trailboss.core" {
+                        context
+                    } else {
+                        opened
+                    }
+                },
+                |ancestor| &ancestor.context,
+            )
     }
     fn matches(&self, identity: &Identity) -> bool {
         let Node::Row {
@@ -176,6 +157,17 @@ fn collect<'a>(
             ..
         } => {
             if action.is_some() || menu.is_some() {
+                // A context wrapper around one issued command keeps that
+                // command's identity even when its displayed title collides.
+                let command_locator = command_locator.or_else(|| match (action, menu.as_deref()) {
+                    (None, Some(Node::Column { children })) => match children.as_slice() {
+                        [Node::Use { name }] if name.starts_with(COMMAND_FRAGMENT_PREFIX) => {
+                            Some(name.as_str())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                });
                 let mut text = String::new();
                 label(node, &mut text);
                 view.entries.push(Entry {
@@ -242,6 +234,58 @@ fn collect<'a>(
         _ => {}
     }
 }
+
+enum ChoiceIdentity {
+    Input(String),
+    Row { identity: Identity, submenu: bool },
+    Command(String),
+}
+fn guarded_choice(node: &Node, focusable: bool) -> bool {
+    focusable || matches!(node, Node::Use { name } if name.starts_with(COMMAND_FRAGMENT_PREFIX))
+}
+fn choice_entry<'a>(
+    plugin: &'a str,
+    node: &'a Node,
+    command_locator: Option<&'a str>,
+) -> Entry<'a> {
+    let mut text = String::new();
+    if command_locator.is_none()
+        && matches!(node, Node::Row { action: None, context, .. } if *context == Context::default())
+    {
+        label(node, &mut text);
+    }
+    Entry {
+        plugin,
+        node,
+        command_locator,
+        label: text,
+        group: None,
+    }
+}
+impl ChoiceIdentity {
+    fn capture(plugin: &str, node: &Node, command_locator: Option<&str>) -> Self {
+        match node {
+            Node::Input => Self::Input(plugin.into()),
+            Node::Row { menu, .. } => Self::Row {
+                identity: choice_entry(plugin, node, command_locator).identity(),
+                submenu: menu.is_some(),
+            },
+            Node::Use { name } => Self::Command(name.clone()),
+            _ => unreachable!("native interaction choice"),
+        }
+    }
+    fn matches(&self, plugin: &str, node: &Node, command_locator: Option<&str>) -> bool {
+        match (self, node) {
+            (Self::Input(owner), Node::Input) => owner == plugin,
+            (Self::Row { identity, submenu }, Node::Row { menu, .. }) => {
+                *submenu == menu.is_some()
+                    && choice_entry(plugin, node, command_locator).matches(identity)
+            }
+            (Self::Command(previous), Node::Use { name }) => previous == name,
+            _ => false,
+        }
+    }
+}
 fn score(text: &str, query: &str) -> Option<(usize, usize)> {
     let text = text.to_lowercase();
     let query = query.to_lowercase();
@@ -264,6 +308,136 @@ fn score(text: &str, query: &str) -> Option<(usize, usize)> {
     }
     Some((2, last - first.unwrap_or(0)))
 }
+fn view_at<'a>(
+    core: &Core,
+    declarations: &'a Declarations,
+    provider: &str,
+    path: &[Identity],
+) -> Option<View<'a>> {
+    let (mut plugin, mut tree) = core.fragment(declarations, "command-palette")?;
+    if plugin != provider {
+        return None;
+    }
+    let mut command_locator = None;
+    for identity in path {
+        let mut view = View::default();
+        collect(
+            core,
+            declarations,
+            plugin,
+            tree,
+            command_locator,
+            0,
+            &mut view,
+        );
+        let mut matches = view.entries.iter().filter(|entry| entry.matches(identity));
+        let entry = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        let Node::Row {
+            menu: Some(menu), ..
+        } = entry.node
+        else {
+            return None;
+        };
+        plugin = entry.plugin;
+        tree = menu;
+        command_locator = entry.command_locator;
+    }
+    let mut view = View::default();
+    collect(
+        core,
+        declarations,
+        plugin,
+        tree,
+        command_locator,
+        0,
+        &mut view,
+    );
+    Some(view)
+}
+
+pub(super) struct Handoff {
+    pub(super) plugin: String,
+    pub(super) tree: Node,
+    pub(super) context: Context,
+    pub(super) input: bool,
+    provider: String,
+    path: Vec<Identity>,
+    selected: Identity,
+    choices: Vec<(usize, ChoiceIdentity)>,
+}
+impl Handoff {
+    fn current_tree<'a>(&self, core: &Core, declarations: &'a Declarations) -> Option<&'a Node> {
+        let view = view_at(core, declarations, &self.provider, &self.path)?;
+        let mut entries = view
+            .entries
+            .iter()
+            .filter(|entry| entry.matches(&self.selected));
+        let entry = entries.next()?;
+        if entries.next().is_some() {
+            return None;
+        }
+        match entry.node {
+            Node::Row {
+                menu: Some(menu), ..
+            } => Some(menu),
+            _ => None,
+        }
+    }
+    pub(super) fn valid(&self, core: &Core, declarations: &Declarations, viewport: Rect) -> bool {
+        self.current_tree(core, declarations).is_some_and(|tree| {
+            *tree == self.tree
+                && (!self.input || self.choices_match(core, declarations, tree, viewport))
+        })
+    }
+    pub(super) fn refresh(
+        &mut self,
+        core: &Core,
+        declarations: &Declarations,
+        viewport: Rect,
+    ) -> bool {
+        let Some(tree) = self.current_tree(core, declarations) else {
+            return false;
+        };
+        if !self.choices_match(core, declarations, tree, viewport) {
+            return false;
+        }
+        if self.tree != *tree {
+            self.tree.clone_from(tree);
+        }
+        true
+    }
+    fn choices_match(
+        &self,
+        core: &Core,
+        declarations: &Declarations,
+        tree: &Node,
+        viewport: Rect,
+    ) -> bool {
+        let mut choices = self.choices.iter();
+        super::menus::visit_interaction_choices(
+            core,
+            declarations,
+            (&self.plugin, tree),
+            viewport,
+            self.input,
+            &mut |depth, plugin, node, focusable| {
+                !guarded_choice(node, focusable)
+                    || choices.next().is_some_and(|(previous_depth, identity)| {
+                        depth == *previous_depth
+                            && identity.matches(
+                                plugin,
+                                node,
+                                self.selected.command_locator.as_deref(),
+                            )
+                    })
+            },
+        ) && choices.next().is_none()
+    }
+}
+
 pub(super) struct Palette {
     path: Vec<Identity>,
     crumbs: Vec<String>,
@@ -273,14 +447,14 @@ pub(super) struct Palette {
     selected_id: Option<Identity>,
     provider: String,
     stale: bool,
-    pending_cancel: bool,
-    editing: bool,
+    context: Context,
+    handoff: Option<Handoff>,
 }
 impl Palette {
     pub fn open(
         core: &Core,
         declarations: &Declarations,
-        _context: Option<&Context>,
+        context: Option<&Context>,
     ) -> Option<Self> {
         let (provider, _) = core.fragment(declarations, "command-palette")?;
         Some(Self {
@@ -292,52 +466,21 @@ impl Palette {
             selected_id: None,
             provider: provider.into(),
             stale: false,
-            pending_cancel: false,
-            editing: false,
+            context: context.cloned().unwrap_or_default(),
+            handoff: None,
         })
     }
     fn view<'a>(&self, core: &Core, declarations: &'a Declarations) -> Option<View<'a>> {
-        let (mut plugin, mut tree) = core.fragment(declarations, "command-palette")?;
-        if plugin != self.provider {
-            return None;
-        }
-        let mut command_locator = None;
-        for identity in &self.path {
-            let mut view = View::default();
-            collect(
-                core,
-                declarations,
-                plugin,
-                tree,
-                command_locator,
-                0,
-                &mut view,
-            );
-            let mut matches = view.entries.iter().filter(|entry| entry.matches(identity));
-            let entry = matches.next()?;
-            if matches.next().is_some() {
-                return None;
-            }
-            let Node::Row {
-                menu: Some(menu), ..
-            } = entry.node
-            else {
-                return None;
-            };
-            plugin = entry.plugin;
-            tree = menu;
-            command_locator = entry.command_locator;
-        }
-        let mut view = View::default();
-        collect(
-            core,
-            declarations,
-            plugin,
-            tree,
-            command_locator,
-            0,
-            &mut view,
-        );
+        let mut view = view_at(core, declarations, &self.provider, &self.path)?;
+        // A targetless Core focus is this client's Previous operation. Captured
+        // resource-menu context must not invent a visit or make it executable.
+        view.entries.retain(|entry| {
+            !matches!(entry.node, Node::Row { action: Some(action), .. }
+                if entry.plugin == "trailboss.core"
+                    && CoreAction::parse(action) == Some(CoreAction::Focus)
+                    && entry.context(&self.path, &self.context).tab_id.is_none())
+                || core.has_previous_tab()
+        });
         if !view.input {
             let grouped = view.entries.iter().any(|entry| entry.group.is_some());
             if grouped {
@@ -367,9 +510,7 @@ impl Palette {
         Some(view)
     }
     pub fn reconcile(&mut self, core: &Core, declarations: &Declarations) {
-        self.editing = core.editing();
         if self.view(core, declarations).is_none() {
-            self.pending_cancel |= core.editing();
             while !self.path.is_empty() && self.view(core, declarations).is_none() {
                 self.path.pop();
                 self.crumbs.pop();
@@ -444,15 +585,7 @@ impl Palette {
             self.scroll = self.selected + 1 - rows;
         }
     }
-    fn cancel(&self) -> Response {
-        Response::Invoke(Action {
-            plugin: self.provider.clone(),
-            action: "host:cancel".into(),
-            context: Context::default(),
-        })
-    }
-    fn back(&mut self, core: &Core) -> (Response, bool) {
-        let editing = core.editing();
+    fn back(&mut self) -> (Response, bool) {
         let close = self.path.is_empty();
         self.path.pop();
         self.crumbs.pop();
@@ -460,20 +593,14 @@ impl Palette {
         self.selected = 0;
         self.scroll = 0;
         self.selected_id = None;
-        (
-            if editing {
-                self.cancel()
-            } else {
-                Response::Consumed
-            },
-            close,
-        )
+        (Response::Consumed, close)
     }
-    fn choose(&mut self, core: &Core, declarations: &Declarations) -> (Response, bool) {
-        if self.pending_cancel {
-            self.pending_cancel = false;
-            return (self.cancel(), false);
-        }
+    fn choose(
+        &mut self,
+        core: &Core,
+        declarations: &Declarations,
+        viewport: Rect,
+    ) -> (Response, bool) {
         if self.stale {
             self.stale = false;
             return (Response::Consumed, false);
@@ -484,21 +611,9 @@ impl Palette {
         let Some(entry) = view.entries.get(self.selected) else {
             return (Response::Consumed, false);
         };
-        let Node::Row {
-            action,
-            context,
-            menu,
-            ..
-        } = entry.node
-        else {
+        let Node::Row { action, menu, .. } = entry.node else {
             return (Response::Consumed, false);
         };
-        if view.input
-            && core.input_text.trim().is_empty()
-            && action.as_deref() != Some("host:cancel")
-        {
-            return (Response::Consumed, false);
-        }
         let mut child_view = View::default();
         if let Some(menu) = menu {
             collect(
@@ -512,22 +627,16 @@ impl Palette {
             );
         }
         let prepares_input = child_view.input;
+        let confirms = child_view.entries.iter().any(|entry| {
+            matches!(entry.node, Node::Row { action: Some(action), .. } if action == "host:cancel")
+        });
         let response = action
             .as_ref()
             .map(|action| {
                 let action = Action {
                     plugin: entry.plugin.into(),
                     action: action.clone(),
-                    context: if *context == Context::default() {
-                        self.path
-                            .iter()
-                            .rev()
-                            .find(|ancestor| ancestor.context != Context::default())
-                            .map_or(context, |ancestor| &ancestor.context)
-                    } else {
-                        context
-                    }
-                    .clone(),
+                    context: entry.context(&self.path, &self.context).clone(),
                 };
                 if prepares_input {
                     Response::Prepare(action)
@@ -536,8 +645,42 @@ impl Palette {
                 }
             })
             .unwrap_or(Response::Consumed);
+        if (prepares_input && action.is_some()) || confirms {
+            let Some(tree) = menu.as_deref() else {
+                return (Response::Consumed, false);
+            };
+            let mut choices = Vec::new();
+            if !super::menus::visit_interaction_choices(
+                core,
+                declarations,
+                (entry.plugin, tree),
+                viewport,
+                prepares_input,
+                &mut |depth, plugin, node, focusable| {
+                    if guarded_choice(node, focusable) {
+                        choices.push((
+                            depth,
+                            ChoiceIdentity::capture(plugin, node, entry.command_locator),
+                        ));
+                    }
+                    true
+                },
+            ) {
+                return (Response::Consumed, false);
+            }
+            self.handoff = Some(Handoff {
+                plugin: entry.plugin.to_owned(),
+                tree: tree.clone(),
+                context: entry.context(&self.path, &self.context).clone(),
+                input: prepares_input,
+                provider: std::mem::take(&mut self.provider),
+                path: std::mem::take(&mut self.path),
+                selected: entry.identity(),
+                choices,
+            });
+            return (response, true);
+        }
         if menu.is_some() {
-            self.editing = action.is_some() && prepares_input;
             self.path.push(entry.identity());
             self.crumbs.push(entry.label.clone());
             self.query.clear();
@@ -549,13 +692,10 @@ impl Palette {
             (response, true)
         }
     }
-    pub fn editing(&self) -> bool {
-        self.editing
+    pub(super) fn take_handoff(&mut self) -> Option<Handoff> {
+        self.handoff.take()
     }
-    pub fn paste(&mut self, text: &str, editing: bool) -> bool {
-        if editing {
-            return false;
-        }
+    pub fn paste(&mut self, text: &str) -> bool {
         self.query
             .extend(text.chars().filter(|ch| !ch.is_control()));
         self.selected = 0;
@@ -572,18 +712,14 @@ impl Palette {
     ) -> (Response, bool) {
         self.reconcile(core, declarations);
         self.layout(viewport);
-        if self.pending_cancel {
-            self.pending_cancel = false;
-            return (self.cancel(), false);
-        }
         if key.code == KeyCode::Esc
             || (key.code == KeyCode::Left && key.modifiers.contains(KeyModifiers::ALT))
-            || (key.code == KeyCode::Backspace && self.query.is_empty() && !core.editing())
+            || (key.code == KeyCode::Backspace && self.query.is_empty())
         {
-            return self.back(core);
+            return self.back();
         }
         if key.code == KeyCode::Enter {
-            return self.choose(core, declarations);
+            return self.choose(core, declarations, viewport);
         }
         let count = self
             .view(core, declarations)
@@ -619,9 +755,8 @@ impl Palette {
                     }
                 }
             }
-            KeyCode::Home if !core.editing() => self.selected = 0,
-            KeyCode::End if !core.editing() => self.selected = count.saturating_sub(1),
-            _ if core.editing() => return (Response::Pass, false),
+            KeyCode::Home => self.selected = 0,
+            KeyCode::End => self.selected = count.saturating_sub(1),
             KeyCode::Char(ch)
                 if !key.modifiers.intersects(
                     KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
@@ -681,14 +816,7 @@ impl Palette {
         self.reconcile(core, declarations);
         self.layout(viewport);
         if !self.rect(viewport).contains(x, y) {
-            return (
-                if core.editing() {
-                    self.cancel()
-                } else {
-                    Response::Consumed
-                },
-                true,
-            );
+            return (Response::Consumed, true);
         }
         let start = self.rect(viewport).y.saturating_add(3);
         if y >= start && y < self.rect(viewport).y + self.rect(viewport).height.saturating_sub(1) {
@@ -699,7 +827,7 @@ impl Palette {
             {
                 self.selected = index;
                 self.selected_id = None;
-                return self.choose(core, declarations);
+                return self.choose(core, declarations, viewport);
             }
         }
         (Response::Consumed, false)
@@ -798,12 +926,7 @@ impl Palette {
             None,
         )?;
         let view = self.view(core, declarations).unwrap_or_default();
-        line(
-            1,
-            if view.input { "" } else { &self.query },
-            view.input,
-            None,
-        )?;
+        line(1, &self.query, false, None)?;
         line(2, &view.labels.join(" "), false, Some(Color::DarkGrey))?;
         let rows = usize::from(rect.height.saturating_sub(4));
         let scroll = if self.selected < self.scroll {
@@ -838,42 +961,19 @@ impl Palette {
             )?;
         }
         if rect.height > 3 {
-            let footer = if view.input {
-                format!(
-                    "Type text · Enter {} · Esc {} · ↑↓ actions",
-                    view.entries
-                        .get(self.selected)
-                        .filter(|entry| entry.selectable())
-                        .map_or("select", |entry| entry.label.as_str()),
-                    if core.editing() { "cancel" } else { "back" }
-                )
-            } else {
-                format!(
-                    "{} / {}  · Enter select · Esc back",
-                    view.entries
-                        .iter()
-                        .take(self.selected + 1)
-                        .filter(|entry| entry.selectable())
-                        .count(),
-                    view.entries
-                        .iter()
-                        .filter(|entry| entry.selectable())
-                        .count()
-                )
-            };
+            let footer = format!(
+                "{} / {}  · Enter select · Esc back",
+                view.entries
+                    .iter()
+                    .take(self.selected + 1)
+                    .filter(|entry| entry.selectable())
+                    .count(),
+                view.entries
+                    .iter()
+                    .filter(|entry| entry.selectable())
+                    .count()
+            );
             line(rect.height - 1, &footer, false, Some(Color::DarkGrey))?;
-        }
-        if view.input {
-            queue!(
-                out,
-                SetBackgroundColor(Color::Rgb {
-                    r: 45,
-                    g: 70,
-                    b: 100,
-                }),
-                SetForegroundColor(Color::White)
-            )?;
-            draw_input(out, rect, &core.input_text)?;
         }
         queue!(
             out,

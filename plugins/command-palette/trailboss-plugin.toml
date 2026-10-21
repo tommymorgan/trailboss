@@ -1,0 +1,12 @@
+id = "tommymorgan.command-palette"
+name = "Command Palette"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Public command palette consuming the Core command catalog."
+platforms = ["linux", "macos"]
+
+[[ui]]
+id = "commands"
+surface = "sidebar"
+command = ["../../target/debug/trailboss-command-palette"]
+stream = true

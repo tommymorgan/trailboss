@@ -140,10 +140,11 @@ fn removed_target_cannot_execute_a_stale_name_submit() {
     assert_eq!(cancel.action, "host:cancel");
     core.invoke(&cancel.action, &cancel.context, None);
     assert!(!core.editing());
-    assert!(controls.modal());
+    controls.reconcile(&core, &declarations, Rect::viewport(100, 30));
+    assert!(!controls.modal());
 }
 #[test]
-fn names_pass_through_core_blank_submit_stays_open_and_escape_cancels_only_one_level() {
+fn shared_name_interaction_validates_blank_input_and_escape_closes_without_reopening_search() {
     let mut core = Core::default();
     let mut controls = Controls::default();
     let declarations = vec![fragment(
@@ -174,19 +175,21 @@ fn names_pass_through_core_blank_submit_stays_open_and_escape_cancels_only_one_l
     ));
     assert!(matches!(
         key(&mut controls, &core, &declarations, KeyCode::Enter),
-        Response::Consumed
+        Response::Pass
+    ));
+    assert!(matches!(
+        core.text("\r"),
+        Some(trailboss::core::Effect::Consumed)
     ));
     assert!(core.editing());
     assert!(controls.modal());
-    let cancel = invoked(key(&mut controls, &core, &declarations, KeyCode::Esc));
-    assert_eq!(cancel.action, "host:cancel");
-    core.invoke(&cancel.action, &cancel.context, None);
-    assert!(!core.editing());
-    assert!(controls.modal());
     assert!(matches!(
         key(&mut controls, &core, &declarations, KeyCode::Esc),
-        Response::Consumed
+        Response::Pass
     ));
+    core.text("\x1b");
+    assert!(!core.editing());
+    controls.reconcile(&core, &declarations, Rect::viewport(100, 30));
     assert!(!controls.modal());
 }
 #[test]
@@ -306,7 +309,7 @@ fn page_home_end_wheel_and_hover_select_visible_rows_without_leaking_input() {
     );
 }
 #[test]
-fn input_field_shows_focus_current_text_and_the_selected_submit_action() {
+fn shared_input_field_keeps_draft_caret_and_declared_actions_visible_outside_search() {
     let mut core = Core::default();
     let declarations = vec![fragment(
         "catalog",
@@ -359,32 +362,35 @@ fn input_field_shows_focus_current_text_and_the_selected_submit_action() {
     };
     core.prepare_palette(&prep.action, &prep.context);
     let empty = render(&mut renderer, &core);
-    let field = empty[3].trim();
-    assert!(field.starts_with('[') && field.ends_with(']'));
-    assert!(field.contains('▏'));
+    let field = empty
+        .iter()
+        .find(|row| row.contains('▏'))
+        .expect("shared input caret");
     assert!(
         field.chars().any(char::is_alphabetic),
         "empty input needs a typing prompt"
     );
-    assert!(empty[16].contains("Confirm"));
+    assert!(!empty.iter().any(|row| row.contains("Commands")));
+    key(&mut renderer.controls, &core, &declarations, KeyCode::Tab);
+    let focused_submit = render(&mut renderer, &core);
+    assert!(focused_submit.iter().any(|row| row.contains("›Confirm")));
 
     core.paste("Value 🦀");
     let populated = render(&mut renderer, &core);
-    assert!(populated[3].contains("Value 🦀▏"));
-    key(&mut renderer.controls, &core, &declarations, KeyCode::Down);
+    assert!(populated.iter().any(|row| row.contains("Value 🦀▏")));
+    key(&mut renderer.controls, &core, &declarations, KeyCode::Tab);
     let changed_action = render(&mut renderer, &core);
-    assert!(changed_action[3].contains("Value 🦀▏"));
-    assert!(changed_action[16].contains("Dismiss"));
-    assert!(!changed_action[16].contains("Confirm"));
+    assert!(changed_action.iter().any(|row| row.contains("Value 🦀▏")));
+    assert!(changed_action.iter().any(|row| row.contains("›Dismiss")));
+    assert!(!changed_action.iter().any(|row| row.contains("›Confirm")));
 
     core.input_text.clear();
     core.paste(&format!("{}終", "x".repeat(79)));
     let overflow = render(&mut renderer, &core);
     assert!(
-        overflow[3].contains("終▏"),
+        overflow.iter().any(|row| row.contains("終▏")),
         "long input must keep its insertion point visible"
     );
-    assert!(overflow[3].trim().ends_with(']'));
 }
 
 #[test]
@@ -637,4 +643,197 @@ fn ordinary_use_alias_refresh_retains_existing_anonymous_menu_matching() {
     let selected = invoked(key(&mut controls, &core, &declarations, KeyCode::Enter));
     assert_eq!(selected.plugin, "ordinary-owner");
     assert_eq!(selected.action, "ordinary");
+}
+
+#[test]
+fn confirmation_updates_preserve_labels_but_cancel_changed_actions() {
+    for change in [
+        "target",
+        "order",
+        "referenced target",
+        "nested action",
+        "label",
+    ] {
+        let core = Core::default();
+        let mut controls = Controls::default();
+        let cancel = json!({"type":"row","action":"host:cancel",
+            "children":[{"type":"label","text":"Cancel","role":"label"}]});
+        let close = |target: &str| {
+            json!({"type":"row","action":"host:close-tab","context":{"tab_id":target},
+                "children":[{"type":"label","text":"Close","role":"label"}]})
+        };
+        let menu = column(vec![cancel.clone(), close("chosen-tab")]);
+        let parent = |menu| {
+            json!({"type":"row","context":{"tab_id":"chosen-tab"},
+                "children":[{"type":"label","text":"Chosen","role":"label"}],"menu":menu})
+        };
+        let referenced = change == "referenced target";
+        let mut declarations = vec![
+            fragment(
+                "owner",
+                "command-palette",
+                0,
+                column(vec![parent(if referenced {
+                    json!({"type":"use","name":"confirmation"})
+                } else {
+                    menu.clone()
+                })]),
+            ),
+            fragment("buttons", "confirmation", 0, menu),
+        ];
+        assert!(controls.open_palette(&core, &declarations, None));
+        key(&mut controls, &core, &declarations, KeyCode::Enter);
+        if change != "order" {
+            key(&mut controls, &core, &declarations, KeyCode::Down);
+        }
+        let changed = if change == "order" {
+            column(vec![close("chosen-tab"), cancel])
+        } else if change == "nested action" {
+            let mut cancel = cancel;
+            cancel["children"]
+                .as_array_mut()
+                .unwrap()
+                .push(close("replacement-tab"));
+            column(vec![cancel, close("chosen-tab")])
+        } else if change == "label" {
+            let mut renamed = close("chosen-tab");
+            renamed["children"][0]["text"] = json!("Close renamed tab");
+            column(vec![cancel, renamed])
+        } else {
+            column(vec![cancel, close("replacement-tab")])
+        };
+        if referenced {
+            declarations[1] = fragment("buttons", "confirmation", 0, changed);
+        } else {
+            declarations[0] =
+                fragment("owner", "command-palette", 0, column(vec![parent(changed)]));
+        }
+        controls.reconcile(&core, &declarations, Rect::viewport(100, 30));
+        if change == "label" {
+            assert!(
+                controls.modal(),
+                "label-only refresh canceled the confirmation"
+            );
+            let selected = invoked(key(&mut controls, &core, &declarations, KeyCode::Enter));
+            assert_eq!(selected.action, "host:close-tab");
+            assert_eq!(selected.context.tab_id.as_deref(), Some("chosen-tab"));
+        } else {
+            assert!(
+                !controls.modal(),
+                "{change} left a changed confirmation active"
+            );
+            assert!(matches!(
+                key(&mut controls, &core, &declarations, KeyCode::Enter),
+                Response::Pass
+            ));
+        }
+    }
+}
+
+#[test]
+fn name_form_updates_preserve_the_focused_control() {
+    for (referenced, change) in [
+        (false, "label"),
+        (true, "label"),
+        (false, "action"),
+        (true, "action"),
+        (false, "input order"),
+        (true, "input order"),
+        (false, "nested action"),
+        (true, "nested action"),
+    ] {
+        let mut core = Core::default();
+        let mut controls = Controls::default();
+        let save = |label: &str| {
+            json!({"type":"row","action":"host:create",
+            "children":[{"type":"label","text":label,"role":"label"}]})
+        };
+        let form = |submit, input_last| {
+            let input = json!({"type":"input"});
+            let cancel = json!({"type":"row","action":"host:cancel",
+                "children":[{"type":"label","text":"Cancel","role":"label"}]});
+            if input_last {
+                column(vec![submit, cancel, input])
+            } else {
+                column(vec![input, submit, cancel])
+            }
+        };
+        let parent = |menu| {
+            json!({
+                "type":"row","action":"host:rename-tab","context":{"tab_id":"chosen-tab"},
+                "children":[{"type":"label","text":"Rename chosen tab","role":"label"}],
+                "menu":menu
+            })
+        };
+        let initial = form(save("Save"), false);
+        let mut declarations = vec![fragment(
+            "palette-owner",
+            "command-palette",
+            0,
+            column(vec![parent(if referenced {
+                json!({"type":"use","name":"name-form"})
+            } else {
+                initial.clone()
+            })]),
+        )];
+        if referenced {
+            declarations.push(fragment("form-owner", "name-form", 0, initial));
+        }
+        assert!(controls.open_palette(&core, &declarations, None));
+        let Response::Prepare(prepared) = key(&mut controls, &core, &declarations, KeyCode::Enter)
+        else {
+            panic!("rename did not enter the shared name flow");
+        };
+        core.prepare_palette(&prepared.action, &prepared.context);
+        core.paste("Draft name");
+        key(&mut controls, &core, &declarations, KeyCode::Tab);
+        if matches!(change, "input order" | "nested action") {
+            key(&mut controls, &core, &declarations, KeyCode::Tab);
+        }
+        let submit = if change == "action" {
+            json!({"type":"row","action":"host:close-tab","context":{"tab_id":"replacement-tab"},
+                "children":[{"type":"label","text":"Close replacement","role":"label"}]})
+        } else if change == "nested action" {
+            json!({"type":"row","action":"host:create","children":[
+                {"type":"label","text":"Save","role":"label"},
+                {"type":"row","action":"host:close-tab","context":{"tab_id":"replacement-tab"},
+                    "children":[{"type":"label","text":"Close replacement","role":"label"}]}
+            ]})
+        } else {
+            save("Save renamed label")
+        };
+        let changed = form(submit, change == "input order");
+        if referenced {
+            declarations[1] = fragment("form-owner", "name-form", 0, changed);
+        } else {
+            declarations[0] = fragment(
+                "palette-owner",
+                "command-palette",
+                0,
+                column(vec![parent(changed)]),
+            );
+        }
+        let selected = invoked(key(&mut controls, &core, &declarations, KeyCode::Enter));
+        assert_eq!(
+            selected.action,
+            if change == "label" {
+                "host:create"
+            } else {
+                "host:cancel"
+            }
+        );
+        if change != "label" {
+            core.invoke(&selected.action, &selected.context, None);
+            assert!(!core.editing());
+        } else {
+            let trailboss::core::Effect::Request { method, params } =
+                core.invoke(&selected.action, &selected.context, None)
+            else {
+                panic!("unchanged submit did not rename the original tab");
+            };
+            assert_eq!(method, "tab.rename");
+            assert_eq!(params["tab_id"], "chosen-tab");
+            assert_eq!(params["label"], "Draft name");
+        }
+    }
 }

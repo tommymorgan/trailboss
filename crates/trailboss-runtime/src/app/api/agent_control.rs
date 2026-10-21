@@ -9,10 +9,10 @@ use crate::api::schema::{
     AgentTurnAbortParams, AgentTurnAbortResult, ResponseResult,
 };
 
+use super::responses::{encode_error, encode_error_body, encode_success};
 use super::restart_idle::{
     control_roundtrip, exact_session_path, prepare_control_target, ControlReply,
 };
-use super::responses::{encode_error, encode_error_body, encode_success};
 use super::App;
 
 /// Reporter-side chat input cap; must not exceed the socket frame we send.
@@ -182,7 +182,9 @@ fn validate_chat(params: &AgentChatSubmitParams) -> Result<(), String> {
         return Err("idempotency_key must not be empty".into());
     }
     if params.idempotency_key.len() > IDEMPOTENCY_KEY_LIMIT {
-        return Err(format!("idempotency_key exceeds {IDEMPOTENCY_KEY_LIMIT} bytes"));
+        return Err(format!(
+            "idempotency_key exceeds {IDEMPOTENCY_KEY_LIMIT} bytes"
+        ));
     }
     if params
         .idempotency_key
@@ -202,7 +204,9 @@ fn validate_attachments(
     attachments: &[crate::api::schema::AgentChatAttachment],
 ) -> Result<(), String> {
     if attachments.len() > ATTACHMENTS_MAX_COUNT {
-        return Err(format!("attachments exceed {ATTACHMENTS_MAX_COUNT} entries"));
+        return Err(format!(
+            "attachments exceed {ATTACHMENTS_MAX_COUNT} entries"
+        ));
     }
     let upload_root = crate::session::data_dir().join("uploads").join(target);
     let mut total: u64 = 0;
@@ -223,7 +227,10 @@ fn validate_attachments(
         let metadata = std::fs::metadata(path)
             .map_err(|_| format!("attachment missing: {}", attachment.path))?;
         if !metadata.is_file() {
-            return Err(format!("attachment is not a regular file: {}", attachment.path));
+            return Err(format!(
+                "attachment is not a regular file: {}",
+                attachment.path
+            ));
         }
         if metadata.len() > ATTACHMENT_MAX_BYTES {
             return Err(format!(
@@ -311,7 +318,7 @@ fn chat_result_from_reply(
                 .ok_or_else(|| control_error("missing_turn_id".into()))?,
             deduplicated: reply.reason == "duplicate",
         }),
-        _ => Err(skip_error(&reply)),
+        _ => Err(skip_error(reply)),
     }
 }
 
@@ -358,7 +365,10 @@ fn control_error(reason: String) -> (String, String) {
 }
 
 fn skip_error(reply: &ControlReply) -> (String, String) {
-    if matches!(reply.reason.as_str(), "invalid-request" | "unsupported-operation") {
+    if matches!(
+        reply.reason.as_str(),
+        "invalid-request" | "unsupported-operation"
+    ) {
         return (
             "structured_unavailable".into(),
             format!("agent reporter rejected the operation ({})", reply.reason),

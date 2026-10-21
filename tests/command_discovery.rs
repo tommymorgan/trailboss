@@ -8,6 +8,2661 @@ use std::{
 use trailboss::core::{Core as NativeCore, Effect};
 use trailboss_runtime::protocol::widgets::Context;
 
+#[path = "support/console.rs"]
+mod console;
+
+#[test]
+fn dedicated_palette_hides_targetless_operations_and_this_clients_unavailable_previous_visit() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use trailboss::{
+        sidebar::Declarations,
+        terminal::{menus::Response, FrameRenderer, Rect},
+    };
+    use trailboss_runtime::protocol::widgets::Node;
+
+    fn search(
+        renderer: &mut FrameRenderer,
+        native: &NativeCore,
+        declarations: &Declarations,
+        text: &str,
+    ) {
+        for character in text.chars() {
+            renderer.controls.key(
+                native,
+                declarations,
+                Rect::viewport(100, 30),
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+    }
+    fn enter(
+        renderer: &mut FrameRenderer,
+        native: &NativeCore,
+        declarations: &Declarations,
+    ) -> Response {
+        renderer.controls.key(
+            native,
+            declarations,
+            Rect::viewport(100, 30),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        )
+    }
+    fn rows(
+        renderer: &mut FrameRenderer,
+        native: &NativeCore,
+        declarations: &Declarations,
+    ) -> Vec<String> {
+        let mut bytes = Vec::new();
+        renderer
+            .draw_frame(
+                &mut bytes,
+                None,
+                declarations,
+                native,
+                Rect::viewport(100, 30),
+            )
+            .unwrap();
+        let mut screen = ghostty_vt::Terminal::new(100, 30, 0).unwrap();
+        screen.write(&bytes);
+        screen
+            .screen_text_rows()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                row.cells
+                    .iter()
+                    .flat_map(|cell| cell.graphemes.iter())
+                    .filter_map(|codepoint| char::from_u32(*codepoint))
+                    .collect()
+            })
+            .collect()
+    }
+    fn uses(node: &Node, names: &mut Vec<String>) {
+        match node {
+            Node::Use { name } => names.push(name.clone()),
+            Node::Column { children } | Node::List { entries: children } => {
+                for child in children {
+                    uses(child, names);
+                }
+            }
+            Node::Row { children, menu, .. } => {
+                for child in children {
+                    uses(child, names);
+                }
+                if let Some(menu) = menu {
+                    uses(menu, names);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn has_tab_context(node: &Node, tab: &str) -> bool {
+        match node {
+            Node::Row {
+                context,
+                children,
+                menu,
+                ..
+            } => {
+                context.tab_id.as_deref() == Some(tab)
+                    || children.iter().any(|child| has_tab_context(child, tab))
+                    || menu
+                        .as_deref()
+                        .is_some_and(|menu| has_tab_context(menu, tab))
+            }
+            Node::Column { children } | Node::List { entries: children } => {
+                children.iter().any(|child| has_tab_context(child, tab))
+            }
+            Node::Flex { child, .. } | Node::Modal { child } => has_tab_context(child, tab),
+            _ => false,
+        }
+    }
+
+    let core = support::Core::new();
+    let resource = core.request(
+        "workspace.create",
+        json!({
+            "label":"Visibility workspace","cwd":core.home,"focus":true
+        }),
+    );
+    core.request(
+        "tab.rename",
+        json!({"tab_id":resource["tab"]["tab_id"],"label":"First"}),
+    );
+    let second = core.request("tab.create", json!({
+        "workspace_id":resource["workspace"]["workspace_id"],"label":"Second","cwd":core.home,"focus":true
+    }));
+    for plugin in ["stock-ui", "sidebar-menus", "command-palette"] {
+        core.request(
+            "plugin.link",
+            json!({
+                "path":format!("{}/plugins/{plugin}", env!("CARGO_MANIFEST_DIR")),"enabled":true
+            }),
+        );
+    }
+    let catalog = core.request("ui.command.list", json!({}));
+    let command = |action: &str, mode: Option<&str>| {
+        let mut key = json!({"kind":"core","action_id":action});
+        if let Some(mode) = mode {
+            key["mode"] = json!(mode);
+        }
+        catalog["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| command["key"] == key)
+            .unwrap()
+            .clone()
+    };
+    let new_tab = command("host:new-tab", None);
+    let rename_tab = command("host:rename-tab", None);
+    let previous = command("host:focus", Some("previous"));
+    let restart = command("host:restart-idle-agents", None);
+    let mut client = core.attach();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while client.declarations.as_ref().is_none_or(|declarations| {
+        NativeCore::default()
+            .fragment(declarations, "command-palette")
+            .is_none()
+            || !declarations.iter().any(|(owner, declaration)| {
+                owner == "tommymorgan.stock-ui" && declaration.composition.is_some()
+            })
+    }) || client.snapshot.is_none()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "actual dedicated consumer and stock application composition did not publish"
+        );
+        client.receive().unwrap();
+    }
+    let mut native = NativeCore::default();
+    native.update_session(
+        resource["workspace"]["workspace_id"]
+            .as_str()
+            .map(str::to_owned),
+        second["tab"]["tab_id"].as_str().map(str::to_owned),
+        true,
+    );
+    let declarations = client.declarations.as_ref().unwrap();
+    assert_eq!(
+        native.fragment(declarations, "command-palette").unwrap().0,
+        "tommymorgan.command-palette"
+    );
+    // With resources available, these entries navigate to targets. They must
+    // not become executable operations by borrowing the observer/current tab.
+    for (unavailable, workspace_chosen) in [(&new_tab, false), (&rename_tab, true)] {
+        let mut renderer = FrameRenderer::default();
+        assert!(renderer.controls.open_palette(&native, declarations, None));
+        search(
+            &mut renderer,
+            &native,
+            declarations,
+            unavailable["title"].as_str().unwrap(),
+        );
+        assert!(matches!(
+            enter(&mut renderer, &native, declarations),
+            Response::Consumed
+        ));
+        if workspace_chosen {
+            search(&mut renderer, &native, declarations, "Visibility workspace");
+            assert!(matches!(
+                enter(&mut renderer, &native, declarations),
+                Response::Consumed
+            ));
+        }
+        assert!(!native.editing(), "missing target opened a name flow");
+        search(
+            &mut renderer,
+            &native,
+            declarations,
+            unavailable["title"].as_str().unwrap(),
+        );
+        let painted = rows(&mut renderer, &native, declarations);
+        assert!(
+            painted.iter().any(|row| row.contains("No matches")),
+            "targetless operation leaf must be absent, not disabled: {painted:?}"
+        );
+        assert!(matches!(
+            enter(&mut renderer, &native, declarations),
+            Response::Consumed
+        ));
+        assert!(!native.editing());
+
+        // A valid explicit choice must still reach its normal name operation.
+        let mut valid = FrameRenderer::default();
+        assert!(valid.controls.open_palette(&native, declarations, None));
+        for title in [
+            unavailable["title"].as_str().unwrap(),
+            "Visibility workspace",
+        ] {
+            search(&mut valid, &native, declarations, title);
+            assert!(matches!(
+                enter(&mut valid, &native, declarations),
+                Response::Consumed
+            ));
+        }
+        if workspace_chosen {
+            search(&mut valid, &native, declarations, "First");
+            assert!(matches!(
+                enter(&mut valid, &native, declarations),
+                Response::Consumed
+            ));
+        }
+        let Response::Prepare(selected) = enter(&mut valid, &native, declarations) else {
+            panic!("valid explicit target lost its existing name operation");
+        };
+        assert_eq!(selected.action, unavailable["key"]["action_id"]);
+        assert_eq!(
+            selected.context.workspace_id.as_deref(),
+            resource["workspace"]["workspace_id"].as_str()
+        );
+        if workspace_chosen {
+            assert_eq!(
+                selected.context.tab_id.as_deref(),
+                resource["tab"]["tab_id"].as_str()
+            );
+            assert_ne!(
+                selected.context.tab_id.as_deref(),
+                native.focused_tab_id.as_deref()
+            );
+        }
+    }
+
+    // Empty resources are reachable after closing the owned spaces while both
+    // endpoints remain attached. At that boundary even navigation must vanish.
+    // Stock composition above is essential: the non-composed headless fallback
+    // deliberately creates a default space for attached shell clients.
+    let original_root = native
+        .fragment(declarations, "command-palette")
+        .unwrap()
+        .1
+        .clone();
+    let before_close = core.request("session.snapshot", json!({}));
+    let resource_summary = |response: &Value| {
+        json!({
+            "focused_workspace_id":response["snapshot"]["focused_workspace_id"],
+            "workspace_ids":response["snapshot"]["workspaces"].as_array().unwrap().iter()
+                .map(|workspace| workspace["workspace_id"].clone()).collect::<Vec<_>>()
+        })
+    };
+    let mut close_results = Vec::new();
+    for workspace in before_close["snapshot"]["workspaces"].as_array().unwrap() {
+        let workspace_id = workspace["workspace_id"].as_str().unwrap_or_else(|| {
+            panic!("actual workspace snapshot lacks stable workspace_id: {workspace}")
+        });
+        let closed = core.request("workspace.close", json!({"workspace_id":workspace_id}));
+        let after_close = core.request("session.snapshot", json!({}));
+        assert_eq!(
+            closed["type"],
+            "ok",
+            "owned close failed; target={workspace_id}, reply={closed}, before={}, after={}",
+            resource_summary(&before_close),
+            resource_summary(&after_close)
+        );
+        close_results.push(json!({"workspace_id":workspace_id,"reply":closed,"after":resource_summary(&after_close)}));
+    }
+    let after_close = core.request("session.snapshot", json!({}));
+    assert!(after_close["snapshot"]["workspaces"].as_array().unwrap().is_empty(),
+        "actual resources remained after successful stable-ID closes; before={}, closes={close_results:?}, after={}",
+        resource_summary(&before_close), resource_summary(&after_close));
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while client
+        .snapshot
+        .as_ref()
+        .is_none_or(|snapshot| !snapshot.workspaces.is_empty())
+        || client.declarations.as_ref().is_none_or(|declarations| {
+            native
+                .fragment(declarations, "command-palette")
+                .is_none_or(|(_, tree)| {
+                    let mut names = Vec::new();
+                    uses(tree, &mut names);
+                    tree == &original_root
+                        || names.iter().any(|name| {
+                            *name == new_tab["fragment_name"]
+                                || *name == rename_tab["fragment_name"]
+                        })
+                })
+        })
+    {
+        assert!(Instant::now() < deadline,
+            "dedicated consumer did not remove targeted branches after all stable-ID closes; endpoint_workspace_count={:?}, issued_uses={:?}",
+            client.snapshot.as_ref().map(|snapshot| snapshot.workspaces.len()),
+            client.declarations.as_ref().and_then(|declarations| {
+                native.fragment(declarations, "command-palette").map(|(_, tree)| {
+                    let mut names = Vec::new();
+                    uses(tree, &mut names);
+                    names
+                })
+            }));
+        client.receive().unwrap();
+    }
+    let declarations = client.declarations.as_ref().unwrap();
+    let empty_root = native
+        .fragment(declarations, "command-palette")
+        .unwrap()
+        .1
+        .clone();
+    let mut names = Vec::new();
+    uses(&empty_root, &mut names);
+    assert!(!names.iter().any(|name| *name == new_tab["fragment_name"]));
+    assert!(!names
+        .iter()
+        .any(|name| *name == rename_tab["fragment_name"]));
+    let empty_native = NativeCore::default();
+    let mut available = FrameRenderer::default();
+    available
+        .controls
+        .open_palette(&empty_native, declarations, None);
+    search(
+        &mut available,
+        &empty_native,
+        declarations,
+        restart["title"].as_str().unwrap(),
+    );
+    let Response::Invoke(selected) = enter(&mut available, &empty_native, declarations) else {
+        panic!("satisfied global command disappeared in an empty session");
+    };
+    let mut empty_native = empty_native;
+    let Effect::Request { method, params } =
+        empty_native.invoke(&selected.action, &selected.context, None)
+    else {
+        panic!("eligible global operation did not reach Core");
+    };
+    assert_eq!(method, "agent.restart_idle");
+    assert_eq!(core.request(method, params)["type"], "agent_restart_idle");
+
+    // Two clients observe the same actual live snapshot. Only the client that
+    // visited both tabs may display Previous; server/observer state is not MRU.
+    let first = core.request(
+        "workspace.create",
+        json!({
+            "label":"History workspace","cwd":core.home,"focus":true
+        }),
+    );
+    let mut experienced = NativeCore::default();
+    experienced.update_session(
+        first["workspace"]["workspace_id"]
+            .as_str()
+            .map(str::to_owned),
+        first["tab"]["tab_id"].as_str().map(str::to_owned),
+        true,
+    );
+    let second = core.request("tab.create", json!({
+        "workspace_id":first["workspace"]["workspace_id"],"label":"History second","cwd":core.home,"focus":true
+    }));
+    experienced.update_session(
+        first["workspace"]["workspace_id"]
+            .as_str()
+            .map(str::to_owned),
+        second["tab"]["tab_id"].as_str().map(str::to_owned),
+        true,
+    );
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while client.snapshot.as_ref().is_none_or(|snapshot| {
+        snapshot.focused_tab_id.as_deref() != second["tab"]["tab_id"].as_str()
+    }) || client.declarations.as_ref().is_none_or(|declarations| {
+        native
+            .fragment(declarations, "command-palette")
+            .is_none_or(|(_, tree)| {
+                tree == &empty_root
+                    || !has_tab_context(tree, second["tab"]["tab_id"].as_str().unwrap())
+            })
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "actual history snapshot did not arrive"
+        );
+        client.receive().unwrap();
+    }
+    let snapshot = client.snapshot.as_ref().unwrap();
+    let declarations = client.declarations.as_ref().unwrap();
+    let mut fresh = NativeCore::default();
+    fresh.update_session(
+        snapshot.focused_workspace_id.clone(),
+        snapshot.focused_tab_id.clone(),
+        true,
+    );
+    assert!(fresh.previous_tab(snapshot).is_none());
+    assert_eq!(
+        experienced.previous_tab(snapshot),
+        first["tab"]["tab_id"].as_str()
+    );
+    let menu_context: Context = serde_json::from_value(json!({
+        "workspace_id":first["workspace"]["workspace_id"],"tab_id":first["tab"]["tab_id"],
+        "pane_id":first["root_pane"]["pane_id"]
+    }))
+    .unwrap();
+    let mut unavailable = FrameRenderer::default();
+    unavailable
+        .controls
+        .open_palette(&fresh, declarations, Some(&menu_context));
+    search(
+        &mut unavailable,
+        &fresh,
+        declarations,
+        previous["title"].as_str().unwrap(),
+    );
+    let painted = rows(&mut unavailable, &fresh, declarations);
+    assert!(
+        painted.iter().any(|row| row.contains("No matches")),
+        "fresh client must not render Previous as a disabled/no-op row: {painted:?}"
+    );
+    assert!(matches!(
+        enter(&mut unavailable, &fresh, declarations),
+        Response::Consumed
+    ));
+    let targeted = command("host:focus", Some("targeted"));
+    let mut explicit = FrameRenderer::default();
+    explicit
+        .controls
+        .open_palette(&fresh, declarations, Some(&menu_context));
+    for title in [
+        targeted["title"].as_str().unwrap(),
+        "History workspace",
+        "History second",
+    ] {
+        search(&mut explicit, &fresh, declarations, title);
+        let painted = rows(&mut explicit, &fresh, declarations);
+        assert!(
+            !painted.iter().any(|row| row.contains("No matches")),
+            "actual target navigation lost {title:?}: {painted:?}"
+        );
+        assert!(matches!(
+            enter(&mut explicit, &fresh, declarations),
+            Response::Consumed
+        ));
+    }
+    let Response::Invoke(selected) = enter(&mut explicit, &fresh, declarations) else {
+        panic!(
+            "no Previous visit must not hide explicitly targeted Focus: {:?}",
+            rows(&mut explicit, &fresh, declarations)
+        );
+    };
+    assert_eq!(
+        selected.context.tab_id.as_deref(),
+        second["tab"]["tab_id"].as_str()
+    );
+    let mut available = FrameRenderer::default();
+    available
+        .controls
+        .open_palette(&experienced, declarations, Some(&menu_context));
+    search(
+        &mut available,
+        &experienced,
+        declarations,
+        previous["title"].as_str().unwrap(),
+    );
+    let Response::Invoke(selected) = enter(&mut available, &experienced, declarations) else {
+        panic!("this client's eligible previous visit was hidden");
+    };
+    let Effect::Request { method, params } =
+        experienced.invoke(&selected.action, &selected.context, Some(snapshot))
+    else {
+        panic!("eligible previous selection did not use this client's history");
+    };
+    assert_eq!(method, "tab.focus");
+    assert_eq!(params["tab_id"], first["tab"]["tab_id"]);
+    core.request(method, params);
+    assert_eq!(
+        core.request("session.snapshot", json!({}))["snapshot"]["focused_tab_id"],
+        first["tab"]["tab_id"]
+    );
+    // Exercise the executable's own snapshot ingestion as well as the native
+    // controller seam: no direct history-pruning helper drives this PTY.
+    let mut live = console::Console::new(&core);
+    for (tab, pane, marker) in [
+        (
+            &first["tab"]["tab_id"],
+            &first["root_pane"]["pane_id"],
+            "NATIVE_HISTORY_FIRST",
+        ),
+        (
+            &second["tab"]["tab_id"],
+            &second["root_pane"]["pane_id"],
+            "NATIVE_HISTORY_SECOND",
+        ),
+        (
+            &first["tab"]["tab_id"],
+            &first["root_pane"]["pane_id"],
+            "NATIVE_HISTORY_RETURNED",
+        ),
+    ] {
+        core.request("tab.focus", json!({"tab_id":tab}));
+        core.request(
+            "pane.send_text",
+            json!({"pane_id":pane,"text":format!("printf '{marker}\\n'\n")}),
+        );
+        live.wait(|rows| rows.iter().any(|row| row.trim_end().ends_with(marker)));
+    }
+    let previous_title = previous["title"].as_str().unwrap();
+    live.text("\x1bOP");
+    live.text(previous_title);
+    live.wait(|rows| {
+        rows.iter()
+            .filter(|row| row.contains(previous_title))
+            .count()
+            >= 2
+    });
+    live.text("\x1b");
+    live.wait(|rows| !rows.iter().any(|row| row.contains("Enter select")));
+    core.request("tab.close", json!({"tab_id":second["tab"]["tab_id"]}));
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while client.snapshot.as_ref().is_none_or(|snapshot| {
+        snapshot.focused_tab_id.as_deref() != first["tab"]["tab_id"].as_str()
+            || snapshot
+                .tabs
+                .iter()
+                .any(|tab| Some(tab.tab_id.as_str()) == second["tab"]["tab_id"].as_str())
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "actual closed visit remained in the client snapshot"
+        );
+        client.receive().unwrap();
+    }
+    let snapshot = client.snapshot.as_ref().unwrap();
+    experienced.update_session(
+        snapshot.focused_workspace_id.clone(),
+        snapshot.focused_tab_id.clone(),
+        true,
+    );
+    experienced.reconcile_tab_history(snapshot);
+    assert!(experienced.previous_tab(snapshot).is_none());
+    let declarations = client.declarations.as_ref().unwrap();
+    let mut closed_visit = FrameRenderer::default();
+    closed_visit
+        .controls
+        .open_palette(&experienced, declarations, Some(&menu_context));
+    search(
+        &mut closed_visit,
+        &experienced,
+        declarations,
+        previous["title"].as_str().unwrap(),
+    );
+    let painted = rows(&mut closed_visit, &experienced, declarations);
+    assert!(
+        painted.iter().any(|row| row.contains("No matches")),
+        "a closed previous visit must not leave an executable-looking row: {painted:?}"
+    );
+    assert!(matches!(
+        enter(&mut closed_visit, &experienced, declarations),
+        Response::Consumed
+    ));
+    core.request(
+        "pane.send_text",
+        json!({
+            "pane_id":first["root_pane"]["pane_id"],
+            "text":"printf 'NATIVE_CLOSED_HISTORY_READY\\n'\n"
+        }),
+    );
+    live.wait(|rows| {
+        rows.iter()
+            .any(|row| row.trim_end().ends_with("NATIVE_CLOSED_HISTORY_READY"))
+    });
+    live.text("\x1bOP");
+    live.text(previous_title);
+    live.wait(|rows| rows.iter().any(|row| row.contains("No matches")));
+    live.text("\r");
+    assert_eq!(
+        core.request("session.snapshot", json!({}))["snapshot"]["focused_tab_id"],
+        first["tab"]["tab_id"]
+    );
+}
+
+#[test]
+fn discovered_palette_actions_keep_existing_stream_and_spawn_execution_paths() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use trailboss::terminal::{
+        menus::{Controls, Response},
+        Rect,
+    };
+
+    struct EndpointTap(std::process::Child);
+    impl Drop for EndpointTap {
+        fn drop(&mut self) {
+            drop(self.0.stdin.take());
+            let _ = self.0.wait();
+        }
+    }
+    fn records(path: &std::path::Path) -> Vec<Value> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(error) => panic!("cannot read {}: {error}", path.display()),
+        };
+        // The independent relay writes live JSONL. Observe only complete records.
+        text.split_inclusive('\n')
+            .filter(|line| line.ends_with('\n'))
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+    for stream in [true, false] {
+        let core = support::Core::new();
+        let origin = core.request(
+            "workspace.create",
+            json!({
+                "label":"Execution origin","cwd":core.home,"focus":true
+            }),
+        );
+        let captured = core.request(
+            "workspace.create",
+            json!({
+                "label":"Execution target","cwd":core.home,"focus":false
+            }),
+        );
+        let target: Context = serde_json::from_value(json!({
+            "workspace_id":captured["workspace"]["workspace_id"],
+            "tab_id":captured["tab"]["tab_id"],"pane_id":captured["root_pane"]["pane_id"]
+        }))
+        .unwrap();
+        let owner = core.home.join("execution-owner");
+        std::fs::create_dir_all(&owner).unwrap();
+        let mut manifest = "id = \"fixture.execution-owner\"\nname = \"Execution owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"route-probe\"\ntitle = \"Route probe\"\ncontexts = [\"pane\"]\ncommand = [\"python3\", \"spawn.py\"]\n".to_owned();
+        if stream {
+            manifest.push_str("[[ui]]\nid = \"action-stream\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"stream.py\"]\nstream = true\nstream_actions = true\n");
+        }
+        std::fs::write(owner.join("trailboss-plugin.toml"), manifest).unwrap();
+        std::fs::write(owner.join("spawn.py"), r#"import json,os
+with open('spawn.jsonl','a') as output:
+    output.write(json.dumps({'owner':os.environ['HERDR_PLUGIN_ID'],'action':os.environ['HERDR_PLUGIN_ACTION_ID'],
+        'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON']),'ppid':os.getppid()})+'\n')
+print('spawn-owner-completed',flush=True)
+"#).unwrap();
+        std::fs::write(owner.join("stream.py"), r#"import json,os,sys
+print(json.dumps({'herdr':'widget_tree','version':1,'zones':[],'fragments':[
+    {'name':'fixture.execution-stream.ready','priority':0,
+     'tree':{'type':'label','role':'label','text':'Owner stream ready'}}]}),flush=True)
+for line in sys.stdin:
+    envelope=json.loads(line)
+    with open('stream.jsonl','a') as output:
+        output.write(json.dumps({'owner':os.environ['HERDR_PLUGIN_ID'],'ppid':os.getppid(),'envelope':envelope})+'\n')
+    print(json.dumps({'herdr':'action_result','id':envelope['id'],'ok':True}),flush=True)
+"#).unwrap();
+        core.request("plugin.link", json!({"path":owner,"enabled":true}));
+        core.request(
+            "plugin.link",
+            json!({
+                "path":concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/sidebar-menus"),"enabled":true
+            }),
+        );
+        let endpoint = core.home.join(format!(
+            "trailboss/sessions/{}/trailboss-client.sock",
+            core.name
+        ));
+        let child = Command::new("python3").args(["-u", "-c",
+            "import sys,select\nfrom pathlib import Path\nsys.path.insert(0,sys.argv[1])\nfrom command_interactions import OwnedEndpointTap\nevidence=Path(sys.argv[3]); tap=OwnedEndpointTap(Path(sys.argv[2]),evidence)\n(evidence/'tap-ready').touch()\ntry:\n while not select.select([sys.stdin],[],[],0.02)[0]:\n  assert not tap.errors,tap.errors\nfinally: tap.close()\n",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support")])
+            .arg(&endpoint).arg(&core.home).stdin(std::process::Stdio::piped()).spawn().unwrap();
+        let _tap = EndpointTap(child);
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !core.home.join("tap-ready").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "transparent endpoint relay did not start"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut client = core.attach();
+        let mut native = NativeCore::default();
+        native.update_session(
+            origin["workspace"]["workspace_id"]
+                .as_str()
+                .map(str::to_owned),
+            origin["tab"]["tab_id"].as_str().map(str::to_owned),
+            true,
+        );
+        let key = json!({"kind":"plugin","plugin_id":"fixture.execution-owner","action_id":"route-probe"});
+        let catalog = core.request("ui.command.list", json!({}));
+        let command = catalog["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| command["key"] == key)
+            .expect("independent owner action was not discovered");
+        assert_eq!(command["title"], "Route probe");
+        let locator = command["fragment_name"].as_str().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while client.declarations.as_ref().is_none_or(|declarations| {
+            native.fragment(declarations, locator).is_none()
+                || native
+                    .fragment(declarations, "commands.confirm-space")
+                    .is_none()
+                || native
+                    .fragment(declarations, "commands.confirm-tab")
+                    .is_none()
+                || (stream
+                    && native
+                        .fragment(declarations, "fixture.execution-stream.ready")
+                        .is_none())
+        }) {
+            assert!(
+                Instant::now() < deadline,
+                "existing execution owner prerequisites missing"
+            );
+            client.receive().unwrap();
+        }
+        core.request("plugin.link", json!({
+            "path":concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/command-palette"),"enabled":true
+        }));
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while client
+            .declarations
+            .as_ref()
+            .is_none_or(|declarations| native.fragment(declarations, "command-palette").is_none())
+        {
+            assert!(
+                Instant::now() < deadline,
+                "dedicated palette did not publish"
+            );
+            client.receive().unwrap();
+        }
+        let declarations = client.declarations.as_ref().unwrap();
+        assert_eq!(
+            native.fragment(declarations, "command-palette").unwrap().0,
+            "tommymorgan.command-palette"
+        );
+        let mut controls = Controls::default();
+        assert!(controls.open_palette(&native, declarations, Some(&target)));
+        for character in "Route probe".chars() {
+            controls.key(
+                &native,
+                declarations,
+                Rect::viewport(100, 30),
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        let Response::Invoke(selected) = controls.key(
+            &native,
+            declarations,
+            Rect::viewport(100, 30),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ) else {
+            panic!("discovered operation did not reach native plugin dispatch");
+        };
+        assert!(matches!(
+            native.invoke(&selected.action, &selected.context, None),
+            Effect::Plugin
+        ));
+        client
+            .input()
+            .unwrap()
+            .invoke(
+                &client.boot_id,
+                &selected.plugin,
+                &selected.action,
+                &selected.context,
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (issued, reply) =
+            loop {
+                let events = records(&core.home.join("native-endpoint/operations.jsonl"));
+                let requests: Vec<_> = events
+                    .iter()
+                    .filter(|event| {
+                        event["direction"] == "client"
+                            && event["request"]["method"] == "plugin.action.invoke"
+                    })
+                    .collect();
+                assert!(
+                    requests.len() <= 1,
+                    "one selection issued duplicate owner requests"
+                );
+                if let Some(issued) = requests.first() {
+                    let chunks: Vec<_> = events
+                        .iter()
+                        .filter(|event| {
+                            event["direction"] == "core"
+                                && event["connection"] == issued["connection"]
+                                && event["boot_id"] == issued["boot_id"]
+                                && event["request_id"] == issued["request"]["id"]
+                        })
+                        .collect();
+                    if chunks
+                        .last()
+                        .is_some_and(|chunk| chunk["final_chunk"] == true)
+                    {
+                        let mut bytes = Vec::new();
+                        for chunk in chunks {
+                            let hex = chunk["data_hex"].as_str().unwrap();
+                            bytes.extend((0..hex.len()).step_by(2).map(|index| {
+                                u8::from_str_radix(&hex[index..index + 2], 16).unwrap()
+                            }));
+                        }
+                        break (
+                            (*issued).clone(),
+                            serde_json::from_slice::<Value>(&bytes).unwrap(),
+                        );
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "actual owner invocation received no correlated reply: {events:?}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            };
+        assert_eq!(
+            issued["request"]["params"]["plugin_id"],
+            "fixture.execution-owner"
+        );
+        assert_eq!(issued["request"]["params"]["action_id"], "route-probe");
+        assert_eq!(reply["id"], issued["request"]["id"]);
+        assert!(
+            reply.get("error").is_none(),
+            "owner route returned its normal error: {reply}"
+        );
+        assert_eq!(reply["result"]["type"], "plugin_action_invoked");
+        let expected_context = serde_json::to_value(&target).unwrap();
+        for field in ["workspace_id", "tab_id", "pane_id"] {
+            assert_eq!(
+                issued["request"]["params"]["context"][field], expected_context[field],
+                "native request lost captured {field}: issued={issued}; actual_reply={reply}"
+            );
+            assert_eq!(
+                reply["result"]["context"][field], expected_context[field],
+                "owner route resolved a different {field}: {reply}"
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let finished = loop {
+            let logs = core.request(
+                "plugin.log.list",
+                json!({"plugin_id":"fixture.execution-owner"}),
+            );
+            let matching: Vec<_> = logs["logs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|log| log["log_id"] == reply["result"]["log"]["log_id"])
+                .collect();
+            assert_eq!(
+                matching.len(),
+                1,
+                "owner reply/log correlation lost: {logs}"
+            );
+            if matching[0]["status"] != "running" {
+                break matching[0].clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "owner's existing completion did not settle: {logs}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(finished["plugin_id"], "fixture.execution-owner");
+        assert_eq!(finished["action_id"], "route-probe");
+        assert_eq!(finished["status"], "succeeded", "{finished}");
+        let spawned = records(&owner.join("spawn.jsonl"));
+        let forwarded = records(&owner.join("stream.jsonl"));
+        let effect = if stream {
+            assert!(
+                spawned.is_empty(),
+                "stream route must not execute the manifest command vector"
+            );
+            assert_eq!(forwarded.len(), 1);
+            assert_eq!(forwarded[0]["envelope"]["id"], finished["log_id"]);
+            assert_eq!(forwarded[0]["envelope"]["action_id"], "route-probe");
+            &forwarded[0]
+        } else {
+            assert!(forwarded.is_empty());
+            assert_eq!(spawned.len(), 1);
+            assert_eq!(spawned[0]["action"], "route-probe");
+            assert!(finished["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("spawn-owner-completed"));
+            &spawned[0]
+        };
+        assert_eq!(effect["owner"], "fixture.execution-owner");
+        assert_eq!(
+            effect["ppid"],
+            core.child.id(),
+            "Core, not the palette, must own execution"
+        );
+        let actual_context = if stream {
+            &effect["envelope"]["context"]
+        } else {
+            &effect["context"]
+        };
+        assert_eq!(
+            actual_context["workspace_id"],
+            captured["workspace"]["workspace_id"]
+        );
+        assert_eq!(actual_context["tab_id"], captured["tab"]["tab_id"]);
+        assert_eq!(actual_context["pane_id"], captured["root_pane"]["pane_id"]);
+    }
+}
+
+#[test]
+fn selected_blue_refresh_use_invokes_only_its_owner_once_on_captured_target() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use trailboss::terminal::{
+        menus::{Controls, Response},
+        Rect,
+    };
+    use trailboss_runtime::protocol::widgets::Node;
+
+    let core = support::Core::new();
+    let origin = core.request(
+        "workspace.create",
+        json!({
+            "label":"Invocation origin","cwd":core.home,"focus":true
+        }),
+    );
+    let captured = core.request(
+        "workspace.create",
+        json!({
+            "label":"Explicit target","cwd":core.home,"focus":false
+        }),
+    );
+    let target: Context = serde_json::from_value(json!({
+        "workspace_id":captured["workspace"]["workspace_id"],
+        "tab_id":captured["tab"]["tab_id"],"pane_id":captured["root_pane"]["pane_id"]
+    }))
+    .unwrap();
+    for color in ["red", "blue"] {
+        let root = core.home.join(color);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("trailboss-plugin.toml"), format!(
+            "id = \"fixture.{color}\"\nname = \"{color} owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"refresh\"\ntitle = \"Refresh\"\ncontexts = [\"pane\"]\ncommand = [\"python3\", \"record.py\"]\n"
+        )).unwrap();
+        std::fs::write(root.join("record.py"), "import json,os\nwith open('executed.jsonl','a') as f:\n f.write(json.dumps({'owner':os.environ['HERDR_PLUGIN_ID'],'action':os.environ['HERDR_PLUGIN_ACTION_ID'],'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON'])})+'\\n')\n").unwrap();
+        core.request("plugin.link", json!({"path":root,"enabled":true}));
+    }
+    core.request(
+        "plugin.link",
+        json!({
+            "path":concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/sidebar-menus"),"enabled":true
+        }),
+    );
+    let catalog = core.request("ui.command.list", json!({}));
+    let mut locators = Vec::new();
+    for owner in ["fixture.red", "fixture.blue"] {
+        let key = json!({"kind":"plugin","plugin_id":owner,"action_id":"refresh"});
+        let entries: Vec<_> = catalog["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|command| command["key"] == key)
+            .collect();
+        assert_eq!(entries.len(), 1, "{owner}");
+        assert_eq!(entries[0]["title"], "Refresh");
+        locators.push((
+            owner,
+            entries[0]["fragment_name"].as_str().unwrap().to_owned(),
+        ));
+    }
+    assert_ne!(locators[0].1, locators[1].1);
+    let mut client = core.attach();
+    let mut native = NativeCore::default();
+    native.update_session(
+        origin["workspace"]["workspace_id"]
+            .as_str()
+            .map(str::to_owned),
+        origin["tab"]["tab_id"].as_str().map(str::to_owned),
+        true,
+    );
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while client.declarations.as_ref().is_none_or(|declarations| {
+        locators
+            .iter()
+            .any(|(_, name)| native.fragment(declarations, name).is_none())
+            || native
+                .fragment(declarations, "commands.confirm-space")
+                .is_none()
+            || native
+                .fragment(declarations, "commands.confirm-tab")
+                .is_none()
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "existing owner exports did not become ready"
+        );
+        client.receive().unwrap();
+    }
+    for (expected_owner, name) in &locators {
+        assert_eq!(
+            native
+                .fragment(client.declarations.as_ref().unwrap(), name)
+                .unwrap()
+                .0,
+            *expected_owner
+        );
+    }
+    core.request(
+        "plugin.link",
+        json!({
+            "path":concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/command-palette"),"enabled":true
+        }),
+    );
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while client
+        .declarations
+        .as_ref()
+        .is_none_or(|declarations| native.fragment(declarations, "command-palette").is_none())
+    {
+        assert!(
+            Instant::now() < deadline,
+            "dedicated consumer did not publish"
+        );
+        client.receive().unwrap();
+    }
+    let declarations = client.declarations.as_ref().unwrap();
+    let (provider, tree) = native.fragment(declarations, "command-palette").unwrap();
+    assert_eq!(provider, "tommymorgan.command-palette");
+    let Node::Column { children } = tree else {
+        panic!("dedicated consumer did not publish its normal command list");
+    };
+    // Read the actual consumer's order only to navigate duplicate display
+    // titles. Expected owner/action/target remain independent constants.
+    let refresh_order: Vec<_> = children
+        .iter()
+        .filter_map(|node| {
+            let Node::Use { name } = node else {
+                return None;
+            };
+            locators
+                .iter()
+                .find(|(_, locator)| locator == name)
+                .map(|(owner, _)| *owner)
+        })
+        .collect();
+    assert_eq!(refresh_order.len(), 2);
+    let blue_position = refresh_order
+        .iter()
+        .position(|owner| *owner == "fixture.blue")
+        .expect("actual consumer lost Blue's owner-qualified Use");
+    let mut controls = Controls::default();
+    assert!(controls.open_palette(&native, declarations, Some(&target)));
+    for character in "Refresh".chars() {
+        assert!(matches!(
+            controls.key(
+                &native,
+                declarations,
+                Rect::viewport(100, 30),
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)
+            ),
+            Response::Consumed
+        ));
+    }
+    for _ in 0..blue_position {
+        controls.key(
+            &native,
+            declarations,
+            Rect::viewport(100, 30),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        );
+    }
+    let Response::Invoke(selected) = controls.key(
+        &native,
+        declarations,
+        Rect::viewport(100, 30),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    ) else {
+        panic!("actual Blue Use did not produce an owner invocation");
+    };
+    assert!(!controls.modal(), "selection must close command search");
+    assert!(matches!(
+        native.invoke(&selected.action, &selected.context, None),
+        Effect::Plugin
+    ));
+    // Exercise the production native endpoint sender, not a hand-assembled API
+    // request or an echo of the selected owner/context.
+    client
+        .input()
+        .unwrap()
+        .invoke(
+            &client.boot_id,
+            &selected.plugin,
+            &selected.action,
+            &selected.context,
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let logs = loop {
+        let logs = core.request("plugin.log.list", json!({"limit":100}));
+        if logs["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|log| log["action_id"] == "refresh" && log["status"] != "running")
+        {
+            break logs;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "selected owner={} action={} context={:?} produced no completed invocation: {logs}",
+            selected.plugin,
+            selected.action,
+            selected.context
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let executed: Vec<_> = logs["logs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|log| log["action_id"] == "refresh")
+        .collect();
+    assert_eq!(executed.len(), 1, "duplicate owner invocation: {logs}");
+    assert_eq!(
+        executed[0]["plugin_id"], "fixture.blue",
+        "wrong actual execution owner: {logs}"
+    );
+    assert_eq!(executed[0]["status"], "succeeded", "{logs}");
+    assert_eq!(selected.plugin, "fixture.blue");
+    assert_eq!(selected.action, "refresh");
+    assert_eq!(selected.context, target);
+    let records: Vec<Value> = std::fs::read_to_string(core.home.join("blue/executed.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["owner"], "fixture.blue");
+    assert_eq!(records[0]["action"], "refresh");
+    assert_eq!(
+        records[0]["context"]["workspace_id"],
+        captured["workspace"]["workspace_id"]
+    );
+    assert_eq!(records[0]["context"]["tab_id"], captured["tab"]["tab_id"]);
+    assert_eq!(
+        records[0]["context"]["pane_id"],
+        captured["root_pane"]["pane_id"]
+    );
+    assert!(!core.home.join("red/executed.jsonl").exists());
+    assert!(!logs["logs"].as_array().unwrap().iter().any(|log| {
+        log["action_id"] == "refresh"
+            && (log["plugin_id"] == "fixture.red"
+                || log["plugin_id"] == "tommymorgan.command-palette")
+    }));
+}
+
+#[test]
+fn dedicated_palette_omits_core_known_unavailable_actions_without_disabled_rows() {
+    use trailboss::sidebar::Declarations;
+    use trailboss_runtime::protocol::widgets::Node;
+
+    fn inspect(
+        node: &Node,
+        scope: (&NativeCore, &Declarations, &str),
+        depth: usize,
+        actions: &mut Vec<(String, String)>,
+        labels: &mut Vec<String>,
+        locators: &mut Vec<String>,
+    ) {
+        assert!(depth < 32, "cyclic palette Use");
+        let (native, declarations, owner) = scope;
+        match node {
+            Node::Use { name } => {
+                locators.push(name.clone());
+                if let Some((provider, tree)) = native.fragment(declarations, name) {
+                    inspect(
+                        tree,
+                        (native, declarations, provider),
+                        depth + 1,
+                        actions,
+                        labels,
+                        locators,
+                    );
+                }
+            }
+            Node::Label { text, .. } => labels.push(text.clone()),
+            Node::Row {
+                children,
+                action,
+                menu,
+                ..
+            } => {
+                if let Some(action) = action {
+                    actions.push((owner.to_owned(), action.clone()));
+                }
+                for child in children {
+                    inspect(child, scope, depth + 1, actions, labels, locators);
+                }
+                if let Some(menu) = menu {
+                    inspect(menu, scope, depth + 1, actions, labels, locators);
+                }
+            }
+            Node::Column { children } | Node::List { entries: children } => {
+                for child in children {
+                    inspect(child, scope, depth + 1, actions, labels, locators);
+                }
+            }
+            Node::Flex { child, .. } | Node::When { child, .. } | Node::Modal { child } => {
+                inspect(child, scope, depth + 1, actions, labels, locators);
+            }
+            Node::Zone {
+                fallback: Some(child),
+                ..
+            } => {
+                inspect(child, scope, depth + 1, actions, labels, locators);
+            }
+            _ => {}
+        }
+    }
+
+    for state in [
+        "plugin disabled",
+        "action unsupported on this platform",
+        "plugin manifest unavailable",
+    ] {
+        let core = support::Core::new();
+        let resource = core.request(
+            "workspace.create",
+            json!({
+                "label":"Availability context","cwd":core.home,"focus":true
+            }),
+        );
+        let owner = core.home.join("availability-owner");
+        let control = core.home.join("availability-control");
+        std::fs::create_dir_all(&owner).unwrap();
+        std::fs::create_dir_all(&control).unwrap();
+        // These independent manifests establish one candidate and one eligible
+        // positive control, rather than deriving expected actions from discovery.
+        let manifest = "id = \"fixture.availability\"\nname = \"Availability owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"candidate\"\ntitle = \"Unavailable candidate\"\ncontexts = [\"pane\"]\ncommand = [\"python3\", \"record.py\"]\n";
+        let ui = "[[ui]]\nid = \"existing-action\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"producer.py\"]\nstream = true\n";
+        std::fs::write(
+            owner.join("trailboss-plugin.toml"),
+            format!("{manifest}{ui}"),
+        )
+        .unwrap();
+        std::fs::write(control.join("trailboss-plugin.toml"), "id = \"fixture.availability-control\"\nname = \"Availability control\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"control\"\ntitle = \"Available control\"\ncontexts = [\"pane\"]\ncommand = [\"python3\", \"record.py\"]\n").unwrap();
+        for root in [&owner, &control] {
+            std::fs::write(root.join("record.py"), "import json,os\nwith open('executed.jsonl','a') as f:\n f.write(json.dumps({'owner':os.environ['HERDR_PLUGIN_ID'],'action':os.environ['HERDR_PLUGIN_ACTION_ID'],'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON'])})+'\\n')\n").unwrap();
+        }
+        // An ordinary owner export is deliberately not a catalog eligibility
+        // flag. Unsupported actions can still have declared UI; discovery must
+        // not mistake that UI for an available command.
+        let declaration = json!({"herdr":"widget_tree","version":1,"zones":[],
+        "fragments":[{"name":"fixture.availability-candidate","priority":0,"tree":{
+            "type":"row","action":"candidate","context":{
+                "workspace_id":resource["workspace"]["workspace_id"],
+                "tab_id":resource["tab"]["tab_id"],"pane_id":resource["root_pane"]["pane_id"]
+            },"children":[{"type":"label","text":"Unavailable candidate","role":"label"}]
+        }}]});
+        std::fs::write(
+            owner.join("producer.py"),
+            format!(
+                "import sys\nprint({:?},flush=True)\nfor line in sys.stdin: pass\n",
+                declaration.to_string()
+            ),
+        )
+        .unwrap();
+        for path in [&owner, &control] {
+            core.request("plugin.link", json!({"path":path,"enabled":true}));
+        }
+        core.request(
+            "plugin.link",
+            json!({
+                "path":concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/sidebar-menus"),"enabled":true
+            }),
+        );
+        let mut client = core.attach();
+        let mut native = NativeCore::default();
+        native.update_session(
+            resource["workspace"]["workspace_id"]
+                .as_str()
+                .map(str::to_owned),
+            resource["tab"]["tab_id"].as_str().map(str::to_owned),
+            true,
+        );
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while client.declarations.as_ref().is_none_or(|declarations| {
+            [
+                "fixture.availability-candidate",
+                "commands.confirm-space",
+                "commands.confirm-tab",
+            ]
+            .iter()
+            .any(|name| native.fragment(declarations, name).is_none())
+        }) {
+            assert!(
+                Instant::now() < deadline,
+                "{state}: original owner prerequisites missing"
+            );
+            client.receive().unwrap();
+        }
+        let candidate =
+            json!({"kind":"plugin","plugin_id":"fixture.availability","action_id":"candidate"});
+        let eligible = json!({"kind":"plugin","plugin_id":"fixture.availability-control","action_id":"control"});
+        let initial = core.request("ui.command.list", json!({}));
+        let old_locator = initial["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| command["key"] == candidate)
+            .expect("candidate must be registered and available before applying its state")
+            ["fragment_name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        match state {
+            "plugin disabled" => {
+                core.request(
+                    "plugin.disable",
+                    json!({"plugin_id":"fixture.availability"}),
+                );
+            }
+            "action unsupported on this platform" => {
+                let unsupported = if cfg!(target_os = "windows") {
+                    "linux"
+                } else {
+                    "windows"
+                };
+                std::fs::write(
+                    owner.join("trailboss-plugin.toml"),
+                    format!("{manifest}platforms = [{unsupported:?}]\n{ui}"),
+                )
+                .unwrap();
+            }
+            "plugin manifest unavailable" => {
+                std::fs::remove_file(owner.join("trailboss-plugin.toml")).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        // This real API refresh establishes Core's authoritative availability
+        // before the dedicated consumer starts. No open selection is exercised.
+        let current = core.request("ui.command.list", json!({}));
+        let commands = current["commands"].as_array().unwrap();
+        assert!(
+            !commands.iter().any(|command| command["key"] == candidate),
+            "{state}"
+        );
+        let control_locator = commands
+            .iter()
+            .find(|command| command["key"] == eligible)
+            .expect("independent eligible control disappeared")["fragment_name"]
+            .as_str()
+            .unwrap();
+        core.request("plugin.link", json!({
+            "path":concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/command-palette"),"enabled":true
+        }));
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while client
+            .declarations
+            .as_ref()
+            .is_none_or(|declarations| native.fragment(declarations, "command-palette").is_none())
+        {
+            assert!(
+                Instant::now() < deadline,
+                "{state}: dedicated consumer did not publish"
+            );
+            client.receive().unwrap();
+        }
+        let declarations = client.declarations.as_ref().unwrap();
+        let (provider, tree) = native.fragment(declarations, "command-palette").unwrap();
+        assert_eq!(provider, "tommymorgan.command-palette");
+        let mut actions = Vec::new();
+        let mut labels = Vec::new();
+        let mut locators = Vec::new();
+        inspect(
+            tree,
+            (&native, declarations, provider),
+            0,
+            &mut actions,
+            &mut labels,
+            &mut locators,
+        );
+        assert!(
+            actions.contains(&(
+                "fixture.availability-control".to_owned(),
+                "control".to_owned()
+            )),
+            "{state}: eligible control must remain usable"
+        );
+        assert!(
+            locators.iter().any(|name| name == control_locator),
+            "{state}"
+        );
+        assert!(
+            !locators.contains(&old_locator),
+            "{state}: unavailable command Use survived"
+        );
+        assert!(
+            !actions.contains(&("fixture.availability".to_owned(), "candidate".to_owned())),
+            "{state}: unavailable action remains in the actual palette"
+        );
+        assert!(
+            !labels
+                .iter()
+                .any(|label| label.contains("Unavailable candidate")),
+            "{state}: unavailable command was rendered as a disabled/explanatory row: {labels:?}"
+        );
+    }
+}
+
+#[test]
+fn palette_consumer_retains_independent_catalog_authorities_and_targets() {
+    use trailboss::sidebar::Declarations;
+    use trailboss_runtime::protocol::widgets::Node;
+
+    fn uses(node: &Node, inherited: &Context, found: &mut Vec<(String, Context)>) {
+        match node {
+            Node::Use { name } => found.push((name.clone(), inherited.clone())),
+            Node::Column { children } | Node::List { entries: children } => {
+                for child in children {
+                    uses(child, inherited, found);
+                }
+            }
+            Node::Row {
+                children,
+                context,
+                menu,
+                ..
+            } => {
+                let context = if context == &Context::default() {
+                    inherited
+                } else {
+                    context
+                };
+                for child in children {
+                    uses(child, context, found);
+                }
+                if let Some(menu) = menu {
+                    uses(menu, context, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn action_contexts(
+        node: &Node,
+        inherited: &Context,
+        scope: (&NativeCore, &Declarations),
+        wanted: &str,
+        depth: usize,
+        found: &mut Vec<Context>,
+    ) {
+        assert!(depth < 32, "cyclic owner fragment");
+        let (native, declarations) = scope;
+        match node {
+            Node::Use { name } => {
+                let (_, tree) = native
+                    .fragment(declarations, name)
+                    .expect("unresolvable owner Use");
+                action_contexts(tree, inherited, scope, wanted, depth + 1, found);
+            }
+            Node::Column { children } | Node::List { entries: children } => {
+                for child in children {
+                    action_contexts(child, inherited, scope, wanted, depth + 1, found);
+                }
+            }
+            Node::Row {
+                children,
+                action,
+                context,
+                menu,
+            } => {
+                let context = if context == &Context::default() {
+                    inherited
+                } else {
+                    context
+                };
+                if action.as_deref() == Some(wanted) {
+                    found.push(context.clone());
+                }
+                for child in children {
+                    action_contexts(child, context, scope, wanted, depth + 1, found);
+                }
+                if let Some(menu) = menu {
+                    action_contexts(menu, context, scope, wanted, depth + 1, found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Accepted planning inventory, not CORE_COMMANDS, parser membership, RPC
+    // methods, or values learned from this test's catalog response.
+    let core_inventory = [
+        ("host:new-space", None, "global"),
+        ("host:new", None, "client_local"),
+        ("host:new-tab", None, "workspace"),
+        ("host:rename-space", None, "workspace"),
+        ("host:rename-tab", None, "tab"),
+        ("host:close-tab", None, "tab"),
+        ("host:focus", Some("targeted"), "tab"),
+        ("host:focus", Some("previous"), "client_local"),
+        ("host:restart-idle-agents", None, "global"),
+        ("host:detach", None, "client_local"),
+    ];
+    let core = support::Core::new();
+    let mut plugin_inventory = Vec::new();
+    let mut targets = Vec::new();
+    for color in ["red", "blue", "green"] {
+        let resource = core.request(
+            "workspace.create",
+            json!({"label":format!("Authority {color}"),"cwd":core.home,"focus":true}),
+        );
+        let context: Context = serde_json::from_value(json!({
+            "workspace_id":resource["workspace"]["workspace_id"],
+            "tab_id":resource["tab"]["tab_id"],"pane_id":resource["root_pane"]["pane_id"]
+        }))
+        .unwrap();
+        let owner = format!("fixture.{color}");
+        let root = core.home.join(color);
+        std::fs::create_dir_all(&root).unwrap();
+        let actions = [
+            ("refresh".to_owned(), "Refresh".to_owned()),
+            (format!("inspect-{color}"), format!("Inspect {color}")),
+        ];
+        let mut manifest = format!(
+            "id = \"{owner}\"\nname = \"Authority {color}\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n"
+        );
+        let mut rows = Vec::new();
+        for (action, title) in actions {
+            manifest.push_str(&format!(
+                "[[actions]]\nid = \"{action}\"\ntitle = \"{title}\"\ncontexts = [\"pane\"]\ncommand = [\"python3\", \"record.py\"]\n"
+            ));
+            rows.push(json!({"type":"row","action":action,"context":context,
+                "children":[{"type":"label","text":title,"role":"label"}]}));
+            plugin_inventory.push((owner.clone(), action, title, context.clone()));
+        }
+        manifest.push_str("[[ui]]\nid = \"authority\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"producer.py\"]\nstream = true\n");
+        std::fs::write(root.join("trailboss-plugin.toml"), manifest).unwrap();
+        std::fs::write(root.join("record.py"), "import json,os\nwith open('executed.jsonl','a') as f:\n f.write(json.dumps({'owner':os.environ['HERDR_PLUGIN_ID'],'action':os.environ['HERDR_PLUGIN_ACTION_ID'],'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON'])})+'\\n')\n").unwrap();
+        let declaration = json!({"herdr":"widget_tree","version":1,"zones":[
+            {"zone":"footer","tree":{"type":"column","children":rows}}
+        ]});
+        std::fs::write(
+            root.join("producer.py"),
+            format!(
+                "import sys\nprint({:?},flush=True)\nfor line in sys.stdin: pass\n",
+                declaration.to_string()
+            ),
+        )
+        .unwrap();
+        core.request("plugin.link", json!({"path":root,"enabled":true}));
+        targets.push(context);
+    }
+    core.request(
+        "plugin.link",
+        json!({
+            "path":concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/sidebar-menus"),"enabled":true
+        }),
+    );
+    let mut client = core.attach();
+    let mut native = NativeCore::default();
+    for target in &targets {
+        native.update_session(target.workspace_id.clone(), target.tab_id.clone(), true);
+    }
+    // Establish owner exports before starting the consumer. Eligibility is not
+    // inferred from the palette rows whose completeness this witness tests.
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let catalog = loop {
+        let catalog = core.request("ui.command.list", json!({}));
+        if client.declarations.as_ref().is_some_and(|declarations| {
+            catalog["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|command| {
+                    command["diagnostic"].is_null()
+                        && native
+                            .fragment(declarations, command["fragment_name"].as_str().unwrap())
+                            .is_some()
+                })
+                && plugin_inventory.iter().all(|(owner, action, _, _)| {
+                    declarations.iter().any(|(provider, declaration)| {
+                        provider == owner
+                            && declaration.zones.iter().any(|zone| {
+                                let mut contexts = Vec::new();
+                                action_contexts(
+                                    &zone.tree,
+                                    &Context::default(),
+                                    (&native, declarations),
+                                    action,
+                                    0,
+                                    &mut contexts,
+                                );
+                                !contexts.is_empty()
+                            })
+                    })
+                })
+        }) {
+            break catalog;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "independent owner prerequisites not ready: {catalog}"
+        );
+        client.receive().unwrap_or_else(|error| {
+            let log = std::fs::read_to_string(core.home.join(format!(
+                "trailboss/sessions/{}/trailboss-server.log", core.name
+            ))).unwrap_or_else(|read_error| format!("server log unavailable: {read_error}"));
+            let stream_errors: Vec<_> = log.lines()
+                .filter(|line| line.contains("plugin UI stream stopped"))
+                .take(6).collect();
+            let diagnostics: Vec<_> = catalog["commands"].as_array().unwrap().iter()
+                .filter(|command| !command["diagnostic"].is_null())
+                .map(|command| json!({"key":command["key"],"diagnostic":command["diagnostic"]}))
+                .collect();
+            let owners: Vec<_> = client.declarations.as_ref().map(|declarations| {
+                declarations.iter().map(|(owner, declaration)| (owner, declaration.zones.len())).collect()
+            }).unwrap_or_default();
+            panic!("owner readiness receive failed: {error}; diagnostics={diagnostics:?}; owner_zone_counts={owners:?}; producer_errors={stream_errors:?}");
+        });
+    };
+    let commands = catalog["commands"].as_array().unwrap();
+    let core_keys: std::collections::BTreeSet<_> = commands
+        .iter()
+        .filter(|command| command["key"]["kind"] == "core")
+        .map(|command| {
+            (
+                command["key"]["action_id"].as_str().unwrap(),
+                command["key"]["mode"].as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        core_keys,
+        core_inventory
+            .iter()
+            .map(|(action, mode, _)| (*action, *mode))
+            .collect()
+    );
+    for forbidden in [
+        "host:create",
+        "host:cancel",
+        "pane.send_text",
+        "pane.send_key",
+        "pane.send_bytes",
+    ] {
+        assert!(
+            !commands
+                .iter()
+                .any(|command| command["key"]["action_id"] == forbidden),
+            "interaction control/raw PTY RPC became a standalone command: {forbidden}"
+        );
+    }
+    let mut expected = Vec::new();
+    for (action, mode, target) in core_inventory {
+        let mut key = json!({"kind":"core","action_id":action});
+        if let Some(mode) = mode {
+            key["mode"] = json!(mode);
+        }
+        let matching: Vec<_> = commands
+            .iter()
+            .filter(|command| command["key"] == key)
+            .collect();
+        assert_eq!(matching.len(), 1, "{key}");
+        assert_eq!(matching[0]["target"], target, "{key}");
+        let contexts = if matches!(target, "workspace" | "tab") {
+            targets
+                .iter()
+                .map(|context| Context {
+                    workspace_id: context.workspace_id.clone(),
+                    tab_id: (target == "tab").then(|| context.tab_id.clone()).flatten(),
+                    ..Context::default()
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![Context::default()]
+        };
+        for context in contexts {
+            expected.push((
+                key.clone(),
+                "trailboss.core".to_owned(),
+                action.to_owned(),
+                context,
+            ));
+        }
+    }
+    for (owner, action, title, context) in &plugin_inventory {
+        let key = json!({"kind":"plugin","plugin_id":owner,"action_id":action});
+        let matching: Vec<_> = commands
+            .iter()
+            .filter(|command| command["key"] == key)
+            .collect();
+        assert_eq!(matching.len(), 1, "{key}");
+        assert_eq!(matching[0]["title"], *title, "{key}");
+        assert_eq!(matching[0]["target"], "owner", "{key}");
+        expected.push((key, owner.clone(), action.clone(), context.clone()));
+    }
+    assert_eq!(
+        plugin_inventory
+            .iter()
+            .filter(|(_, _, title, _)| title == "Refresh")
+            .count(),
+        3
+    );
+    core.request(
+        "plugin.link",
+        json!({
+            "path":concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/command-palette"),"enabled":true
+        }),
+    );
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while client
+        .declarations
+        .as_ref()
+        .is_none_or(|declarations| native.fragment(declarations, "command-palette").is_none())
+    {
+        assert!(
+            Instant::now() < deadline,
+            "actual dedicated consumer did not publish"
+        );
+        client.receive().unwrap();
+    }
+    let declarations = client.declarations.as_ref().unwrap();
+    let (provider, tree) = native.fragment(declarations, "command-palette").unwrap();
+    assert_eq!(provider, "tommymorgan.command-palette");
+    let mut consumed = Vec::new();
+    uses(tree, &Context::default(), &mut consumed);
+    // Join opaque issued locators to metadata, never manufacture expectations
+    // from that metadata. All expected identities/targets were established above.
+    for (key, owner, action, context) in expected {
+        let command = commands
+            .iter()
+            .find(|command| command["key"] == key)
+            .unwrap();
+        let locator = command["fragment_name"].as_str().unwrap();
+        let matching: Vec<_> = consumed
+            .iter()
+            .filter(|(name, inherited)| {
+                if name != locator {
+                    return false;
+                }
+                let (actual_owner, fragment) = native.fragment(declarations, name).unwrap();
+                assert_eq!(actual_owner, owner, "{key}");
+                let mut contexts = Vec::new();
+                action_contexts(
+                    fragment,
+                    inherited,
+                    (&native, declarations),
+                    &action,
+                    0,
+                    &mut contexts,
+                );
+                contexts.contains(&context)
+            })
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "dedicated consumer lost/merged {key} at {context:?}"
+        );
+    }
+    for (name, _) in consumed {
+        let matching: Vec<_> = commands
+            .iter()
+            .filter(|command| command["fragment_name"] == name)
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "consumer synthesized a non-catalog command: {name}"
+        );
+    }
+}
+
+#[test]
+fn legacy_generation_one_consumer_preserves_action_response_and_running_shell() {
+    let core = support::Core::new();
+    let original = core.request(
+        "workspace.create",
+        json!({"label":"Legacy workspace","cwd":core.home,"focus":true}),
+    );
+    let target = core.request(
+        "tab.create",
+        json!({"workspace_id":original["workspace"]["workspace_id"],"label":"Legacy target","cwd":core.home,"focus":false}),
+    );
+    let tab = target["tab"]["tab_id"].as_str().unwrap();
+    let pane = target["root_pane"]["pane_id"].as_str().unwrap();
+    let root = env!("CARGO_MANIFEST_DIR");
+    for plugin in ["agent-tree", "stock-ui", "sidebar-menus"] {
+        core.request(
+            "plugin.link",
+            json!({"path":format!("{root}/plugins/{plugin}"),"enabled":true}),
+        );
+    }
+    // Retain the old consumer's existing plain-Surface fixture and readiness
+    // prerequisite. The actual focus action comes from the bundled agent tree.
+    let tone = core.home.join("semantic-tone");
+    std::fs::create_dir_all(&tone).unwrap();
+    std::fs::write(tone.join("trailboss-plugin.toml"), "id = \"fixture.semantic-tone\"\nname = \"Semantic tone\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[ui]]\nid = \"tone\"\nsurface = \"sidebar\"\ncommand = [\"sh\", \"producer.sh\"]\nstream = true\n").unwrap();
+    std::fs::write(tone.join("producer.sh"), "printf '%s\\n' '{\"herdr\":\"widget_tree\",\"version\":1,\"zones\":[{\"zone\":\"footer\",\"tree\":{\"type\":\"label\",\"text\":\"Neutral tone\",\"role\":\"muted\",\"tone\":\"fg-cyan\"}}]}'\nwhile read -r line; do :; done\n").unwrap();
+    core.request("plugin.link", json!({"path":tone,"enabled":true}));
+    let before_pid = core.home.join("legacy-shell-before");
+    let after_pid = core.home.join("legacy-shell-after");
+    core.request(
+        "pane.send_text",
+        json!({"pane_id":pane,"text":format!(
+            "printf '%s' \"$$\" > '{}'; printf '\\033[2J\\033[H\\033[1;38;2;17;34;51mneutral-%s\\033[0m\\033[4;7H\\033[6 q' live; read legacy_hold\n",
+            before_pid.display()
+        )}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !before_pid.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "original shell did not reach its read"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let before = core.request("session.snapshot", json!({}))["snapshot"].clone();
+    assert_eq!(before["focused_tab_id"], original["tab"]["tab_id"]);
+    let output = core.home.join("legacy-consumer.json");
+    let socket = core.home.join(format!(
+        "trailboss/sessions/{}/trailboss-client.sock",
+        core.name
+    ));
+    // Reuse the pre-discovery Python consumer unchanged: its handwritten
+    // framing/field decoder imports no application or shared Rust codec.
+    let mut child = Command::new("python3")
+        .args([
+            format!("{root}/tests/support/neutral_consumer.py"),
+            socket.to_string_lossy().into_owned(),
+            tab.to_owned(),
+            output.to_string_lossy().into_owned(),
+        ])
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(12);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "generation-one consumer failed: {status}");
+            break;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("generation-one consumer exceeded its deadline");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let state: Value = serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+    assert_eq!(state["action"]["plugin_id"], "tommymorgan.agent-tree");
+    assert_eq!(state["action"]["action_id"], "focus-tab");
+    assert_eq!(state["action"]["context"]["tab_id"], tab);
+    assert_eq!(state["action"]["context"]["invocation_source"], "plugin_ui");
+    let snapshots = state["snapshots"].as_array().unwrap();
+    let boot = snapshots[0]["boot_id"].as_str().unwrap();
+    assert!(!boot.is_empty());
+    assert_eq!(snapshots[0]["focused_tab_id"], original["tab"]["tab_id"]);
+    assert_eq!(snapshots.last().unwrap()["focused_tab_id"], tab);
+    assert!(snapshots.iter().all(|snapshot| snapshot["boot_id"] == boot));
+    let responses: Vec<_> = state["responses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|response| response["id"] == "widget-action-1")
+        .collect();
+    assert!(
+        !responses.is_empty(),
+        "legacy request received no correlated response"
+    );
+    assert!(responses.iter().all(|response| response["boot"] == boot));
+    assert_eq!(responses.last().unwrap()["final"], 1);
+    let bytes: String = responses
+        .iter()
+        .map(|response| response["data"].as_str().unwrap())
+        .collect();
+    let reply: Value = serde_json::from_str(&bytes).unwrap();
+    assert_eq!(reply["id"], "widget-action-1");
+    assert!(reply.get("error").is_none(), "{reply}");
+    assert_eq!(reply["result"]["type"], "plugin_action_invoked");
+    assert_eq!(reply["result"]["context"]["tab_id"], tab);
+    let frame = state["surfaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|frame| {
+            frame["cells"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|cell| cell["symbol"].as_str().unwrap())
+                .collect::<String>()
+                .contains("neutral-live")
+        })
+        .expect("unchanged Surface layout did not decode the running shell");
+    assert_eq!(frame["boot"], boot);
+    assert_eq!(frame["panes"][0]["id"], pane);
+    assert_eq!(frame["panes"][0]["focused"], 1);
+    assert_eq!(frame["cursor"], json!([6, 3, 1, 6]));
+    let actual = core.request("session.snapshot", json!({}))["snapshot"].clone();
+    assert_eq!(actual["focused_tab_id"], tab);
+    assert_eq!(actual["focused_pane_id"], pane);
+    let identities = |snapshot: &Value| -> std::collections::BTreeMap<String, Value> {
+        snapshot["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|pane| {
+                (
+                    pane["pane_id"].as_str().unwrap().to_owned(),
+                    json!({
+                        "terminal_id":pane["terminal_id"],
+                        "workspace_id":pane["workspace_id"],"tab_id":pane["tab_id"]
+                    }),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(identities(&actual), identities(&before));
+    // Release the same shell's pending read and obtain its PID again. A new
+    // shell or pane that merely renders equivalent text cannot satisfy this.
+    core.request(
+        "pane.send_text",
+        json!({"pane_id":pane,"text":format!(
+            "released\nprintf '%s' \"$$\" > '{}'\n", after_pid.display()
+        )}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !after_pid.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "original shell did not continue after focus"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let original_pid = std::fs::read_to_string(before_pid).unwrap();
+    assert!(original_pid.parse::<u32>().unwrap() > 0);
+    assert_eq!(std::fs::read_to_string(after_pid).unwrap(), original_pid);
+}
+
+#[test]
+fn core_public_operations_preserve_captured_targets_and_unrelated_resources() {
+    use std::collections::BTreeMap;
+
+    // Observe durable resource identity, ownership and names, not incidental
+    // focus flags or shell/agent status that may change between snapshots.
+    fn resources(snapshot: &Value) -> BTreeMap<&'static str, BTreeMap<String, Value>> {
+        [
+            ("workspaces", "workspace_id", &["workspace_id", "label"][..]),
+            ("tabs", "tab_id", &["tab_id", "workspace_id", "label"][..]),
+            (
+                "panes",
+                "pane_id",
+                &["pane_id", "terminal_id", "workspace_id", "tab_id"][..],
+            ),
+        ]
+        .into_iter()
+        .map(|(kind, id, fields)| {
+            let rows = snapshot[kind]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    let identity = row[id].as_str().unwrap().to_owned();
+                    let values = fields
+                        .iter()
+                        .map(|field| ((*field).to_owned(), row[*field].clone()))
+                        .collect();
+                    (identity, Value::Object(values))
+                })
+                .collect();
+            (kind, rows)
+        })
+        .collect()
+    }
+
+    // This is the existing public operation inventory, independent of discovery
+    // or a palette tree. Requests produced by NativeCore run on an owned Core.
+    for action in [
+        "host:new-space",
+        "host:new",
+        "host:new-tab",
+        "host:rename-space",
+        "host:rename-tab",
+        "host:close-tab",
+        "host:focus",
+        "host:restart-idle-agents",
+        "host:detach",
+    ] {
+        let core = support::Core::new();
+        let alpha = core.request(
+            "workspace.create",
+            json!({"label":"Alpha","cwd":core.home,"focus":true}),
+        );
+        let beta = core.request(
+            "workspace.create",
+            json!({"label":"Beta","cwd":core.home,"focus":false}),
+        );
+        for (resource, label) in [(&alpha, "A1"), (&beta, "B1")] {
+            core.request(
+                "tab.rename",
+                json!({"tab_id":resource["tab"]["tab_id"],"label":label}),
+            );
+        }
+        if action == "host:close-tab" {
+            // Keep the target space live so its other tab is an explicit
+            // unrelated-resource witness, not a last-tab policy assumption.
+            core.request(
+                "tab.create",
+                json!({"workspace_id":beta["workspace"]["workspace_id"],"label":"B2","focus":false}),
+            );
+        }
+        core.request("tab.focus", json!({"tab_id":alpha["tab"]["tab_id"]}));
+        let workspace = beta["workspace"]["workspace_id"].as_str().unwrap();
+        let tab = beta["tab"]["tab_id"].as_str().unwrap();
+        let pane = beta["root_pane"]["pane_id"].as_str().unwrap();
+        let context: Context = serde_json::from_value(json!({
+            "workspace_id":workspace,"tab_id":tab,"pane_id":pane
+        }))
+        .unwrap();
+        let before = core.request("session.snapshot", json!({}))["snapshot"].clone();
+        assert_eq!(before["focused_tab_id"], alpha["tab"]["tab_id"], "{action}");
+        assert!(before["agents"].as_array().unwrap().is_empty(), "{action}");
+        let mut expected = resources(&before);
+        let mut native = NativeCore::default();
+        let initial = if action == "host:new" { &beta } else { &alpha };
+        native.update_session(
+            initial["workspace"]["workspace_id"]
+                .as_str()
+                .map(str::to_owned),
+            initial["tab"]["tab_id"].as_str().map(str::to_owned),
+            true,
+        );
+        let mut attached = (action == "host:detach").then(|| core.attach());
+        if let Some(client) = attached.as_mut() {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while client.boot_id.is_empty() {
+                assert!(Instant::now() < deadline, "detach client did not attach");
+                client.receive().unwrap();
+            }
+        }
+        let mut effect = native.invoke(action, &context, None);
+        if matches!(action, "host:new" | "host:rename-space" | "host:rename-tab") {
+            assert!(matches!(effect, Effect::Consumed), "{action}");
+            assert!(
+                native.editing(),
+                "{action} must retain its existing name interaction"
+            );
+            // Move native focus after opening the interaction. Submission must
+            // still use the captured scope, not whichever tab is current now.
+            let changed = if action == "host:new" { &alpha } else { &beta };
+            native.update_session(
+                changed["workspace"]["workspace_id"]
+                    .as_str()
+                    .map(str::to_owned),
+                changed["tab"]["tab_id"].as_str().map(str::to_owned),
+                true,
+            );
+            assert!(matches!(
+                native.text("Core semantics result"),
+                Some(Effect::Consumed)
+            ));
+            effect = native
+                .text("\r")
+                .expect("existing name interaction must submit");
+        }
+        assert!(!native.editing(), "{action} left an interaction open");
+        let reply = match effect {
+            Effect::Request { method, params } => core.request(method, params),
+            Effect::Consumed if action == "host:detach" => {
+                assert!(native.detach_requested);
+                attached
+                    .as_mut()
+                    .unwrap()
+                    .input()
+                    .unwrap()
+                    .detach()
+                    .unwrap();
+                Value::Null
+            }
+            _ => panic!("{action} did not reach its existing native operation"),
+        };
+        if action == "host:restart-idle-agents" {
+            assert_eq!(reply["type"], "agent_restart_idle");
+            assert_eq!(reply["results"], json!([]));
+        }
+        let after = core.request("session.snapshot", json!({}))["snapshot"].clone();
+        let actual = resources(&after);
+        match action {
+            "host:rename-space" => {
+                expected
+                    .get_mut("workspaces")
+                    .unwrap()
+                    .get_mut(workspace)
+                    .unwrap()["label"] = json!("Core semantics result");
+            }
+            "host:rename-tab" => {
+                expected.get_mut("tabs").unwrap().get_mut(tab).unwrap()["label"] =
+                    json!("Core semantics result");
+            }
+            "host:close-tab" => {
+                expected.get_mut("tabs").unwrap().remove(tab).unwrap();
+                expected.get_mut("panes").unwrap().remove(pane).unwrap();
+            }
+            "host:new-space" | "host:new" | "host:new-tab" => {
+                let new_workspace = if action == "host:new-space" {
+                    let added: Vec<_> = actual["workspaces"]
+                        .iter()
+                        .filter(|(id, _)| !expected["workspaces"].contains_key(*id))
+                        .collect();
+                    assert_eq!(added.len(), 1, "{action}");
+                    assert_eq!(added[0].1["label"], "New space", "{action}");
+                    added[0].0.as_str()
+                } else {
+                    workspace
+                };
+                let tabs: Vec<_> = actual["tabs"]
+                    .iter()
+                    .filter(|(id, _)| !expected["tabs"].contains_key(*id))
+                    .collect();
+                assert_eq!(tabs.len(), 1, "{action}");
+                assert_eq!(tabs[0].1["workspace_id"], new_workspace, "{action}");
+                assert_eq!(
+                    tabs[0].1["label"],
+                    match action {
+                        "host:new" => json!("Core semantics result"),
+                        "host:new-tab" => json!("New tab"),
+                        _ => alpha["tab"]["label"].clone(),
+                    },
+                    "{action}"
+                );
+                let panes: Vec<_> = actual["panes"]
+                    .iter()
+                    .filter(|(id, _)| !expected["panes"].contains_key(*id))
+                    .collect();
+                assert_eq!(panes.len(), 1, "{action}");
+                assert_eq!(panes[0].1["workspace_id"], new_workspace, "{action}");
+                assert_eq!(panes[0].1["tab_id"], tabs[0].0.as_str(), "{action}");
+                assert_eq!(after["focused_tab_id"], tabs[0].0.as_str(), "{action}");
+                // Core allocates these IDs. Only admit the independently
+                // checked additions; every pre-existing row must match below.
+                for kind in ["workspaces", "tabs", "panes"] {
+                    let additions: Vec<_> = actual[kind]
+                        .iter()
+                        .filter(|(id, _)| !expected[kind].contains_key(*id))
+                        .map(|(id, row)| (id.clone(), row.clone()))
+                        .collect();
+                    assert_eq!(
+                        additions.len(),
+                        usize::from(kind != "workspaces" || action == "host:new-space"),
+                        "{action}: unexpected {kind} additions"
+                    );
+                    expected.get_mut(kind).unwrap().extend(additions);
+                }
+            }
+            _ => {}
+        }
+        assert_eq!(
+            actual, expected,
+            "{action} changed unrelated resource state"
+        );
+        if action == "host:focus" {
+            assert_eq!(after["focused_workspace_id"], workspace);
+            assert_eq!(after["focused_tab_id"], tab);
+            assert_eq!(after["focused_pane_id"], pane);
+        } else if !matches!(action, "host:new-space" | "host:new" | "host:new-tab") {
+            assert_eq!(after["focused_tab_id"], alpha["tab"]["tab_id"], "{action}");
+        }
+    }
+}
+
+#[test]
+fn palette_discovery_finds_and_runs_independent_inventory_without_sidebar_focus() {
+    use trailboss::sidebar::Declarations;
+    use trailboss_runtime::protocol::widgets::Node;
+
+    struct EndpointTap(std::process::Child);
+    impl Drop for EndpointTap {
+        fn drop(&mut self) {
+            drop(self.0.stdin.take());
+            let _ = self.0.wait();
+        }
+    }
+
+    // This is the accepted user-operation inventory, not CORE_COMMANDS, the
+    // discovery response, or a fixture palette assembled from that response.
+    let inventory = [
+        ("fixture.red", "record-red", None, "owner"),
+        ("fixture.blue", "record-blue", None, "owner"),
+        ("fixture.green", "record-green", None, "owner"),
+        (
+            "tommymorgan.sidebar-menus",
+            "close-space",
+            None,
+            "workspace.close",
+        ),
+        ("trailboss.core", "host:new-space", None, "workspace.create"),
+        ("trailboss.core", "host:new", None, "tab.create"),
+        ("trailboss.core", "host:new-tab", None, "tab.create"),
+        (
+            "trailboss.core",
+            "host:rename-space",
+            None,
+            "workspace.rename",
+        ),
+        ("trailboss.core", "host:rename-tab", None, "tab.rename"),
+        ("trailboss.core", "host:close-tab", None, "tab.close"),
+        (
+            "trailboss.core",
+            "host:focus",
+            Some("targeted"),
+            "tab.focus",
+        ),
+        ("trailboss.core", "host:focus", Some("previous"), "previous"),
+        (
+            "trailboss.core",
+            "host:restart-idle-agents",
+            None,
+            "restart",
+        ),
+        ("trailboss.core", "host:detach", None, "detach"),
+    ];
+
+    // Read public declaration structure only to navigate producer-chosen target
+    // menus. Expected operations/owners above remain independent of that tree.
+    fn paths(
+        native: &NativeCore,
+        declarations: &Declarations,
+        node: &Node,
+        scope: (&str, &Context),
+        route: &[String],
+        depth: usize,
+        found: &mut Vec<(String, String, Context, Vec<String>)>,
+    ) {
+        let (provider, inherited) = scope;
+        assert!(depth < 32, "cyclic public palette declaration");
+        match node {
+            Node::Use { name } => {
+                if let Some((owner, tree)) = native.fragment(declarations, name) {
+                    paths(
+                        native,
+                        declarations,
+                        tree,
+                        (owner, inherited),
+                        route,
+                        depth + 1,
+                        found,
+                    );
+                }
+            }
+            Node::Column { children } | Node::List { entries: children } => {
+                for child in children {
+                    paths(
+                        native,
+                        declarations,
+                        child,
+                        (provider, inherited),
+                        route,
+                        depth + 1,
+                        found,
+                    );
+                }
+            }
+            Node::Row {
+                children,
+                action,
+                context,
+                menu,
+            } => {
+                let context = if context == &Context::default() {
+                    inherited
+                } else {
+                    context
+                };
+                let title = children
+                    .iter()
+                    .filter_map(|child| match child {
+                        Node::Label { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                let mut route = route.to_vec();
+                route.push(title);
+                if let Some(action) = action {
+                    found.push((
+                        provider.to_owned(),
+                        action.clone(),
+                        context.clone(),
+                        route.clone(),
+                    ));
+                }
+                if let Some(menu) = menu {
+                    paths(
+                        native,
+                        declarations,
+                        menu,
+                        (provider, context),
+                        &route,
+                        depth + 1,
+                        found,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (owner, action, mode, outcome) in inventory {
+        let core = support::Core::new();
+        let review = core.request(
+            "workspace.create",
+            json!({"label":"Palette Review","cwd":core.home,"focus":true}),
+        );
+        let workspace = review["workspace"]["workspace_id"].as_str().unwrap();
+        let tab = review["tab"]["tab_id"].as_str().unwrap();
+        let pane = review["root_pane"]["pane_id"].as_str().unwrap();
+        let other = core.request(
+            "workspace.create",
+            json!({"label":"Palette Other","cwd":core.home,"focus":false}),
+        );
+        for color in ["red", "blue", "green"] {
+            let root = core.home.join(color);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("trailboss-plugin.toml"), format!(
+                "id = \"fixture.{color}\"\nname = \"Palette {color} owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"record-{color}\"\ntitle = \"Record {color} target\"\ncontexts = [\"pane\"]\ncommand = [\"python3\", \"record.py\"]\n")).unwrap();
+            std::fs::write(root.join("record.py"),
+                "import json,os\nwith open('executed.jsonl','a') as f:\n f.write(json.dumps({'owner':os.environ['HERDR_PLUGIN_ID'],'action':os.environ['HERDR_PLUGIN_ACTION_ID'],'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON'])})+'\\n')\n").unwrap();
+            core.request("plugin.link", json!({"path":root,"enabled":true}));
+        }
+        // An ordinary composition replacement hides the sidebar without
+        // replacing, registering or manufacturing a command-palette fragment.
+        let hidden = core.home.join("surface-only");
+        std::fs::create_dir_all(&hidden).unwrap();
+        std::fs::write(hidden.join("trailboss-plugin.toml"),
+            "id = \"fixture.surface-only\"\nname = \"Hidden sidebar\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[ui]]\nid = \"surface\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"surface.py\"]\n").unwrap();
+        std::fs::write(hidden.join("surface.py"),
+            "print('{\"herdr\":\"widget_tree\",\"version\":1,\"zones\":[],\"composition\":{\"priority\":1000000,\"tree\":{\"type\":\"surface\"}}}',flush=True)\n").unwrap();
+        core.request("plugin.link", json!({"path":hidden,"enabled":true}));
+        // Establish existing owners before starting the default palette. A
+        // confirmation-bearing action is not eligible while its ordinary
+        // owner export is still pending; the first consumer root may correctly
+        // withhold it. This waits for owner prerequisites, never palette rows.
+        core.request(
+            "plugin.link",
+            json!({
+                "path":concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/sidebar-menus"),
+                "enabled":true
+            }),
+        );
+        let mut owners = core.attach();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let catalog = core.request("ui.command.list", json!({}));
+            if owners.declarations.as_ref().is_some_and(|declarations| {
+                catalog["commands"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|command| {
+                        command["diagnostic"].is_null()
+                            && command["fragment_name"].as_str().is_some_and(|name| {
+                                NativeCore::default().fragment(declarations, name).is_some()
+                            })
+                    })
+            }) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "existing owner prerequisites unavailable: {catalog}"
+            );
+            owners.receive().unwrap_or_else(|error| {
+                panic!("existing owners failed before palette startup: {error}; catalog={catalog}; logs={}",
+                    core.request("plugin.log.list", json!({"limit":200})))
+            });
+        }
+        drop(owners);
+        // Reuse the transparent native-endpoint witness: an empty agent list
+        // alone cannot prove that Restart was actually dispatched.
+        let _tap = if outcome == "restart" {
+            let endpoint = core.home.join(format!(
+                "trailboss/sessions/{}/trailboss-client.sock",
+                core.name
+            ));
+            let child = Command::new("python3").args(["-u", "-c",
+                "import sys,select,json\nfrom pathlib import Path\nsys.path.insert(0,sys.argv[1])\nfrom command_interactions import OwnedEndpointTap\nevidence=Path(sys.argv[3]); tap=OwnedEndpointTap(Path(sys.argv[2]),evidence)\n(evidence/'tap-ready').touch()\ntry:\n while not select.select([sys.stdin],[],[],0.02)[0]:\n  result=tap.restart_result()\n  if result: (evidence/'restart-result.json').write_text(json.dumps(result))\nfinally: tap.close()\n",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support")])
+                .arg(endpoint).arg(&core.home).stdin(std::process::Stdio::piped()).spawn().unwrap();
+            let tap = EndpointTap(child);
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while !core.home.join("tap-ready").exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "owned endpoint tap failed to start"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Some(tap)
+        } else {
+            None
+        };
+        let mut console = console::Console::new(&core);
+        core.request(
+            "pane.send_text",
+            json!({"pane_id":pane,"text":"printf 'PALETTE_OWNED_READY\\n'\n"}),
+        );
+        console.wait(|rows| {
+            rows.iter()
+                .any(|row| row.starts_with("PALETTE_OWNED_READY"))
+        });
+        let mut observer = core.attach();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            observer.receive().unwrap_or_else(|error| {
+                panic!(
+                    "default-producer readiness failed before inventory assertion: {error}; \
+                     received declarations={:?}; registered plugins={}; producer logs={}",
+                    observer.declarations,
+                    core.request("plugin.list", json!({})),
+                    core.request("plugin.log.list", json!({"limit":200})),
+                )
+            });
+            if observer.declarations.as_ref().is_some_and(|declarations| {
+                declarations
+                    .iter()
+                    .any(|(id, d)| id == "fixture.surface-only" && d.composition.is_some())
+                    && declarations
+                        .iter()
+                        .any(|(_, d)| d.fragments.iter().any(|f| f.name == "command-palette"))
+            }) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "default palette never published");
+        }
+        let catalog = core.request("ui.command.list", json!({}));
+        let key = if owner == "trailboss.core" {
+            let mut key = json!({"kind":"core","action_id":action});
+            if let Some(mode) = mode {
+                key["mode"] = json!(mode);
+            }
+            key
+        } else {
+            json!({"kind":"plugin","plugin_id":owner,"action_id":action})
+        };
+        let command = catalog["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["key"] == key)
+            .expect("independent eligible operation missing from Core");
+        let declarations = observer.declarations.as_ref().unwrap();
+        let native = NativeCore::default();
+        let (provider, root) = native.fragment(declarations, "command-palette").unwrap();
+        let mut available = Vec::new();
+        paths(
+            &native,
+            declarations,
+            root,
+            (provider, &Context::default()),
+            &[],
+            0,
+            &mut available,
+        );
+        let selection = available.iter().find(|(actual_owner, actual_action, context, _)| {
+            actual_owner == owner && actual_action == action
+                && if mode == Some("previous") { context.tab_id.is_none() }
+                else if action == "host:focus" { context.tab_id.as_deref() == Some(tab) }
+                else { context.workspace_id.as_deref().is_none_or(|id| id == workspace)
+                    && context.tab_id.as_deref().is_none_or(|id| id == tab) }
+        }).unwrap_or_else(|| panic!("default palette omits independent eligible command {key}; metadata={command}; available={available:?}"));
+        // Owner-bound commands may have equal labels for different captured
+        // targets. Navigate their actual declaration order, not the first
+        // text match, while keeping the expected owner/action inventory above.
+        let root_match = available
+            .iter()
+            .filter(|(actual_owner, actual_action, _, route)| {
+                actual_owner == owner && actual_action == action && route == &selection.3
+            })
+            .position(|candidate| candidate == selection)
+            .unwrap();
+        assert!(
+            selection
+                .3
+                .iter()
+                .any(|title| title == command["title"].as_str().unwrap()),
+            "palette must expose the authoritative command title: {command}"
+        );
+        let providers: Vec<_> = declarations
+            .iter()
+            .filter(|(_, d)| d.fragments.iter().any(|f| f.name == "command-palette"))
+            .collect();
+        assert_eq!(providers.len(), 1, "competing bundled palette providers");
+        assert_ne!(
+            provider, "tommymorgan.sidebar-menus",
+            "sidebar must no longer own the default palette"
+        );
+        drop(observer);
+        if mode == Some("previous") {
+            core.request("tab.focus", json!({"tab_id":other["tab"]["tab_id"]}));
+            std::thread::sleep(Duration::from_millis(200));
+            core.request("tab.focus", json!({"tab_id":tab}));
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        if mode == Some("targeted") {
+            core.request("tab.focus", json!({"tab_id":other["tab"]["tab_id"]}));
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        console.text("\x1bOP");
+        for (index, label) in selection.3.iter().enumerate() {
+            if matches!(outcome, "workspace.close" | "tab.close") && index + 1 == selection.3.len()
+            {
+                console.wait(|rows| {
+                    rows.iter().any(|row| row.contains(label))
+                        && rows.iter().any(|row| row.contains("Cancel"))
+                });
+                console.text("\x1b[B");
+            } else {
+                console.text(label);
+                console.wait(|rows| rows.iter().any(|row| row.contains(label)));
+                if index == 0 {
+                    for _ in 0..root_match {
+                        console.text("\x1b[B");
+                    }
+                }
+            }
+            console.text("\r");
+        }
+        if matches!(
+            outcome,
+            "workspace.create" | "tab.create" | "workspace.rename" | "tab.rename"
+        ) {
+            console.text("Palette Named Result");
+            console.wait(|rows| rows.iter().any(|row| row.contains("Palette Named Result")));
+            console.text("\r");
+        }
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let snapshot = core.request("session.snapshot", json!({}))["snapshot"].clone();
+            let complete = match outcome {
+                "owner" => {
+                    let records = core
+                        .home
+                        .join(owner.strip_prefix("fixture.").unwrap())
+                        .join("executed.jsonl");
+                    if let Some(text) = std::fs::read_to_string(records)
+                        .ok()
+                        .filter(|text| text.ends_with('\n'))
+                    {
+                        let rows: Vec<Value> = text
+                            .lines()
+                            .map(|line| serde_json::from_str(line).unwrap())
+                            .collect();
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0]["owner"], owner);
+                        assert_eq!(rows[0]["action"], action);
+                        assert_eq!(rows[0]["context"]["workspace_id"], workspace);
+                        assert_eq!(rows[0]["context"]["tab_id"], tab);
+                        assert_eq!(rows[0]["context"]["pane_id"], pane);
+                        for color in ["red", "blue", "green"] {
+                            if owner != format!("fixture.{color}") {
+                                assert!(
+                                    !core.home.join(color).join("executed.jsonl").exists(),
+                                    "selection was dispatched to an unrelated owner"
+                                );
+                            }
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                }
+                "workspace.create" | "workspace.rename" => {
+                    snapshot["workspaces"].as_array().unwrap().iter().any(|w| {
+                        w["label"] == "Palette Named Result"
+                            && (outcome == "workspace.create" || w["workspace_id"] == workspace)
+                    })
+                }
+                "tab.create" | "tab.rename" => {
+                    snapshot["tabs"].as_array().unwrap().iter().any(|t| {
+                        t["label"] == "Palette Named Result"
+                            && t["workspace_id"] == workspace
+                            && (outcome == "tab.create" || t["tab_id"] == tab)
+                    })
+                }
+                "tab.close" => !snapshot["tabs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|t| t["tab_id"] == tab),
+                "workspace.close" => {
+                    let gone = !snapshot["workspaces"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|w| w["workspace_id"] == workspace);
+                    let logs = core.request("plugin.log.list", json!({"plugin_id":owner}));
+                    let succeeded = logs["logs"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|log| log["action_id"] == action && log["status"] == "succeeded")
+                        .count();
+                    assert!(succeeded <= 1, "duplicate owner invocation: {logs}");
+                    gone && succeeded == 1
+                }
+                "tab.focus" => snapshot["focused_tab_id"] == tab,
+                "previous" => snapshot["focused_tab_id"] == other["tab"]["tab_id"],
+                "detach" => console.child.try_wait().unwrap().is_some(),
+                "restart" => core.home.join("restart-result.json").is_file(),
+                _ => unreachable!(),
+            };
+            if complete {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "native selection did not perform {key} on its captured target: {snapshot}; route={:?}; screen={:?}; owner logs={}",
+                selection.3,
+                console.rows(),
+                core.request("plugin.log.list", json!({"plugin_id":owner,"limit":100}))
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if outcome != "detach" {
+            core.request(
+                "plugin.disable",
+                json!({"plugin_id":"fixture.surface-only"}),
+            );
+            console.wait(|rows| rows.iter().any(|row| row.starts_with('▏')));
+            console.text("\x1b[<35;20;24M");
+            let rows = console.wait(|rows| rows[23].contains('⋯'));
+            let x = rows[23].chars().position(|ch| ch == '⋯').unwrap();
+            console.click(x, 23);
+            console.wait(|rows| rows.iter().any(|row| row.contains("Detach")));
+            console.text("\x1b");
+        }
+    }
+}
+
 #[test]
 fn reserved_core_action_collision_is_discoverable_but_cannot_detach_through_plugin_use() {
     let core = support::Core::new();
@@ -1680,16 +4335,16 @@ fn c16_invalid_or_ambiguous_owner_confirmations_withdraw_and_ordinary_publicatio
             "fragments":tree.map(|tree| vec![json!({"name":"commands.confirm-space","priority":0,"tree":tree})]).unwrap_or_default()
         })
     };
-    std::fs::write(
-        owner.join("current.json"),
-        publication("pending", None).to_string(),
-    )
-    .unwrap();
-    std::fs::write(
-        owner.join("duplicate.json"),
-        publication("duplicate-empty", None).to_string(),
-    )
-    .unwrap();
+    // The stream reader must observe complete declarations, not truncation
+    // between opening and writing a fixture update.
+    let publish = |file: &str, value: Value| {
+        let target = owner.join(file);
+        let pending = target.with_extension("next");
+        std::fs::write(&pending, value.to_string()).unwrap();
+        std::fs::rename(pending, target).unwrap();
+    };
+    publish("current.json", publication("pending", None));
+    publish("duplicate.json", publication("duplicate-empty", None));
     core.request("plugin.link", json!({"path":owner,"enabled":true}));
 
     // A higher-priority, valid export from another owner must never satisfy the
@@ -1724,7 +4379,9 @@ fn c16_invalid_or_ambiguous_owner_confirmations_withdraw_and_ordinary_publicatio
                 Instant::now() < deadline,
                 "ordinary producer state {marker} was not projected"
             );
-            client.receive().unwrap();
+            client.receive().unwrap_or_else(|error| {
+                panic!("ordinary producer state {marker} was not projected: {error}")
+            });
         }
     };
     let key = json!({"kind":"plugin","plugin_id":"fixture.confirmation","action_id":"close-space"});
@@ -1781,11 +4438,10 @@ fn c16_invalid_or_ambiguous_owner_confirmations_withdraw_and_ordinary_publicatio
         }
     };
     check("pending", false);
-    std::fs::write(
-        owner.join("current.json"),
-        publication("valid-first", Some(valid.clone())).to_string(),
-    )
-    .unwrap();
+    publish(
+        "current.json",
+        publication("valid-first", Some(valid.clone())),
+    );
     check("valid-first", true);
     let mut wrong_action = valid.clone();
     wrong_action["children"][2]["action"] = json!("other");
@@ -1812,26 +4468,20 @@ fn c16_invalid_or_ambiguous_owner_confirmations_withdraw_and_ordinary_publicatio
         Some(json!({"type":"column","children":[{"type":"column","children":[terminal("host:cancel"),terminal("close-space")]}]})),
     ].into_iter().enumerate() {
         let marker = format!("invalid-{index}");
-        std::fs::write(owner.join("current.json"), publication(&marker, tree).to_string()).unwrap();
+        publish("current.json", publication(&marker, tree));
         check(&marker, false);
     }
-    std::fs::write(
-        owner.join("current.json"),
-        publication("before-duplicate", Some(valid.clone())).to_string(),
-    )
-    .unwrap();
+    publish(
+        "current.json",
+        publication("before-duplicate", Some(valid.clone())),
+    );
     check("before-duplicate", true);
-    std::fs::write(
-        owner.join("duplicate.json"),
-        publication("duplicate-present", Some(valid.clone())).to_string(),
-    )
-    .unwrap();
+    publish(
+        "duplicate.json",
+        publication("duplicate-present", Some(valid.clone())),
+    );
     check("duplicate-present", false);
-    std::fs::write(
-        owner.join("duplicate.json"),
-        publication("duplicate-withdrawn", None).to_string(),
-    )
-    .unwrap();
+    publish("duplicate.json", publication("duplicate-withdrawn", None));
     check("duplicate-withdrawn", true);
     let action_list = core.request(
         "plugin.action.list",
@@ -3269,4 +5919,344 @@ fn confirmation_locator_refresh(captured_scope: bool) {
         assert_eq!(records[0]["context"][field], context[field],
             "confirmation acceptance must retain the original captured/default context, never later focus");
     }
+}
+
+#[test]
+fn large_catalog_keeps_every_owner_action_and_unrelated_core_commands_searchable() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use trailboss::terminal::{
+        menus::{Controls, Response},
+        Rect,
+    };
+
+    let core = support::Core::new();
+    let owner = core.home.join("large-catalog-owner");
+    std::fs::create_dir_all(&owner).unwrap();
+    let mut manifest = String::from(
+        "id = \"fixture.large-catalog\"\nname = \"Large catalog\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n",
+    );
+    for index in 0..700 {
+        manifest.push_str(&format!(
+            "[[actions]]\nid = \"action{index:03}\"\ntitle = \"Capacity {index:03}\"\ncommand = [\"sh\", \"record.sh\"]\n"
+        ));
+    }
+    std::fs::write(owner.join("trailboss-plugin.toml"), manifest).unwrap();
+    std::fs::write(
+        owner.join("record.sh"),
+        "printf '%s\\n' \"$HERDR_PLUGIN_ACTION_ID\" >> executed\n",
+    )
+    .unwrap();
+    core.request("plugin.link", json!({"path":owner,"enabled":true}));
+    for plugin in ["stock-ui", "command-palette"] {
+        core.request(
+            "plugin.link",
+            json!({"path":format!("{}/plugins/{plugin}",env!("CARGO_MANIFEST_DIR")),"enabled":true}),
+        );
+    }
+    let mut client = core.attach();
+    let native = NativeCore::default();
+    let choose = |declarations: &trailboss::sidebar::Declarations, query: &str| {
+        let mut controls = Controls::default();
+        if !controls.open_palette(&native, declarations, None) {
+            return Response::Pass;
+        }
+        controls.paste(query);
+        controls.key(
+            &native,
+            declarations,
+            Rect::viewport(100, 30),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        )
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if client.declarations.as_ref().is_some_and(|declarations| {
+            matches!(choose(declarations, "Capacity 699"),
+                Response::Invoke(action) if action.plugin == "fixture.large-catalog" && action.action == "action699")
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "supported large catalog made the dedicated palette unavailable"
+        );
+        client.receive().unwrap();
+    }
+    let declarations = client.declarations.as_ref().unwrap();
+    for index in 0..700 {
+        let Response::Invoke(action) = choose(declarations, &format!("Capacity {index:03}")) else {
+            panic!("catalog action {index} was lost");
+        };
+        assert_eq!(action.plugin, "fixture.large-catalog");
+        assert_eq!(action.action, format!("action{index:03}"));
+        if index == 0 || index == 699 {
+            client
+                .input()
+                .unwrap()
+                .invoke(
+                    &client.boot_id,
+                    &action.plugin,
+                    &action.action,
+                    &action.context,
+                )
+                .unwrap();
+        }
+    }
+    let Response::Prepare(action) = choose(declarations, "New space") else {
+        panic!("large owner catalog hid the unrelated Core creation flow");
+    };
+    assert_eq!(action.plugin, "trailboss.core");
+    assert_eq!(action.action, "host:new-space");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let receipt = std::fs::read_to_string(owner.join("executed")).unwrap_or_default();
+        let mut actions = receipt.lines().collect::<Vec<_>>();
+        actions.sort_unstable();
+        if actions == ["action000", "action699"] && receipt.ends_with('\n') {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "first and last owner actions did not execute: {receipt:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn captured_owner_targets_are_visible_before_the_selected_workspace_is_invoked() {
+    captured_owner_targets(None);
+}
+
+#[test]
+fn long_control_bearing_pane_names_keep_owner_commands_searchable() {
+    captured_owner_targets(Some((format!("Needle\n{}", "界".repeat(220)), None)));
+}
+
+#[test]
+fn pane_renames_refresh_captured_owner_captions_and_search() {
+    captured_owner_targets(Some((
+        "PreviousPane".to_owned(),
+        Some("RenamedPane".to_owned()),
+    )));
+}
+
+fn captured_owner_targets(pane_names: Option<(String, Option<String>)>) {
+    let core = support::Core::new();
+    let alpha = core.request(
+        "workspace.create",
+        json!({"label":"Alpha","cwd":core.home,"focus":true}),
+    );
+    let beta = core.request(
+        "workspace.create",
+        json!({"label":"Beta","cwd":core.home,"focus":false}),
+    );
+    if let Some((initial, _)) = &pane_names {
+        core.request(
+            "pane.rename",
+            json!({"pane_id":alpha["root_pane"]["pane_id"],"label":initial}),
+        );
+    }
+    let owner = core.home.join("named-target-owner");
+    std::fs::create_dir_all(&owner).unwrap();
+    std::fs::write(owner.join("trailboss-plugin.toml"),
+        format!("id = \"fixture.named-target\"\nname = \"Named targets\"\nversion = \"1.0.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"archive\"\ntitle = \"Archive\"\ncommand = [\"python3\", {:?}]\n[[ui]]\nid = \"targets\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"targets.py\"]\n",owner.join("record.py").to_str().unwrap())).unwrap();
+    std::fs::write(owner.join("record.py"),
+        format!("import json,os\nwith open({:?},'a') as output:\n output.write(json.dumps(json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON']))+'\\n')\n",owner.join("executed.jsonl").to_str().unwrap())).unwrap();
+    let publication = json!({
+        "herdr":"widget_tree","version":1,"zones":[],
+        "fragments":[{"name":"fixture.targets","priority":0,"tree":{"type":"column","children":[
+            {"type":"row","action":"archive",
+             "context":{"workspace_id":alpha["workspace"]["workspace_id"],
+                        "tab_id":alpha["tab"]["tab_id"],"pane_id":alpha["root_pane"]["pane_id"]},
+             "children":[{"type":"label","text":"Archive Alpha","role":"label"}]},
+            {"type":"row","action":"archive",
+             "context":{"workspace_id":beta["workspace"]["workspace_id"],
+                        "tab_id":beta["tab"]["tab_id"],"pane_id":beta["root_pane"]["pane_id"]},
+             "children":[{"type":"label","text":"Archive Beta","role":"label"}]}
+        ]}}]
+    });
+    std::fs::write(
+        owner.join("targets.py"),
+        format!("print({:?})\n", publication.to_string()),
+    )
+    .unwrap();
+    core.request("plugin.link", json!({"path":owner,"enabled":true}));
+    core.request(
+        "plugin.link",
+        json!({
+            "path":concat!(env!("CARGO_MANIFEST_DIR"),"/plugins/command-palette"),"enabled":true
+        }),
+    );
+    let mut client = core.attach();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while client.declarations.as_ref().is_none_or(|declarations| {
+        NativeCore::default()
+            .fragment(declarations, "command-palette")
+            .is_none()
+            || !declarations
+                .iter()
+                .any(|(provider, _)| provider == "fixture.named-target")
+    }) {
+        assert!(Instant::now() < deadline, "owner palette did not publish");
+        client.receive().unwrap();
+    }
+    let mut native = console::Console::new(&core);
+    native.wait(|rows| rows.iter().any(|row| row.contains("Alpha")));
+    native.text("\x1bOPArchive");
+    native.wait(|rows| {
+        ["Alpha", "Beta"].iter().all(|target| {
+            rows.iter().any(|row| {
+                row.contains(target)
+                    && (row.contains("Archive")
+                        || (*target == "Alpha"
+                            && pane_names
+                                .as_ref()
+                                .is_some_and(|(_, rename)| rename.is_none())))
+            })
+        })
+    });
+    if let Some((_, renamed)) = &pane_names {
+        let query = renamed.as_deref().unwrap_or("Needle");
+        if let Some(renamed) = renamed {
+            core.request(
+                "pane.rename",
+                json!({"pane_id":alpha["root_pane"]["pane_id"],"label":renamed}),
+            );
+            native.wait(|rows| {
+                rows.iter()
+                    .any(|row| row.contains("Archive") && row.contains(renamed))
+            });
+        }
+        for _ in "Archive".chars() {
+            native.text("\x7f");
+        }
+        native.text(query);
+        native.wait(|rows| {
+            rows.iter().any(|row| row.contains("Alpha"))
+                && !rows
+                    .iter()
+                    .any(|row| row.contains("Archive") && row.contains("Beta"))
+        });
+        for _ in query.chars() {
+            native.text("\x7f");
+        }
+        native.text("Archive");
+    }
+    for _ in "Archive".chars() {
+        native.text("\x7f");
+    }
+    native.text("Beta Archive");
+    native.wait(|rows| {
+        rows.iter()
+            .any(|row| row.contains("Archive") && row.contains("Beta"))
+            && !rows
+                .iter()
+                .any(|row| row.contains("Archive") && row.contains("Alpha"))
+    });
+    native.text("\r");
+    native.wait(|rows| {
+        rows.iter()
+            .any(|row| row.contains("Commands") && row.contains("Beta") && row.contains("Archive"))
+    });
+    native.text("\r");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let receipts = loop {
+        let text = std::fs::read_to_string(owner.join("executed.jsonl")).unwrap_or_default();
+        if text.ends_with('\n') {
+            break text
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .collect::<Vec<_>>();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "selected named target did not execute; logs={}; screen={:?}",
+            core.request("plugin.log.list", json!({"limit":20})),
+            native.rows()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(
+        receipts[0]["workspace_id"],
+        beta["workspace"]["workspace_id"]
+    );
+    assert_ne!(
+        receipts[0]["workspace_id"],
+        alpha["workspace"]["workspace_id"]
+    );
+}
+
+#[test]
+fn palette_observer_and_catalog_follow_the_api_socket_override() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    use trailboss_runtime::protocol::widgets::{Declaration, Node};
+    let core = support::Core::new();
+    core.request(
+        "workspace.create",
+        json!({"label":"OverrideTarget","cwd":core.home,"focus":true}),
+    );
+    let mut command = Command::new(env!("CARGO_BIN_EXE_trailboss-command-palette"));
+    for key in support::HOMES {
+        command.env(key, &core.home);
+    }
+    for (key, _) in std::env::vars_os().filter(|(key, _)| {
+        let key = key.to_string_lossy();
+        key.starts_with("HERDR_") || key.starts_with("TRAILBOSS_")
+    }) {
+        command.env_remove(key);
+    }
+    command
+        .env("TRAILBOSS_SESSION", "wrong-session")
+        .env(
+            "HERDR_CLIENT_SOCKET_PATH",
+            core.home.join("wrong-client.sock"),
+        )
+        .env(
+            "HERDR_SOCKET_PATH",
+            core.home
+                .join(format!("trailboss/sessions/{}/trailboss.sock", core.name)),
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut line = String::new();
+        let result = BufReader::new(stdout).read_line(&mut line);
+        let _ = send.send((result, line));
+    });
+    let publication = receive.recv_timeout(Duration::from_secs(5));
+    let _ = child.kill();
+    let output = child.wait_with_output().unwrap();
+    reader.join().unwrap();
+    let (read, line) = publication
+        .unwrap_or_else(|error| panic!("override palette did not publish: {error}; {output:?}"));
+    read.unwrap();
+    let declaration: Declaration = serde_json::from_str(&line)
+        .unwrap_or_else(|error| panic!("override palette publication: {error}; {output:?}"));
+    let mut nodes: Vec<_> = declaration.fragments.iter().map(|f| &f.tree).collect();
+    let mut target_visible = false;
+    while let Some(node) = nodes.pop() {
+        match node {
+            Node::Label { text, .. } => target_visible |= text == "OverrideTarget",
+            Node::Column { children }
+            | Node::Row { children, .. }
+            | Node::List { entries: children } => nodes.extend(children),
+            _ => {}
+        }
+        if let Node::Row {
+            menu: Some(menu), ..
+        } = node
+        {
+            nodes.push(menu);
+        }
+    }
+    assert!(
+        target_visible,
+        "publication must describe the API-selected Core, not the inherited session"
+    );
 }

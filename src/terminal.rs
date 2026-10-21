@@ -573,9 +573,14 @@ impl FrameRenderer {
         out.write_all(CLOSE_HYPERLINK)?;
         refresh_hyperlinks(&mut self.hyperlinks, surface);
         self.controls.reconcile(core, declarations, rect);
-        let dialog = (!self.controls.modal())
-            .then(|| modals::dialog(core, declarations, rect))
-            .flatten();
+        let dialog = self
+            .controls
+            .interaction_dialog(core, declarations, rect)
+            .or_else(|| {
+                (!self.controls.modal())
+                    .then(|| modals::dialog(core, declarations, rect))
+                    .flatten()
+            });
         let scrollbar = list_viewport(core, declarations, rect)
             .filter(|(area, maximum)| area.width >= 3 && area.height > 0 && *maximum > 0);
         let rail = scrollbar.map(|(area, _)| Rect {

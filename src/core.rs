@@ -17,14 +17,7 @@ enum Interaction {
     RenameTab {
         tab_id: String,
     },
-    Palette(PaletteInteraction),
-}
-#[derive(Debug, PartialEq, Eq)]
-enum PaletteInteraction {
     NewSpace,
-    NewTab { workspace_id: String },
-    RenameSpace { workspace_id: String },
-    RenameTab { tab_id: String },
 }
 #[derive(Default, Debug)]
 pub struct Core {
@@ -40,6 +33,7 @@ pub struct Core {
     tab_cycle_cursor: Option<usize>,
     finished_cycle_target: Option<String>,
     copy_feedback_deadline: Option<Instant>,
+    require_name: bool,
 }
 pub enum Effect {
     Consumed,
@@ -110,6 +104,19 @@ impl Core {
         self.tab_cycle_order.clear();
         self.tab_cycle_cursor = None;
         self.finished_cycle_target = None;
+    }
+    /// Discard closed visits when this client's live resource snapshot changes.
+    pub fn reconcile_tab_history(
+        &mut self,
+        snapshot: &trailboss_runtime::protocol::ClientShellSnapshot,
+    ) {
+        self.recent_tabs
+            .retain(|id| snapshot.tabs.iter().any(|tab| &tab.tab_id == id));
+    }
+    pub(crate) fn has_previous_tab(&self) -> bool {
+        self.recent_tabs
+            .iter()
+            .any(|id| self.focused_tab_id.as_ref() != Some(id))
     }
     /// A one-shot previous visit, excluding the current snapshot focus and closed tabs.
     pub fn previous_tab(
@@ -212,34 +219,35 @@ impl Core {
     pub fn editing(&self) -> bool {
         self.interaction != Interaction::None
     }
-    /// Prepare a palette name step without activating stock declaration forms.
+    /// Prepare a named command using the same interaction as native entrypoints.
     pub fn prepare_palette(&mut self, action: &str, context: &Context) -> Effect {
         let interaction = match CoreAction::parse(action) {
-            Some(CoreAction::NewSpace) => Some(PaletteInteraction::NewSpace),
+            Some(CoreAction::NewSpace) => Some(Interaction::NewSpace),
+            Some(CoreAction::New) => Some(Interaction::NewTab {
+                workspace_id: self.workspace_id.clone(),
+            }),
             Some(CoreAction::NewTab) => {
-                context
-                    .workspace_id
-                    .as_ref()
-                    .map(|id| PaletteInteraction::NewTab {
-                        workspace_id: id.clone(),
-                    })
+                context.workspace_id.as_ref().map(|id| Interaction::NewTab {
+                    workspace_id: Some(id.clone()),
+                })
             }
             Some(CoreAction::RenameSpace) => {
                 context
                     .workspace_id
                     .as_ref()
-                    .map(|id| PaletteInteraction::RenameSpace {
+                    .map(|id| Interaction::RenameSpace {
                         workspace_id: id.clone(),
                     })
             }
             Some(CoreAction::RenameTab) => context
                 .tab_id
                 .as_ref()
-                .map(|id| PaletteInteraction::RenameTab { tab_id: id.clone() }),
+                .map(|id| Interaction::RenameTab { tab_id: id.clone() }),
             _ => return self.invoke(action, context, None),
         };
         if let Some(interaction) = interaction {
-            self.interaction = Interaction::Palette(interaction);
+            self.interaction = interaction;
+            self.require_name = true;
             self.input_text.clear();
         }
         Effect::Consumed
@@ -254,6 +262,12 @@ impl Core {
         let Some(action) = CoreAction::parse(action) else {
             return Effect::Plugin;
         };
+        if matches!(
+            action,
+            CoreAction::New | CoreAction::RenameSpace | CoreAction::RenameTab
+        ) {
+            self.require_name = false;
+        }
         if action == CoreAction::Focus && context.tab_id.is_none() {
             return snapshot
                 .and_then(|snapshot| self.previous_tab(snapshot))
@@ -330,12 +344,12 @@ impl Core {
                 Effect::Consumed
             }
             CoreAction::Create => {
-                if matches!(
-                    self.interaction,
-                    Interaction::RenameSpace { .. }
-                        | Interaction::RenameTab { .. }
-                        | Interaction::Palette(_)
-                ) && self.input_text.trim().is_empty()
+                if (self.require_name
+                    || matches!(
+                        self.interaction,
+                        Interaction::RenameSpace { .. } | Interaction::RenameTab { .. }
+                    ))
+                    && self.input_text.trim().is_empty()
                 {
                     return Effect::Consumed;
                 }
@@ -366,27 +380,10 @@ impl Core {
                         method: "tab.rename",
                         params: json!({"tab_id":tab_id,"label":self.input_text}),
                     },
-                    Interaction::Palette(interaction) => {
-                        let (method, params) = match interaction {
-                            PaletteInteraction::NewSpace => (
-                                "workspace.create",
-                                json!({"label":self.input_text,"focus":true}),
-                            ),
-                            PaletteInteraction::NewTab { workspace_id } => (
-                                "tab.create",
-                                json!({"workspace_id":workspace_id,"label":self.input_text,"focus":true}),
-                            ),
-                            PaletteInteraction::RenameSpace { workspace_id } => (
-                                "workspace.rename",
-                                json!({"workspace_id":workspace_id,"label":self.input_text}),
-                            ),
-                            PaletteInteraction::RenameTab { tab_id } => (
-                                "tab.rename",
-                                json!({"tab_id":tab_id,"label":self.input_text}),
-                            ),
-                        };
-                        Effect::Request { method, params }
-                    }
+                    Interaction::NewSpace => Effect::Request {
+                        method: "workspace.create",
+                        params: json!({"label":self.input_text,"focus":true}),
+                    },
                     Interaction::None => Effect::Consumed,
                 }
             }
@@ -499,13 +496,6 @@ mod tests {
                 Effect::Consumed
             ));
             assert!(core.editing());
-            for condition in [
-                Condition::NewTab,
-                Condition::RenameSpace,
-                Condition::RenameTab,
-            ] {
-                assert!(!core.visible(condition));
-            }
             core.text("   ");
             assert!(matches!(
                 core.invoke("host:create", &Context::default(), None),

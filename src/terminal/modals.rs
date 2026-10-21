@@ -71,12 +71,22 @@ pub(super) fn dialog<'a>(
 ) -> Option<Dialog<'a>> {
     let (plugin, root) = core.composition(declarations)?;
     let (plugin, tree) = find(core, declarations, plugin, root, 0)?;
+    Some(from_tree(core, declarations, plugin, tree, viewport))
+}
+
+pub(super) fn from_tree<'a>(
+    core: &Core,
+    declarations: &Declarations,
+    plugin: &'a str,
+    tree: &'a Node,
+    viewport: Rect,
+) -> Dialog<'a> {
     let width = 48.min(viewport.width);
     let height = extent(core, declarations, tree, false)
         .0
         .saturating_add(2)
         .min(viewport.height);
-    Some(Dialog {
+    Dialog {
         plugin,
         tree,
         rect: Rect {
@@ -85,7 +95,7 @@ pub(super) fn dialog<'a>(
             width,
             height,
         },
-    })
+    }
 }
 fn content(rect: Rect) -> Rect {
     Rect {
@@ -95,7 +105,7 @@ fn content(rect: Rect) -> Rect {
         height: rect.height.saturating_sub(2),
     }
 }
-fn visit<'a>(
+pub(super) fn visit<'a>(
     core: &Core,
     declarations: &'a Declarations,
     dialog: Dialog<'a>,
@@ -112,7 +122,7 @@ fn visit<'a>(
         callback,
     );
 }
-fn actionable(node: &Node) -> bool {
+pub(super) fn actionable(node: &Node) -> bool {
     matches!(
         node,
         Node::Input
@@ -237,9 +247,17 @@ pub(super) fn draw(
             index += 1;
         }
         result = match node {
-            Node::Row { .. } if leaf_row(node) => {
-                crate::sidebar::draw_row(out, node, rect, None, false)
-            }
+            Node::Row { .. } if leaf_row(node) => crate::sidebar::draw_row(
+                out,
+                node,
+                Rect {
+                    x: rect.x + u16::from(rect.width > 0),
+                    width: rect.width.saturating_sub(1),
+                    ..rect
+                },
+                None,
+                false,
+            ),
             Node::Label { text, role, tone } => paint_text(out, text, role, *tone, rect),
             Node::Input => paint_input(out, &core.input_text, rect),
             Node::Leader { tone } => paint_leader(out, *tone, rect),

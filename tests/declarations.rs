@@ -11,7 +11,7 @@ use trailboss::{
 };
 use trailboss_runtime::protocol::widgets::{Context, Declaration};
 #[test]
-fn sidebar_palette_declaration_validates_against_its_actual_manifest_actions() {
+fn sidebar_menu_exports_validate_against_their_actual_manifest_actions() {
     let output = Command::new("bun")
         .args(["-e", "import {declareMenus} from './plugins/sidebar-menus/menus.ts'; import {snapshotRows} from './packages/trailboss-store/adapter.ts'; const manifest=Bun.TOML.parse(await Bun.file('./plugins/sidebar-menus/trailboss-plugin.toml').text()); const entities=snapshotRows({type:'session_snapshot',snapshot:{workspaces:[{workspace_id:'w',label:'Space',number:1,focused:true,agent_status:'idle'}],tabs:[{workspace_id:'w',tab_id:'t',label:'Tab',number:1,focused:true,agent_status:'idle'}],panes:[]}}); console.log(JSON.stringify({declaration:declareMenus(entities),actions:manifest.actions.map(action=>action.id)}));"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))

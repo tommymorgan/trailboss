@@ -77,7 +77,7 @@ pub(crate) struct WorktreeReadData {
 #[derive(Debug)]
 pub enum AppEvent {
     AgentRestartIdleCheck {
-        check: crate::app::RestartIdleCheck,
+        check: Box<crate::app::RestartIdleCheck>,
         respond_to: std::sync::mpsc::Sender<Result<(), String>>,
     },
     AgentRestartIdleFinished {

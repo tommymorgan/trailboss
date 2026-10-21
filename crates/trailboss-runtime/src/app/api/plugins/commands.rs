@@ -5,6 +5,7 @@ use std::{
     io,
 };
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -46,13 +47,15 @@ impl App {
 }
 
 fn locator(boot_id: &str, key: &UiCommandKey) -> (String, [u8; 32]) {
-    // JSON preserves tuple boundaries, unlike a dotted qualified action string.
-    let identity = serde_json::to_vec(key).expect("command identity is serializable");
-    let digest = Sha256::digest(identity);
-    (
-        format!("{COMMAND_FRAGMENT_PREFIX}{boot_id}:{digest:x}"),
-        digest.into(),
-    )
+    // Hash the typed boot/key tuple without allocating a serialized identity.
+    let mut identity = Sha256::new();
+    serde_json::to_writer(&mut identity, &(boot_id, key))
+        .expect("command identity is serializable");
+    let digest = identity.finalize();
+    let mut name = String::with_capacity(COMMAND_FRAGMENT_PREFIX.len() + 43);
+    name.push_str(COMMAND_FRAGMENT_PREFIX);
+    URL_SAFE_NO_PAD.encode_string(digest, &mut name);
+    (name, digest.into())
 }
 
 fn command_label(title: &str) -> String {

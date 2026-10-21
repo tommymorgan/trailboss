@@ -148,7 +148,11 @@ fn run() -> io::Result<()> {
     );
     let result = run_native_client(remote, executable.as_deref());
     match &result {
-        Ok(()) => tracing::info!(event = "native_client_end", outcome = "detached", "native client ended"),
+        Ok(()) => tracing::info!(
+            event = "native_client_end",
+            outcome = "detached",
+            "native client ended"
+        ),
         Err(error) => tracing::error!(
             event = "native_client_end",
             outcome = "failure",
@@ -163,7 +167,11 @@ fn run_native_client(
     remote: Option<trailboss_runtime::remote::RemoteLaunch>,
     executable: Option<&str>,
 ) -> io::Result<()> {
-    tracing::info!(event = "native_client_transport", phase = "discovery", "selecting client transport");
+    tracing::info!(
+        event = "native_client_transport",
+        phase = "discovery",
+        "selecting client transport"
+    );
     let remote = remote
         .map(|remote| {
             trailboss_runtime::remote::RemoteConnection::connect(
@@ -225,7 +233,14 @@ fn run_client_inner(
     let direct_graphics = host.direct_allowed(remote);
     let mut viewport = terminal::Rect::viewport(cols, rows);
     *phase = "attach";
-    tracing::info!(event = "native_client_attach", phase = "start", cols, rows, direct_graphics, "attaching native client");
+    tracing::info!(
+        event = "native_client_attach",
+        phase = "start",
+        cols,
+        rows,
+        direct_graphics,
+        "attaching native client"
+    );
     let mut client = match Client::attach_graphics(
         path,
         cols,
@@ -243,7 +258,11 @@ fn run_client_inner(
                 ) =>
         {
             *phase = "core_startup";
-            tracing::info!(event = "native_client_attach", phase = "core_startup", "starting local core after unavailable socket");
+            tracing::info!(
+                event = "native_client_attach",
+                phase = "core_startup",
+                "starting local core after unavailable socket"
+            );
             let mut command = Command::new(std::env::current_exe()?);
             command.arg("server");
             if let Some(name) = trailboss_runtime::session::active_name() {
@@ -272,7 +291,12 @@ fn run_client_inner(
                     return Err(io::Error::other(format!("core exited: {status}")));
                 }
                 if Instant::now() >= deadline {
-                    tracing::error!(event = "native_client_attach_failed", phase = "core_startup", timeout_seconds = 15, "local core attach deadline elapsed");
+                    tracing::error!(
+                        event = "native_client_attach_failed",
+                        phase = "core_startup",
+                        timeout_seconds = 15,
+                        "local core attach deadline elapsed"
+                    );
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(io::Error::other("core startup timed out"));
@@ -283,12 +307,20 @@ fn run_client_inner(
         Err(error) => return Err(error),
     };
     *phase = "initial_snapshot";
-    tracing::info!(event = "native_client_attach", phase = "hello_sent", "waiting for initial session snapshot");
+    tracing::info!(
+        event = "native_client_attach",
+        phase = "hello_sent",
+        "waiting for initial session snapshot"
+    );
     // Attaching without a pane is valid: a declaration can offer the first tab.
     while client.boot_id.is_empty() {
         client.receive()?;
     }
-    tracing::info!(event = "native_client_attach", phase = "snapshot_ready", "initial session snapshot received");
+    tracing::info!(
+        event = "native_client_attach",
+        phase = "snapshot_ready",
+        "initial session snapshot received"
+    );
     *phase = "producer";
     if !remote {
         enable_default_producer()?;
@@ -316,9 +348,15 @@ fn run_client_inner(
     let mut declarations = client.declarations.take().unwrap_or_default();
     let mut boot_id = client.boot_id.clone();
     let mut snapshot = client.snapshot.take();
+    if let Some(snapshot) = &snapshot {
+        core.reconcile_tab_history(snapshot);
+    }
     let mut graphics_messages = std::mem::take(&mut client.graphics_messages);
     let (tx, rx) = mpsc::sync_channel(1);
-    tracing::info!(event = "native_client_receiver_start", "starting native receive worker");
+    tracing::info!(
+        event = "native_client_receiver_start",
+        "starting native receive worker"
+    );
     std::thread::spawn(move || {
         let mut last_focus = (
             client.workspace_id.clone(),
@@ -327,7 +365,11 @@ fn run_client_inner(
         );
         loop {
             if let Err(error) = client.receive() {
-                tracing::error!(event = "native_client_receiver_end", reason = "receive_failure", "native receive worker failed");
+                tracing::error!(
+                    event = "native_client_receiver_end",
+                    reason = "receive_failure",
+                    "native receive worker failed"
+                );
                 let _ = tx.send(Err(error));
                 break;
             }
@@ -362,7 +404,11 @@ fn run_client_inner(
                     format_args!("pane={:?}", client.focused_pane_id),
                 );
                 if tx.send(Ok(update)).is_err() {
-                    tracing::info!(event = "native_client_receiver_end", reason = "consumer_closed", "native receive worker stopped after consumer closed");
+                    tracing::info!(
+                        event = "native_client_receiver_end",
+                        reason = "consumer_closed",
+                        "native receive worker stopped after consumer closed"
+                    );
                     break;
                 }
                 trailboss_runtime::render_prof::trace(
@@ -405,16 +451,29 @@ fn run_client_inner(
     };
     let mut next_health_ping = Instant::now() + Duration::from_secs(5);
     *phase = "render_loop";
-    tracing::info!(event = "native_client_render_start", "native render loop started");
+    tracing::info!(
+        event = "native_client_render_start",
+        "native render loop started"
+    );
     loop {
         let now = Instant::now();
         dirty |= core.tick_copy_feedback(now);
         if core.detach_requested {
             *phase = "detach";
-            tracing::info!(event = "native_client_detach", source = "menu", phase = "requested", "native client detach requested");
+            tracing::info!(
+                event = "native_client_detach",
+                source = "menu",
+                phase = "requested",
+                "native client detach requested"
+            );
             renderer.graphics.cleanup(&mut output)?;
             input.detach()?;
-            tracing::info!(event = "native_client_detach", source = "menu", phase = "complete", "native client detached");
+            tracing::info!(
+                event = "native_client_detach",
+                source = "menu",
+                phase = "complete",
+                "native client detached"
+            );
             return Ok(());
         }
         if now >= next_health_ping {
@@ -450,9 +509,6 @@ fn run_client_inner(
             if let Some(next) = next_declarations {
                 declarations = next;
             }
-            if let Some(next) = next_snapshot {
-                snapshot = Some(next);
-            }
             if let Some((workspace, tab, pane)) = session {
                 input.focus_pane_target(pane.as_deref().unwrap_or_default());
                 if surface
@@ -462,6 +518,10 @@ fn run_client_inner(
                     surface = None;
                 }
                 core.update_session(workspace, tab, pane.is_some());
+            }
+            if let Some(next) = next_snapshot {
+                core.reconcile_tab_history(&next);
+                snapshot = Some(next);
             }
             if boot_id != next_boot {
                 renderer.graphics.cleanup(&mut output)?;
@@ -992,10 +1052,20 @@ fn run_client_inner(
                         binding.trigger.is_prefix() && binding.trigger.combo() == combo
                     }) {
                         *phase = "detach";
-                        tracing::info!(event = "native_client_detach", source = "keybinding", phase = "requested", "native client detach requested");
+                        tracing::info!(
+                            event = "native_client_detach",
+                            source = "keybinding",
+                            phase = "requested",
+                            "native client detach requested"
+                        );
                         renderer.graphics.cleanup(&mut output)?;
                         input.detach()?;
-                        tracing::info!(event = "native_client_detach", source = "keybinding", phase = "complete", "native client detached");
+                        tracing::info!(
+                            event = "native_client_detach",
+                            source = "keybinding",
+                            phase = "complete",
+                            "native client detached"
+                        );
                         return Ok(());
                     }
                     if key.code == KeyCode::Char('l') && key.modifiers.is_empty() {
@@ -1015,7 +1085,16 @@ fn run_client_inner(
                         if core.editing() {
                             core.invoke("host:cancel", &Default::default(), None);
                         }
-                        renderer.controls.open_palette(&core, &declarations, None);
+                        let context = snapshot.as_ref().map(|snapshot| {
+                            trailboss_runtime::protocol::widgets::Context {
+                                workspace_id: snapshot.focused_workspace_id.clone(),
+                                tab_id: snapshot.focused_tab_id.clone(),
+                                pane_id: snapshot.focused_pane_id.clone(),
+                            }
+                        });
+                        renderer
+                            .controls
+                            .open_palette(&core, &declarations, context.as_ref());
                         dirty = true;
                         continue;
                     }
@@ -1040,7 +1119,16 @@ fn run_client_inner(
                     if core.editing() {
                         core.invoke("host:cancel", &Default::default(), None);
                     }
-                    renderer.controls.open_palette(&core, &declarations, None);
+                    let context = snapshot.as_ref().map(|snapshot| {
+                        trailboss_runtime::protocol::widgets::Context {
+                            workspace_id: snapshot.focused_workspace_id.clone(),
+                            tab_id: snapshot.focused_tab_id.clone(),
+                            pane_id: snapshot.focused_pane_id.clone(),
+                        }
+                    });
+                    renderer
+                        .controls
+                        .open_palette(&core, &declarations, context.as_ref());
                     dirty = true;
                     continue;
                 }
@@ -1141,6 +1229,7 @@ fn enable_default_producer() -> io::Result<()> {
         ("stock-ui", "tommymorgan.stock-ui"),
         ("agent-tree", "tommymorgan.agent-tree"),
         ("sidebar-menus", "tommymorgan.sidebar-menus"),
+        ("command-palette", "tommymorgan.command-palette"),
     ] {
         let existing = reply["result"]["plugins"].as_array().and_then(|plugins| {
             plugins

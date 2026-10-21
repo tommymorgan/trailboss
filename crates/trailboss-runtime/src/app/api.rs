@@ -105,7 +105,7 @@ impl App {
         let mut worktree_restore_failed = false;
         let ev = match ev {
             AppEvent::AgentRestartIdleCheck { check, respond_to } => {
-                let _ = respond_to.send(self.check_restart_idle_agent(check));
+                let _ = respond_to.send(self.check_restart_idle_agent(*check));
                 return Vec::new();
             }
             AppEvent::AgentRestartIdleFinished {

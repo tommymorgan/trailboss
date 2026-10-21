@@ -12,6 +12,29 @@ Upstream Herdr authorship, license notices, real repository URLs and historical 
 
 The local binary-package recipe is `packaging/trailboss-bin/PKGBUILD`. Current rename verification and package evidence are recorded in [spike-validation.md](spike-validation.md). No human Core, installed launcher, existing release bundle or companion web service was changed by this source cutover.
 
+## Dedicated Core-discovered command palette
+
+The bundled default `command-palette` provider is the separate Rust executable `trailboss-command-palette`, declared by `plugins/command-palette/trailboss-plugin.toml`. It consumes the existing `ui.command.list` catalog and Core-issued, owner-bound command fragments. Stock UI and sidebar menus retain their other declarations without publishing competing bundled palette roots. The Core registry, session API and wire layouts remain unchanged; command-reference encoding and producer-line capacity change as described below.
+
+Build source executables with `cargo build --bins --locked` before starting `target/debug/trailboss`. Source registration launches the dedicated debug executable through its relative manifest path; the binary package installs its compiled executable beside a manifest using `./command-palette`. The package also retains the three compiled Bun producers and does not require Bun at runtime.
+
+The producer resolves its API target once and derives the matching observer socket using Core's API-stem mapping. An inherited `HERDR_SOCKET_PATH` therefore selects both connections, even when an unrelated session or legacy client-only socket is inherited; an explicit `--session` retains the existing API-selection precedence.
+
+The producer groups large catalogs and resource lists into bounded columns without adding menu levels, keeping every supported command searchable instead of invalidating the complete palette at the per-container limit.
+
+Issued command names retain the reserved prefix and encode the full SHA-256 of the typed boot-ID/command-key tuple as unpadded base64url. Names are deterministic within a Core boot and need no mutable lookup registry. Core admits producer lines up to 512 KiB while retaining the separate 2 MiB complete merged-frame limit, including framing overhead. Exceeding either limit rejects the complete publication rather than substituting a partial catalog. Local optimized-native verification exercised a 5,000-action owner catalog: every export resolved, first and last actions executed, and unrelated Core search remained available. Native input witnesses must wait for the client’s publication and completed filtering, not just an observer response or a label already visible in unfiltered results.
+
+F1 and the existing prefix-p shortcut open native search without focusing the sidebar. Named creation, rename and confirmation commands hand off to the shared interaction controller; owner-collected input remains with its owner. Existing immediate creation entries remain immediate. Captured resources and client-local navigation history remain separate. Invalid captured owner workspaces/tabs are omitted. Owner-context wrappers show current workspace, tab and pane labels before invocation, ahead of the command label so a long title cannot hide its target. Separate Label nodes retain Core's bounded, escaped command text without exceeding the per-label limit. Private issued-command identity survives displayed-title collisions; full titles and structured execution identities remain in the catalog.
+
+Resource captions use the same 200-scalar, whole-control-escape display policy as Core command captions. Pane-label changes invalidate the producer's semantic inputs, so renamed targets update both the visible caption and native search without changing their captured IDs.
+
+Shared confirmations render owner-supplied labels and retain Cancel as the initial choice. A refreshed confirmation follows the same unique issued-command locator and captured context; changed confirmation text updates in place, while missing or ambiguous commands close the popup. Confirmation action order, supplying owners and captured targets must remain unchanged, including through referenced fragments; a change closes the popup before another selection can activate. The guard uses the native controller's traversal and geometry, including descendants of actionable rows. Inline and referenced name interactions retain their validation, draft and ordered input/action identities across label-only refreshes. Reordering a form or replacing a focused submit cancels before another activation.
+
+Local runtime verification on October 21, 2026 exercised four source-manifest/native-client cases and the same four cases from an actual `makepkg` extraction: empty-session initialization, passive observation and PTY geometry, both palette shortcuts, configured enabled states and custom-provider priority. The extracted payload ran with Bun absent. Four old/current-Core and original/annotated-producer cases passed through the independent generation-1 consumer. Four supplied compiled Core fixtures added, retitled and removed a command while the candidate consumer artifacts remained unchanged. Reproduction drivers are `tests/support/command_packaged.py`, `command_compatibility.py` and `command_definitions.py`; each requires explicit owned artifact paths and creates isolated sessions.
+
+These local build and extracted-package checks are separate from installed-release and live-session handoff verification.
+
+## Initial vendored snapshot (historical)
 
 Task 1.1 snapshots `/home/tommy/src/agents/herdr` at jj commit `6361885a53ed65628a8ab585695bdcb824d45dca` (observed again immediately before copying). The reference checkout was read-only.
 

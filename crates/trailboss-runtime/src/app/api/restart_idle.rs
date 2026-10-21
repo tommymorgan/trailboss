@@ -293,7 +293,13 @@ fn core_check(
 ) -> Result<(), String> {
     check.expires_at = std::time::Instant::now() + STEP_TIMEOUT;
     let (respond_to, rx) = std::sync::mpsc::channel();
-    send_event(tx, AppEvent::AgentRestartIdleCheck { check, respond_to })?;
+    send_event(
+        tx,
+        AppEvent::AgentRestartIdleCheck {
+            check: Box::new(check),
+            respond_to,
+        },
+    )?;
     rx.recv_timeout(STEP_TIMEOUT)
         .map_err(|_| "core_check_timeout".to_owned())?
 }
@@ -763,7 +769,12 @@ fn control_request(
     prepared: &Prepared,
     request: serde_json::Value,
 ) -> Result<ControlReply, String> {
-    control_roundtrip(&ControlTarget::from(prepared), request, FRAME_LIMIT, STEP_TIMEOUT)
+    control_roundtrip(
+        &ControlTarget::from(prepared),
+        request,
+        FRAME_LIMIT,
+        STEP_TIMEOUT,
+    )
 }
 
 /// One newline-framed request/response exchange with a reporter control
