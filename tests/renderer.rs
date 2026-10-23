@@ -1079,7 +1079,7 @@ fn tab_cycle_hint_stays_beside_copy_feedback_and_dismissal_restores_the_frame() 
         core.copy_dispatched(std::time::Instant::now());
         paint(&mut renderer, &mut screen, &core);
         let copy_only = sidebar_text(&screen);
-        assert_eq!(core.cycle_tab(&snapshot), Some("a"));
+        assert_eq!(core.cycle_tab(&snapshot, false), Some("a"));
         paint(&mut renderer, &mut screen, &core);
         let both = sidebar_text(&screen);
         let copy_y = copy_only

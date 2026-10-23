@@ -756,7 +756,8 @@ fn run_client_inner(
         let ordinary_input = match &event {
             Event::Key(key) => {
                 key.kind != KeyEventKind::Release
-                    && !(key.code == KeyCode::F(6) && key.modifiers.is_empty())
+                    && !(key.code == KeyCode::F(6)
+                        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT))
             }
             Event::Paste(_) => true,
             _ => false,
@@ -1124,7 +1125,7 @@ fn run_client_inner(
                     if key.code == KeyCode::Char('l') && key.modifiers.is_empty() {
                         if let Some(snapshot) = &snapshot {
                             if let trailboss::core::Effect::Request { params, .. } =
-                                core.request_tab_cycle(snapshot)
+                                core.request_tab_cycle(snapshot, false)
                             {
                                 input.request_tab_cycle(
                                     &boot_id,

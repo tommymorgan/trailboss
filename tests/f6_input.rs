@@ -8,6 +8,20 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn adjacent_f6_typing_and_f6_delivers_typing_once_to_preview_then_selects_previous_tab() {
+    check_adjacent_input("\x1b[17~y\x1b[17~", "B", "C");
+}
+
+#[test]
+fn reverse_and_mixed_direction_bursts_preserve_adjacent_typing() {
+    for (keys, typed_tab, final_tab) in [
+        ("\x1b[17;2~y\x1b[17~", "A", "C"),
+        ("\x1b[17~\x1b[17;2~y\x1b[17;2~", "C", "A"),
+    ] {
+        check_adjacent_input(keys, typed_tab, final_tab);
+    }
+}
+
+fn check_adjacent_input(keys: &str, typed_tab: &str, final_tab: &str) {
     let core = support::Core::new();
     let first = core.request(
         "workspace.create",
@@ -67,31 +81,42 @@ fn adjacent_f6_typing_and_f6_delivers_typing_once_to_preview_then_selects_previo
             created["tab"]["tab_id"],
         );
     }
-    // One outer-PTY write: do not wait for a preview acknowledgement between
-    // F6, ordinary typing, and the next F6. Typing must finish B's visit before
-    // the new burst starts from B's committed MRU order and selects C.
-    native.text("\x1b[17~y\x1b[17~");
+    // One outer-PTY write keeps direction changes and typing adjacent while
+    // focus replies may still be outstanding.
+    native.text(keys);
+    let final_id = tabs[["A", "B", "C"]
+        .iter()
+        .position(|label| *label == final_tab)
+        .unwrap()]["tab"]["tab_id"]
+        .clone();
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
         let focused =
             core.request("session.snapshot", json!({}))["snapshot"]["focused_tab_id"].clone();
-        let bytes = std::fs::read(core.home.join("input-B")).unwrap_or_default();
-        if focused == third["tab"]["tab_id"] && bytes == b"y" {
+        let bytes = std::fs::read(core.home.join(format!("input-{typed_tab}"))).unwrap_or_default();
+        if focused == final_id && bytes == b"y" {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "adjacent F6/typing/F6 lost or misrouted input: focus={focused}, B={bytes:?}"
+            "adjacent directional F6 lost or misrouted input: focus={focused}, {typed_tab}={bytes:?}"
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    native.wait(|rows| {
-        rows.iter()
-            .any(|row| row.trim_end().ends_with("F6_READY_C"))
-    });
-    assert_eq!(std::fs::read(core.home.join("input-A")).unwrap(), b"");
-    assert_eq!(std::fs::read(core.home.join("input-B")).unwrap(), b"y");
-    assert_eq!(std::fs::read(core.home.join("input-C")).unwrap(), b"");
+    let marker = format!("F6_READY_{final_tab}");
+    native.wait(|rows| rows.iter().any(|row| row.trim_end().ends_with(&marker)));
+    for label in ["A", "B", "C"] {
+        let expected = if label == typed_tab {
+            b"y".as_slice()
+        } else {
+            b"".as_slice()
+        };
+        assert_eq!(
+            std::fs::read(core.home.join(format!("input-{label}"))).unwrap(),
+            expected,
+            "input delivered to the wrong tab: {label}"
+        );
+    }
 
     native.text("\x02q");
     let deadline = Instant::now() + Duration::from_secs(3);

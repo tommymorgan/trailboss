@@ -60,17 +60,17 @@ fn confirm(core: &mut Core, tab: &str) {
 fn confirmed_previews_cycle_c_to_b_to_a_across_spaces_without_toggling() {
     let mut core = visited();
     assert_eq!(
-        core.cycle_tab(&snapshot(Some("C"), &["A", "B", "C"])),
+        core.cycle_tab(&snapshot(Some("C"), &["A", "B", "C"]), false),
         Some("B")
     );
     visit(&mut core, "B");
     assert_eq!(
-        core.cycle_tab(&snapshot(Some("B"), &["A", "B", "C"])),
+        core.cycle_tab(&snapshot(Some("B"), &["A", "B", "C"]), false),
         Some("A")
     );
     visit(&mut core, "A");
     assert_eq!(
-        core.cycle_tab(&snapshot(Some("A"), &["A", "B", "C"])),
+        core.cycle_tab(&snapshot(Some("A"), &["A", "B", "C"]), false),
         Some("C")
     );
 }
@@ -79,14 +79,20 @@ fn confirmed_previews_cycle_c_to_b_to_a_across_spaces_without_toggling() {
 fn cycle_skips_candidates_closed_after_start_and_wraps_to_live_origin() {
     let mut core = visited();
     assert_eq!(
-        core.cycle_tab(&snapshot(Some("C"), &["A", "B", "C"])),
+        core.cycle_tab(&snapshot(Some("C"), &["A", "B", "C"]), false),
         Some("B")
     );
     visit(&mut core, "B");
-    assert_eq!(core.cycle_tab(&snapshot(Some("B"), &["B", "C"])), Some("C"));
+    assert_eq!(
+        core.cycle_tab(&snapshot(Some("B"), &["B", "C"]), false),
+        Some("C")
+    );
     visit(&mut core, "C");
-    assert_eq!(core.cycle_tab(&snapshot(Some("C"), &["B", "C"])), Some("B"));
-    assert_eq!(core.cycle_tab(&snapshot(None, &[])), None);
+    assert_eq!(
+        core.cycle_tab(&snapshot(Some("C"), &["B", "C"]), false),
+        Some("B")
+    );
+    assert_eq!(core.cycle_tab(&snapshot(None, &[]), false), None);
     assert_eq!(core.tab_cycle_hint(), None);
 }
 
@@ -94,25 +100,28 @@ fn cycle_skips_candidates_closed_after_start_and_wraps_to_live_origin() {
 fn finishing_commits_final_selection_not_intermediate_previews_to_fresh_mru_order() {
     let mut core = visited();
     let mut s = snapshot(Some("C"), &["A", "B", "C"]);
-    assert_eq!(core.cycle_tab(&s), Some("B"));
+    assert_eq!(core.cycle_tab(&s, false), Some("B"));
     visit(&mut core, "B");
-    assert_eq!(core.cycle_tab(&s), Some("A"));
+    assert_eq!(core.cycle_tab(&s, false), Some("A"));
     visit(&mut core, "A");
     s.focused_tab_id = Some("A".into());
     assert!(core.finish_tab_cycle());
     assert_eq!(core.tab_cycle_hint(), None);
     assert!(!core.finish_tab_cycle());
-    assert_eq!(core.cycle_tab(&s), Some("C"));
+    assert_eq!(core.cycle_tab(&s, false), Some("C"));
     visit(&mut core, "C");
-    assert_eq!(core.cycle_tab(&s), Some("B"));
+    assert_eq!(core.cycle_tab(&s, false), Some("B"));
 }
 
 #[test]
 fn delayed_preview_confirmations_after_finish_do_not_reorder_final_history() {
     let mut core = visited();
     let s = snapshot(Some("C"), &["A", "B", "C"]);
-    focus_request(core.request_tab_cycle(&s), "B");
-    assert!(matches!(core.request_tab_cycle(&s), Effect::Consumed));
+    focus_request(core.request_tab_cycle(&s, false), "B");
+    assert!(matches!(
+        core.request_tab_cycle(&s, false),
+        Effect::Consumed
+    ));
     assert!(core.finish_tab_cycle());
     visit(&mut core, "B");
     focus_request(acknowledge(&mut core, &s).unwrap(), "A");
@@ -127,7 +136,7 @@ fn delayed_preview_confirmations_after_finish_do_not_reorder_final_history() {
 fn bare_l_and_another_prefix_l_both_advance_the_same_frozen_cycle() {
     let mut core = visited();
     let s = snapshot(Some("C"), &["A", "B", "C"]);
-    assert_eq!(core.cycle_tab(&s), Some("B"));
+    assert_eq!(core.cycle_tab(&s, false), Some("B"));
     visit(&mut core, "B");
     focus_request(
         core.tab_cycle_key(
@@ -173,7 +182,7 @@ fn enter_and_escape_finish_and_consume_but_other_keys_finish_and_pass_through() 
         KeyCode::Char('q'),
     ] {
         let mut core = visited();
-        assert_eq!(core.cycle_tab(&s), Some("B"));
+        assert_eq!(core.cycle_tab(&s, false), Some("B"));
         let effect = core.tab_cycle_key(
             KeyEvent::new(code, KeyModifiers::NONE),
             false,
@@ -192,14 +201,14 @@ fn enter_and_escape_finish_and_consume_but_other_keys_finish_and_pass_through() 
 #[test]
 fn no_history_single_live_tab_and_boot_reset_do_not_enter_cycle_mode() {
     let mut core = Core::default();
-    assert_eq!(core.cycle_tab(&snapshot(None, &[])), None);
+    assert_eq!(core.cycle_tab(&snapshot(None, &[]), false), None);
     visit(&mut core, "A");
-    assert_eq!(core.cycle_tab(&snapshot(Some("A"), &["A"])), None);
+    assert_eq!(core.cycle_tab(&snapshot(Some("A"), &["A"]), false), None);
     visit(&mut core, "B");
-    assert_eq!(core.cycle_tab(&snapshot(Some("B"), &["B"])), None);
+    assert_eq!(core.cycle_tab(&snapshot(Some("B"), &["B"]), false), None);
     visit(&mut core, "C");
     assert_eq!(
-        core.cycle_tab(&snapshot(Some("C"), &["A", "B", "C"])),
+        core.cycle_tab(&snapshot(Some("C"), &["A", "B", "C"]), false),
         Some("B")
     );
     core.clear_tab_history();
@@ -208,9 +217,15 @@ fn no_history_single_live_tab_and_boot_reset_do_not_enter_cycle_mode() {
         core.previous_tab(&snapshot(Some("C"), &["A", "B", "C"])),
         None
     );
-    assert_eq!(core.cycle_tab(&snapshot(Some("C"), &["A", "B", "C"])), None);
+    assert_eq!(
+        core.cycle_tab(&snapshot(Some("C"), &["A", "B", "C"]), false),
+        None
+    );
     visit(&mut core, "D");
-    assert_eq!(core.cycle_tab(&snapshot(Some("D"), &["C", "D"])), None);
+    assert_eq!(
+        core.cycle_tab(&snapshot(Some("D"), &["C", "D"]), false),
+        None
+    );
 }
 
 #[test]
@@ -269,6 +284,46 @@ fn direct_f6_previews_the_frozen_mru_order_without_a_prefix() {
 }
 
 #[test]
+fn shift_f6_reverses_the_same_frozen_burst_and_resets_its_deadline() {
+    let mut core = visited();
+    let mut s = snapshot(Some("C"), &["A", "B", "C"]);
+    let start = Instant::now();
+    for (modifiers, tab, millis) in [
+        (KeyModifiers::SHIFT, "A", 0),
+        (KeyModifiers::SHIFT, "B", 200),
+        (KeyModifiers::NONE, "A", 400),
+        (KeyModifiers::NONE, "C", 600),
+        (KeyModifiers::SHIFT, "A", 1200),
+    ] {
+        focus_request(
+            core.tab_cycle_key(
+                KeyEvent::new(KeyCode::F(6), modifiers),
+                false,
+                Some(&s),
+                start + Duration::from_millis(millis),
+            )
+            .expect("both F6 directions must navigate without a prefix"),
+            tab,
+        );
+        confirm(&mut core, tab);
+        s.focused_tab_id = Some(tab.into());
+    }
+    assert!(!core.tick_tab_cycle(start + Duration::from_millis(1400)));
+    assert!(!core.tick_tab_cycle(start + Duration::from_millis(1999)));
+    assert!(core.tick_tab_cycle(start + Duration::from_millis(2000)));
+    focus_request(
+        core.tab_cycle_key(
+            KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE),
+            false,
+            Some(&s),
+            start + Duration::from_secs(3),
+        )
+        .unwrap(),
+        "C",
+    );
+}
+
+#[test]
 fn last_f6_resets_idle_commit_and_the_next_burst_uses_only_the_final_visit() {
     let mut core = visited();
     let mut s = snapshot(Some("C"), &["A", "B", "C"]);
@@ -313,7 +368,6 @@ fn f6_never_captures_normal_input_or_modified_function_keys() {
         KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
         KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
         KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
-        KeyEvent::new(KeyCode::F(6), KeyModifiers::SHIFT),
         KeyEvent::new(KeyCode::F(6), KeyModifiers::CONTROL),
         KeyEvent::new(KeyCode::F(6), KeyModifiers::ALT),
     ] {

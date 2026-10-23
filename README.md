@@ -89,9 +89,10 @@ plugin wrapper that would execute a different Core operation.
 ## Recent-tab switching
 
 Press **F6** to switch immediately to the previously visited tab, including
-tabs in other workspaces. Repeated presses cycle through a fixed snapshot of
-recent visits. After **800 ms without another F6**, switching finishes and
-only the final tab moves to the front of the recent-tab order.
+tabs in other workspaces. **Shift+F6** cycles in the opposite direction.
+Both keys traverse the same fixed snapshot of recent visits. After
+**800 ms without either key**, switching finishes and only the final tab
+moves to the front of the recent-tab order.
 
 Normal typing, paste and clicks continue normally; Enter or Escape is not
 required to finish. Closed tabs are skipped, and a later deliberate tab

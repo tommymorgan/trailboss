@@ -185,6 +185,7 @@ impl Core {
     pub fn cycle_tab(
         &mut self,
         snapshot: &trailboss_runtime::protocol::ClientShellSnapshot,
+        reverse: bool,
     ) -> Option<&str> {
         if self.tab_cycle_cursor.is_none() {
             self.tab_cycle_order.clone_from(&self.recent_tabs);
@@ -214,7 +215,11 @@ impl Core {
         }
         let cursor = self.tab_cycle_cursor.unwrap();
         for step in 1..=self.tab_cycle_order.len() {
-            let next = (cursor + step) % self.tab_cycle_order.len();
+            let next = if reverse {
+                (cursor + self.tab_cycle_order.len() - step) % self.tab_cycle_order.len()
+            } else {
+                (cursor + step) % self.tab_cycle_order.len()
+            };
             if snapshot
                 .tabs
                 .iter()
@@ -308,8 +313,9 @@ impl Core {
     pub fn request_tab_cycle(
         &mut self,
         snapshot: &trailboss_runtime::protocol::ClientShellSnapshot,
+        reverse: bool,
     ) -> Effect {
-        if self.cycle_tab(snapshot).is_none() {
+        if self.cycle_tab(snapshot, reverse).is_none() {
             return Effect::Consumed;
         }
         self.tab_cycle_focus_effect()
@@ -372,10 +378,12 @@ impl Core {
         snapshot: Option<&trailboss_runtime::protocol::ClientShellSnapshot>,
         now: Instant,
     ) -> Option<Effect> {
-        use crossterm::event::KeyCode;
-        if key.modifiers.is_empty() && key.code == KeyCode::F(6) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        if key.code == KeyCode::F(6)
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+        {
             let effect = snapshot.map_or(Effect::Consumed, |snapshot| {
-                self.request_tab_cycle(snapshot)
+                self.request_tab_cycle(snapshot, key.modifiers == KeyModifiers::SHIFT)
             });
             self.tab_cycle_deadline = self
                 .tab_cycle_cursor
@@ -391,7 +399,7 @@ impl Core {
         }
         if key.modifiers.is_empty() && key.code == KeyCode::Char('l') {
             return Some(snapshot.map_or(Effect::Consumed, |snapshot| {
-                self.request_tab_cycle(snapshot)
+                self.request_tab_cycle(snapshot, false)
             }));
         }
         self.finish_tab_cycle();
@@ -401,7 +409,7 @@ impl Core {
     pub fn tab_cycle_hint(&self) -> Option<&'static str> {
         self.tab_cycle_cursor.map(|_| {
             if self.tab_cycle_deadline.is_some() {
-                "MRU: F6 next"
+                "MRU: F6 next · Shift+F6 previous"
             } else {
                 "MRU: L next · Enter/Esc done"
             }
