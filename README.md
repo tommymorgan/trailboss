@@ -9,7 +9,7 @@ the supported product; expect this line to diverge freely.
 
 
 <p align="center">
-  <img src="docs/assets/trailboss-demo.png" alt="Trailboss: agent sidebar with per-agent panes alongside a shell workspace" width="820">
+  <img src="docs/assets/trailboss-demo.png" alt="Trailboss with its workspace and agent sidebar beside an active OMP conversation" width="820">
 </p>
 
 ## Why my own fork
@@ -85,6 +85,20 @@ wrapper; consumers must not substitute a direct invocation.
 The same unresolved behavior applies when a plugin declares a reserved Core
 action ID: legacy registration remains intact, but discovery never issues a
 plugin wrapper that would execute a different Core operation.
+
+## Recent-tab switching
+
+Press **F6** to switch immediately to the previously visited tab, including
+tabs in other workspaces. Repeated presses cycle through a fixed snapshot of
+recent visits. After **800 ms without another F6**, switching finishes and
+only the final tab moves to the front of the recent-tab order.
+
+Normal typing, paste and clicks continue normally; Enter or Escape is not
+required to finish. Closed tabs are skipped, and a later deliberate tab
+selection cancels the pending cycle. History belongs to the attached client
+and is not retained across detach/reattach.
+
+The existing Ctrl-B, L switcher retains its explicit Enter/Escape finish.
 
 ## Thanks
 

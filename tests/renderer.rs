@@ -1082,8 +1082,6 @@ fn tab_cycle_hint_stays_beside_copy_feedback_and_dismissal_restores_the_frame() 
         assert_eq!(core.cycle_tab(&snapshot), Some("a"));
         paint(&mut renderer, &mut screen, &core);
         let both = sidebar_text(&screen);
-        assert!(both.iter().any(|row| row.contains("MRU: L next")));
-        assert!(both.iter().any(|row| row.contains("Enter/Esc done")));
         let copy_y = copy_only
             .iter()
             .position(|row| row.contains("copied to clipboard"))

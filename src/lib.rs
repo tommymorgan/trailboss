@@ -51,6 +51,7 @@ pub struct Client {
     last_message_kind: &'static str,
     raw: Option<protocol::PaneSurfaceFrame>,
     pub graphics_messages: Vec<ServerMessage>,
+    pub tab_cycle_response: Option<ServerMessage>,
     pub surface_changed: bool,
     pub workspace_id: Option<String>,
     pub focused_pane_id: Option<String>,
@@ -147,6 +148,7 @@ impl Client {
             last_message_kind: "none",
             raw: None,
             graphics_messages: Vec::new(),
+            tab_cycle_response: None,
             surface_changed: false,
             workspace_id: None,
             focused_pane_id: None,
@@ -335,6 +337,12 @@ impl Client {
                 self.focused_pane_id.clone_from(&s.focused_pane_id);
                 self.snapshot = Some(s);
             }
+            message @ ServerMessage::ClientShellEndpointResponseChunk { .. }
+                if matches!(&message, ServerMessage::ClientShellEndpointResponseChunk { request_id, .. }
+                    if request_id.starts_with("tab-cycle-")) =>
+            {
+                self.tab_cycle_response = Some(message);
+            }
             ServerMessage::Welcome { error: Some(e), .. }
             | ServerMessage::ClientShellError { message: e } => return Err(error(e)),
             message @ (ServerMessage::GraphicsFile { .. }
@@ -475,9 +483,36 @@ impl Input {
     ) -> io::Result<()> {
         match core.invoke(action, context, None) {
             core::Effect::Consumed => Ok(()),
-            core::Effect::Request { method, params } => self.request(boot_id, method, params),
+            core::Effect::Request { method, params } => {
+                self.dispatch_request(core, boot_id, method, params)
+            }
             core::Effect::Plugin => self.invoke(boot_id, plugin, action, context),
         }
+    }
+    pub fn dispatch_request(
+        &mut self,
+        core: &mut core::Core,
+        boot_id: &str,
+        method: &str,
+        mut params: serde_json::Value,
+    ) -> io::Result<()> {
+        if method != "tab.focus" {
+            return self.request(boot_id, method, params);
+        }
+        let Some(serde_json::Value::String(tab)) = params
+            .as_object_mut()
+            .and_then(|params| params.remove("tab_id"))
+        else {
+            return Err(error("tab focus target is missing"));
+        };
+        if let core::Effect::Request { params, .. } = core.request_tab_focus(tab) {
+            self.request_tab_cycle(
+                boot_id,
+                core.tab_cycle_request_id().expect("focus request identity"),
+                params,
+            )?;
+        }
+        Ok(())
     }
     pub fn dispatch_text(
         &mut self,
@@ -558,6 +593,22 @@ impl Input {
             },
         )
         .map_err(error)
+    }
+    pub fn request_tab_cycle(
+        &mut self,
+        boot_id: &str,
+        request_id: u64,
+        params: serde_json::Value,
+    ) -> io::Result<()> {
+        let request = serde_json::json!({
+            "id": format!("tab-cycle-{request_id}"),
+            "method": "tab.focus",
+            "params": params,
+        });
+        self.send(&ClientMessage::ClientShellEndpointRequest {
+            boot_id: boot_id.to_owned(),
+            request: request.to_string(),
+        })
     }
     pub fn dispatch_key(
         &mut self,
@@ -848,6 +899,7 @@ mod tests {
                 last_message_kind: "none",
                 raw: None,
                 graphics_messages: Vec::new(),
+                tab_cycle_response: None,
                 surface_changed: false,
                 workspace_id: None,
                 focused_pane_id: None,

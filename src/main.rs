@@ -388,6 +388,7 @@ fn run_client_inner(
                 || client.declarations.is_some()
                 || focus_update.is_some()
                 || client.snapshot.is_some()
+                || client.tab_cycle_response.is_some()
                 || !client.graphics_messages.is_empty()
             {
                 let update = (
@@ -398,6 +399,7 @@ fn run_client_inner(
                     client.snapshot.take(),
                     std::mem::take(&mut client.graphics_messages),
                     std::mem::take(&mut client.surface_changed),
+                    client.tab_cycle_response.take(),
                 );
                 trailboss_runtime::render_prof::trace(
                     "client.update.send_start",
@@ -443,6 +445,7 @@ fn run_client_inner(
     let mut pointer = None;
     let mut resize_cursor = None;
     let mut pointer_dirty = true;
+    let mut pending_input = None;
     // Match the existing endpoint health probe cadence. Quiet native sessions
     // must keep the remote bridge alive without input or redraws.
     let health_ping = trailboss_runtime::protocol::ClientMessage::EndpointControl {
@@ -489,6 +492,7 @@ fn run_client_inner(
                 next_snapshot,
                 next_graphics,
                 surface_changed,
+                tab_cycle_response,
             ) = update?;
             if boot_id != next_boot {
                 core.clear_tab_history();
@@ -523,6 +527,27 @@ fn run_client_inner(
                 core.reconcile_tab_history(&next);
                 snapshot = Some(next);
             }
+            if let Some(
+                trailboss_runtime::protocol::ServerMessage::ClientShellEndpointResponseChunk {
+                    boot_id: response_boot,
+                    request_id,
+                    final_chunk,
+                    data,
+                },
+            ) = tab_cycle_response
+            {
+                if response_boot == next_boot {
+                    if let Some(trailboss::core::Effect::Request { params, .. }) =
+                        core.tab_cycle_response(&request_id, final_chunk, &data, snapshot.as_ref())
+                    {
+                        input.request_tab_cycle(
+                            &next_boot,
+                            core.tab_cycle_request_id().expect("cycle request identity"),
+                            params,
+                        )?;
+                    }
+                }
+            }
             if boot_id != next_boot {
                 renderer.graphics.cleanup(&mut output)?;
                 host.reset();
@@ -538,6 +563,7 @@ fn run_client_inner(
             boot_id = next_boot;
             dirty = true;
         }
+        dirty |= core.tick_tab_cycle(Instant::now());
         if let Some(surface) = &surface {
             renderer
                 .graphics
@@ -684,7 +710,15 @@ fn run_client_inner(
             // cancellation in the existing resize handler.
             dirty = true;
         }
-        let event = host.poll(Duration::from_millis(16))?;
+        let event = if pending_input.is_some() {
+            if !core.tab_focus_settled() {
+                std::thread::sleep(Duration::from_millis(16));
+                continue;
+            }
+            pending_input.take()
+        } else {
+            host.poll(Duration::from_millis(16))?
+        };
         while let Some(mut reply) = host.take_reply() {
             if let trailboss_runtime::protocol::ClientMessage::GraphicsTransmissionResult {
                 transfer_id,
@@ -719,6 +753,19 @@ fn run_client_inner(
         let Some(event) = event else {
             continue;
         };
+        let ordinary_input = match &event {
+            Event::Key(key) => {
+                key.kind != KeyEventKind::Release
+                    && !(key.code == KeyCode::F(6) && key.modifiers.is_empty())
+            }
+            Event::Paste(_) => true,
+            _ => false,
+        };
+        if ordinary_input && !core.tab_focus_settled() {
+            dirty |= core.finish_tab_cycle();
+            pending_input = Some(event);
+            continue;
+        }
         pointer_dirty = true;
         match &event {
             Event::Mouse(mouse) => pointer = Some((mouse.column, mouse.row)),
@@ -730,7 +777,7 @@ fn run_client_inner(
             Event::Mouse(mouse) => mouse.kind != MouseEventKind::Moved,
             _ => false,
         };
-        if ends_tab_cycle && core.finish_tab_cycle() {
+        if ends_tab_cycle && core.interrupt_tab_cycle() {
             core.prefix_active = false;
             dirty = true;
         }
@@ -1037,10 +1084,16 @@ fn run_client_inner(
                 selection.take();
                 let combo = (key.code, key.modifiers);
                 let is_prefix = prefix_keys.contains(&combo);
-                if let Some(effect) = core.tab_cycle_key(key, is_prefix, snapshot.as_ref()) {
+                if let Some(effect) =
+                    core.tab_cycle_key(key, is_prefix, snapshot.as_ref(), Instant::now())
+                {
                     core.prefix_active = false;
-                    if let trailboss::core::Effect::Request { method, params } = effect {
-                        input.request(&boot_id, method, params)?;
+                    if let trailboss::core::Effect::Request { params, .. } = effect {
+                        input.request_tab_cycle(
+                            &boot_id,
+                            core.tab_cycle_request_id().expect("cycle request identity"),
+                            params,
+                        )?;
                     }
                     dirty = true;
                     continue;
@@ -1070,11 +1123,13 @@ fn run_client_inner(
                     }
                     if key.code == KeyCode::Char('l') && key.modifiers.is_empty() {
                         if let Some(snapshot) = &snapshot {
-                            if let Some(tab) = core.cycle_tab(snapshot) {
-                                input.request(
+                            if let trailboss::core::Effect::Request { params, .. } =
+                                core.request_tab_cycle(snapshot)
+                            {
+                                input.request_tab_cycle(
                                     &boot_id,
-                                    "tab.focus",
-                                    serde_json::json!({"tab_id": tab}),
+                                    core.tab_cycle_request_id().expect("cycle request identity"),
+                                    params,
                                 )?;
                             }
                         }
@@ -1176,7 +1231,7 @@ fn apply_menu_response(
             match core.prepare_palette(&action.action, &action.context) {
                 trailboss::core::Effect::Consumed => {}
                 trailboss::core::Effect::Request { method, params } => {
-                    input.request(boot_id, method, params)?
+                    input.dispatch_request(core, boot_id, method, params)?
                 }
                 trailboss::core::Effect::Plugin => {
                     input.invoke(boot_id, &action.plugin, &action.action, &action.context)?
@@ -1188,7 +1243,7 @@ fn apply_menu_response(
             match core.invoke(&action.action, &action.context, snapshot) {
                 trailboss::core::Effect::Consumed => {}
                 trailboss::core::Effect::Request { method, params } => {
-                    input.request(boot_id, method, params)?;
+                    input.dispatch_request(core, boot_id, method, params)?;
                 }
                 trailboss::core::Effect::Plugin => {
                     input.invoke(boot_id, &action.plugin, &action.action, &action.context)?;

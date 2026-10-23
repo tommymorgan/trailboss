@@ -19,6 +19,12 @@ enum Interaction {
     },
     NewSpace,
 }
+#[derive(Debug)]
+struct TabFocusRequest {
+    id: u64,
+    tab: String,
+    cancelled: bool,
+}
 #[derive(Default, Debug)]
 pub struct Core {
     interaction: Interaction,
@@ -31,7 +37,12 @@ pub struct Core {
     recent_tabs: Vec<String>,
     tab_cycle_order: Vec<String>,
     tab_cycle_cursor: Option<usize>,
-    finished_cycle_target: Option<String>,
+    tab_cycle_commit: Option<String>,
+    tab_focus_request: Option<TabFocusRequest>,
+    tab_focus_sequence: u64,
+    tab_focus_response: Vec<u8>,
+    completed_tab_focus: Option<String>,
+    tab_cycle_deadline: Option<Instant>,
     copy_feedback_deadline: Option<Instant>,
     require_name: bool,
 }
@@ -81,12 +92,24 @@ impl Core {
         tab: Option<String>,
         has_pane: bool,
     ) {
-        // Preview confirmations must not reorder the frozen traversal or MRU history.
-        let pending = self.finished_cycle_target.as_ref();
-        if self.tab_cycle_cursor.is_none()
-            && pending.is_none_or(|target| Some(target) == tab.as_ref())
-        {
-            self.finished_cycle_target = None;
+        let preview = self
+            .tab_focus_request
+            .as_ref()
+            .is_some_and(|request| Some(&request.tab) == tab.as_ref())
+            || self
+                .completed_tab_focus
+                .as_ref()
+                .is_some_and(|id| Some(id) == tab.as_ref())
+            || (self.tab_focus_request.is_none()
+                && self.completed_tab_focus.is_none()
+                && self
+                    .tab_cycle_order
+                    .iter()
+                    .any(|id| Some(id) == tab.as_ref()));
+        if self.focused_tab_id != tab && !preview {
+            self.cancel_tab_cycle();
+        }
+        if self.tab_cycle_cursor.is_none() && self.tab_cycle_commit.is_none() {
             if let Some(current) = &tab {
                 if let Some(index) = self.recent_tabs.iter().position(|id| id == current) {
                     self.recent_tabs[..=index].rotate_right(1);
@@ -101,9 +124,20 @@ impl Core {
     }
     pub fn clear_tab_history(&mut self) {
         self.recent_tabs.clear();
+        self.cancel_tab_cycle();
+        self.tab_focus_request = None;
+        self.tab_focus_response.clear();
+    }
+    fn cancel_tab_cycle(&mut self) {
         self.tab_cycle_order.clear();
         self.tab_cycle_cursor = None;
-        self.finished_cycle_target = None;
+        self.tab_cycle_deadline = None;
+        self.tab_cycle_commit = None;
+        // Cancel intent, not the server's outstanding command lease.
+        if let Some(request) = &mut self.tab_focus_request {
+            request.cancelled = true;
+        }
+        self.completed_tab_focus = None;
     }
     /// Discard closed visits when this client's live resource snapshot changes.
     pub fn reconcile_tab_history(
@@ -112,6 +146,22 @@ impl Core {
     ) {
         self.recent_tabs
             .retain(|id| snapshot.tabs.iter().any(|tab| &tab.tab_id == id));
+        let selected = self
+            .tab_cycle_cursor
+            .map(|cursor| &self.tab_cycle_order[cursor])
+            .or(self.tab_cycle_commit.as_ref());
+        if selected.is_some_and(|id| !snapshot.tabs.iter().any(|tab| &tab.tab_id == id)) {
+            self.cancel_tab_cycle();
+        }
+        if self.tab_focus_request.is_none()
+            && self
+                .completed_tab_focus
+                .as_ref()
+                .is_some_and(|tab| snapshot.focused_tab_id.as_ref() != Some(tab))
+        {
+            self.cancel_tab_cycle();
+            self.commit_current_tab_selection();
+        }
     }
     pub(crate) fn has_previous_tab(&self) -> bool {
         self.recent_tabs
@@ -140,13 +190,19 @@ impl Core {
             self.tab_cycle_order.clone_from(&self.recent_tabs);
             self.tab_cycle_order
                 .retain(|id| snapshot.tabs.iter().any(|tab| &tab.tab_id == id));
+            if let Some(selected) = &self.tab_cycle_commit {
+                if let Some(index) = self.tab_cycle_order.iter().position(|id| id == selected) {
+                    self.tab_cycle_order[..=index].rotate_right(1);
+                }
+            }
             if self.tab_cycle_order.len() < 2 {
                 self.tab_cycle_order.clear();
                 return None;
             }
             let current = self
-                .finished_cycle_target
+                .tab_cycle_commit
                 .as_ref()
+                .or(self.completed_tab_focus.as_ref())
                 .or(self.focused_tab_id.as_ref());
             self.tab_cycle_cursor = Some(
                 self.tab_cycle_order
@@ -154,7 +210,7 @@ impl Core {
                     .position(|id| Some(id) == current)
                     .unwrap_or(0),
             );
-            self.finished_cycle_target = None;
+            self.tab_cycle_commit = None;
         }
         let cursor = self.tab_cycle_cursor.unwrap();
         for step in 1..=self.tab_cycle_order.len() {
@@ -168,53 +224,188 @@ impl Core {
                 return Some(&self.tab_cycle_order[next]);
             }
         }
-        self.tab_cycle_cursor = None;
-        self.tab_cycle_order.clear();
-        self.finished_cycle_target = None;
+        self.cancel_tab_cycle();
         None
     }
-    /// Commit only the final preview to MRU; pending earlier confirmations stay previews.
+    /// End navigation now; an in-flight request must succeed before history settles.
     pub fn finish_tab_cycle(&mut self) -> bool {
+        self.tab_cycle_deadline = None;
         let Some(cursor) = self.tab_cycle_cursor.take() else {
             return false;
         };
         let selected = self.tab_cycle_order.swap_remove(cursor);
-        if let Some(index) = self.recent_tabs.iter().position(|id| id == &selected) {
-            self.recent_tabs[..=index].rotate_right(1);
+        if self.tab_focus_request.is_some() {
+            self.tab_cycle_commit = Some(selected);
+        } else {
+            self.commit_tab_selection(&selected);
         }
-        self.finished_cycle_target =
-            (self.focused_tab_id.as_ref() != Some(&selected)).then_some(selected);
         self.tab_cycle_order.clear();
         true
     }
-    /// Cycle keys consume only navigation and explicit finish; other input passes through.
+    fn commit_tab_selection(&mut self, selected: &str) {
+        if let Some(index) = self.recent_tabs.iter().position(|id| id == selected) {
+            self.recent_tabs[..=index].rotate_right(1);
+        }
+    }
+    fn commit_current_tab_selection(&mut self) {
+        if let Some(index) = self
+            .recent_tabs
+            .iter()
+            .position(|id| Some(id) == self.focused_tab_id.as_ref())
+        {
+            self.recent_tabs[..=index].rotate_right(1);
+        }
+    }
+    /// Explicit selection supersedes unsent navigation, but not the endpoint lease.
+    pub fn interrupt_tab_cycle(&mut self) -> bool {
+        let changed = self.finish_tab_cycle();
+        self.cancel_tab_cycle();
+        self.commit_current_tab_selection();
+        changed
+    }
+    pub fn tab_cycle_request_id(&self) -> Option<u64> {
+        self.tab_focus_request.as_ref().map(|request| request.id)
+    }
+    /// Pane input must wait for both command completion and its focus projection.
+    pub fn tab_focus_settled(&self) -> bool {
+        self.tab_focus_request.is_none()
+            && self.tab_cycle_commit.is_none()
+            && self
+                .completed_tab_focus
+                .as_ref()
+                .is_none_or(|tab| self.focused_tab_id.as_ref() == Some(tab))
+    }
+    pub fn request_tab_focus(&mut self, tab: String) -> Effect {
+        self.cancel_tab_cycle();
+        self.tab_cycle_commit = Some(tab);
+        self.tab_cycle_focus_effect()
+    }
+    fn tab_cycle_focus_effect(&mut self) -> Effect {
+        if self.tab_focus_request.is_some() {
+            return Effect::Consumed;
+        }
+        let target = self
+            .tab_cycle_cursor
+            .map(|cursor| &self.tab_cycle_order[cursor])
+            .or(self.tab_cycle_commit.as_ref());
+        let Some(target) = target else {
+            return Effect::Consumed;
+        };
+        let params = json!({"tab_id": target});
+        self.tab_focus_sequence += 1;
+        self.tab_focus_request = Some(TabFocusRequest {
+            id: self.tab_focus_sequence,
+            tab: target.clone(),
+            cancelled: false,
+        });
+        self.tab_focus_response.clear();
+        Effect::Request {
+            method: "tab.focus",
+            params,
+        }
+    }
+    /// The endpoint accepts one command at a time. Coalesce only unsent previews.
+    pub fn request_tab_cycle(
+        &mut self,
+        snapshot: &trailboss_runtime::protocol::ClientShellSnapshot,
+    ) -> Effect {
+        if self.cycle_tab(snapshot).is_none() {
+            return Effect::Consumed;
+        }
+        self.tab_cycle_focus_effect()
+    }
+    pub fn tab_cycle_response(
+        &mut self,
+        request_id: &str,
+        final_chunk: bool,
+        data: &[u8],
+        snapshot: Option<&trailboss_runtime::protocol::ClientShellSnapshot>,
+    ) -> Option<Effect> {
+        let id = request_id.strip_prefix("tab-cycle-")?.parse::<u64>().ok()?;
+        if self.tab_cycle_request_id() != Some(id) {
+            return None;
+        }
+        self.tab_focus_response.extend_from_slice(data);
+        if !final_chunk {
+            return None;
+        }
+        let success =
+            serde_json::from_slice::<Value>(&self.tab_focus_response).is_ok_and(|response| {
+                response.get("result").is_some() && response.get("error").is_none()
+            });
+        self.tab_focus_response.clear();
+        let completed = self.tab_focus_request.take().unwrap();
+        if !completed.cancelled && !success {
+            self.cancel_tab_cycle();
+            self.commit_current_tab_selection();
+            return None;
+        }
+        if !completed.cancelled {
+            self.completed_tab_focus = Some(completed.tab);
+        }
+        let desired = self
+            .tab_cycle_cursor
+            .map(|cursor| &self.tab_cycle_order[cursor])
+            .or(self.tab_cycle_commit.as_ref());
+        if let Some(desired) = desired {
+            if !snapshot.is_some_and(|s| s.tabs.iter().any(|tab| &tab.tab_id == desired)) {
+                self.cancel_tab_cycle();
+            } else if completed.cancelled || self.completed_tab_focus.as_ref() != Some(desired) {
+                return Some(self.tab_cycle_focus_effect());
+            } else if let Some(selected) = self.tab_cycle_commit.take() {
+                self.commit_tab_selection(&selected);
+            }
+        }
+        None
+    }
+    /// Finalization changes MRU history only; it never sends a focus request.
+    pub fn tick_tab_cycle(&mut self, now: Instant) -> bool {
+        self.tab_cycle_deadline
+            .is_some_and(|deadline| now >= deadline)
+            && self.finish_tab_cycle()
+    }
+    /// F6 is nonmodal; the legacy prefix cycle retains its explicit finish keys.
     pub fn tab_cycle_key(
         &mut self,
         key: crossterm::event::KeyEvent,
         is_prefix: bool,
         snapshot: Option<&trailboss_runtime::protocol::ClientShellSnapshot>,
+        now: Instant,
     ) -> Option<Effect> {
         use crossterm::event::KeyCode;
+        if key.modifiers.is_empty() && key.code == KeyCode::F(6) {
+            let effect = snapshot.map_or(Effect::Consumed, |snapshot| {
+                self.request_tab_cycle(snapshot)
+            });
+            self.tab_cycle_deadline = self
+                .tab_cycle_cursor
+                .map(|_| now + Duration::from_millis(800));
+            return Some(effect);
+        }
+        if self.tab_cycle_deadline.is_some() || self.tab_cycle_commit.is_some() {
+            self.finish_tab_cycle();
+            return None;
+        }
         if self.tab_cycle_cursor.is_none() || is_prefix {
             return None;
         }
         if key.modifiers.is_empty() && key.code == KeyCode::Char('l') {
-            return Some(
-                snapshot
-                    .and_then(|snapshot| self.cycle_tab(snapshot))
-                    .map_or(Effect::Consumed, |tab| Effect::Request {
-                        method: "tab.focus",
-                        params: json!({"tab_id":tab}),
-                    }),
-            );
+            return Some(snapshot.map_or(Effect::Consumed, |snapshot| {
+                self.request_tab_cycle(snapshot)
+            }));
         }
         self.finish_tab_cycle();
         (key.modifiers.is_empty() && matches!(key.code, KeyCode::Enter | KeyCode::Esc))
             .then_some(Effect::Consumed)
     }
     pub fn tab_cycle_hint(&self) -> Option<&'static str> {
-        self.tab_cycle_cursor
-            .map(|_| "MRU: L next · Enter/Esc done")
+        self.tab_cycle_cursor.map(|_| {
+            if self.tab_cycle_deadline.is_some() {
+                "MRU: F6 next"
+            } else {
+                "MRU: L next · Enter/Esc done"
+            }
+        })
     }
     pub fn editing(&self) -> bool {
         self.interaction != Interaction::None
