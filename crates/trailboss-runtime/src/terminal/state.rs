@@ -33,6 +33,29 @@ pub(crate) struct HandoffAgentState {
     acquisition_pending: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum OrdinaryCommandPhase {
+    /// No OSC 133 evidence has been observed for this pane's stream.
+    #[default]
+    Unobserved,
+    /// An instrumented prompt is visible but no command has completed yet.
+    Prompt,
+    /// OSC 133;C observed: a command is executing in the foreground.
+    Executing,
+    /// A command completed; its exit result is retained until the next C.
+    Finished,
+}
+
+/// Ordinary-command lifecycle snapshot shared by the OSC 133 tracker,
+/// internal app events, and live handoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct OrdinaryCommandState {
+    pub phase: OrdinaryCommandPhase,
+    /// Valid completed exit code (0..=255), retained until the next 133;C.
+    /// `None` means no code is known; a missing or malformed D is never 0.
+    pub exit_code: Option<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SuppressedFullLifecycleHookReport {
     agent_label: String,
@@ -133,6 +156,7 @@ pub struct TerminalState {
     pub fallback_state: AgentState,
     fallback_visible_blocker: bool,
     fallback_observed_at: Option<Instant>,
+    pub ordinary_command: OrdinaryCommandState,
     pub hook_authority: Option<HookAuthority>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
@@ -172,6 +196,7 @@ impl TerminalState {
             detected_agent: None,
             fallback_state: AgentState::Unknown,
             fallback_visible_blocker: false,
+            ordinary_command: OrdinaryCommandState::default(),
             fallback_observed_at: None,
             hook_authority: None,
             agent_metadata: HashMap::new(),
@@ -261,6 +286,126 @@ impl TerminalState {
             self.agent_process_acquisition_pending = false;
         }
         suppress_completion
+    }
+
+    /// Applies an OSC 133 ordinary-command observation from the PTY stream.
+    ///
+    /// Ordinary command state never invents an agent identity and never
+    /// overrides an effective hook authority: `recompute_effective_state`
+    /// arbitrates. A prompt observed while a command was executing means the
+    /// command ended without a completion marker, so its exit status is
+    /// unknown rather than assumed successful.
+    pub(crate) fn observe_ordinary_command_markers(
+        &mut self,
+        command: OrdinaryCommandState,
+    ) -> Option<TerminalStateMutation> {
+        let command = if command.phase == OrdinaryCommandPhase::Prompt
+            && self.ordinary_command.phase == OrdinaryCommandPhase::Executing
+        {
+            OrdinaryCommandState {
+                phase: OrdinaryCommandPhase::Finished,
+                exit_code: None,
+            }
+        } else {
+            command
+        };
+        if self.ordinary_command == command {
+            return None;
+        }
+        let now = Instant::now();
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
+        let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
+        self.ordinary_command = command;
+        if self.patch_ordinary_command_tokens(now) {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        Some(TerminalStateMutation {
+            effective_state_change: self.recompute_effective_state(
+                previous_agent_label,
+                previous_known_agent,
+                previous_state,
+                previous_presentation,
+                now,
+            ),
+            session_ref_changed: false,
+            agent_released: false,
+        })
+    }
+
+    /// Ordinary-command snapshot for live handoff; `None` when the pane's
+    /// stream has never shown OSC 133 markers.
+    #[cfg(unix)]
+    pub(crate) fn handoff_ordinary_command_state(&self) -> Option<OrdinaryCommandState> {
+        (self.ordinary_command.phase != OrdinaryCommandPhase::Unobserved)
+            .then_some(self.ordinary_command)
+    }
+
+    /// Restores the ordinary-command snapshot captured at live handoff. The
+    /// pane-side OSC tracker is seeded separately so a completion marker that
+    /// arrives after the handoff is attributed to the running command.
+    #[cfg(unix)]
+    pub(crate) fn restore_handoff_ordinary_command_state(&mut self, command: OrdinaryCommandState) {
+        self.ordinary_command = command;
+        let now = Instant::now();
+        self.patch_ordinary_command_tokens(now);
+        self.state = self.resolved_state();
+    }
+
+    /// Projects the ordinary-command lifecycle onto open pane tokens:
+    /// `command.status` (`running`/`success`/`failure`/`unknown`) and
+    /// `command.exit_code` (decimal string, only when a valid completed code
+    /// exists). The prior result is cleared when the next command starts.
+    fn patch_ordinary_command_tokens(&mut self, now: Instant) -> bool {
+        let (status, exit_code) = match self.ordinary_command.phase {
+            OrdinaryCommandPhase::Executing => (Some("running"), None),
+            OrdinaryCommandPhase::Finished => {
+                let status = match self.ordinary_command.exit_code {
+                    Some(0) => "success",
+                    Some(_) => "failure",
+                    None => "unknown",
+                };
+                (Some(status), self.ordinary_command.exit_code)
+            }
+            OrdinaryCommandPhase::Prompt | OrdinaryCommandPhase::Unobserved => (None, None),
+        };
+        let mut patch = HashMap::with_capacity(2);
+        patch.insert("command.status".to_string(), status.map(str::to_string));
+        patch.insert(
+            "command.exit_code".to_string(),
+            exit_code.map(|code| code.to_string()),
+        );
+        self.metadata_tokens.patch(patch, None, now)
+    }
+
+    /// Shell markers override process probing only for ordinary commands;
+    /// detected agents retain their existing lifecycle state.
+    fn ordinary_or_fallback_state(&self) -> AgentState {
+        if self.is_agent_terminal() {
+            return self.fallback_state;
+        }
+        match self.ordinary_command.phase {
+            OrdinaryCommandPhase::Executing => AgentState::Working,
+            OrdinaryCommandPhase::Finished => AgentState::Idle,
+            OrdinaryCommandPhase::Prompt => AgentState::Unknown,
+            OrdinaryCommandPhase::Unobserved => self.fallback_state,
+        }
+    }
+
+    /// Acknowledgement clears attention, not the exit result; unknown is never success.
+    pub(crate) fn indicator_state(&self, seen: bool) -> AgentState {
+        if self.state != AgentState::Idle
+            || self.ordinary_command.phase != OrdinaryCommandPhase::Finished
+            || self.is_agent_terminal()
+        {
+            return self.state;
+        }
+        match self.ordinary_command.exit_code {
+            Some(code) if code != 0 && !seen => AgentState::Blocked,
+            Some(_) => AgentState::Idle,
+            None => AgentState::Unknown,
+        }
     }
 
     pub(crate) fn terminal_title_stripped(&self) -> Option<String> {
@@ -2353,6 +2498,8 @@ impl TerminalState {
         self.fallback_state = AgentState::Unknown;
         self.fallback_visible_blocker = false;
         self.fallback_observed_at = None;
+        self.ordinary_command = OrdinaryCommandState::default();
+        self.patch_ordinary_command_tokens(Instant::now());
         self.hook_authority = None;
         self.persisted_agent_session = None;
         self.agent_metadata.clear();
@@ -2425,6 +2572,18 @@ impl TerminalState {
         })
     }
 
+    fn resolved_state(&self) -> AgentState {
+        if self.visible_blocker_overrides_hook() {
+            AgentState::Waiting
+        } else {
+            self.hook_authority
+                .as_ref()
+                .filter(|authority| self.hook_authority_is_effective(authority))
+                .map(|authority| authority.state)
+                .unwrap_or_else(|| self.ordinary_or_fallback_state())
+        }
+    }
+
     fn recompute_effective_state(
         &mut self,
         previous_agent_label: Option<String>,
@@ -2433,15 +2592,7 @@ impl TerminalState {
         previous_presentation: EffectivePresentation,
         now: Instant,
     ) -> Option<EffectiveStateChange> {
-        let state = if self.visible_blocker_overrides_hook() {
-            AgentState::Waiting
-        } else {
-            self.hook_authority
-                .as_ref()
-                .filter(|authority| self.hook_authority_is_effective(authority))
-                .map(|authority| authority.state)
-                .unwrap_or(self.fallback_state)
-        };
+        let state = self.resolved_state();
         let agent_label = self.effective_agent_label().map(str::to_string);
         let known_agent = self.effective_known_agent();
 
@@ -6440,5 +6591,233 @@ mod tests {
             terminal.hook_authority.as_ref().unwrap().source,
             "custom:pi"
         );
+    }
+
+    #[test]
+    fn ordinary_command_markers_drive_busy_and_completion_without_agent_identity() {
+        let mut terminal = test_terminal();
+
+        // Prompt markers alone keep the plain-shell Unknown state.
+        let mutation = terminal
+            .observe_ordinary_command_markers(OrdinaryCommandState {
+                phase: OrdinaryCommandPhase::Prompt,
+                exit_code: None,
+            })
+            .unwrap();
+        assert!(mutation.effective_state_change.is_none());
+        assert_eq!(terminal.state, AgentState::Unknown);
+        assert_eq!(terminal.effective_agent_label(), None);
+
+        // Executing shows busy without inventing an agent.
+        let mutation = terminal
+            .observe_ordinary_command_markers(OrdinaryCommandState {
+                phase: OrdinaryCommandPhase::Executing,
+                exit_code: None,
+            })
+            .unwrap();
+        assert_eq!(terminal.state, AgentState::Working);
+        assert_eq!(terminal.effective_agent_label(), None);
+        assert_eq!(
+            mutation.effective_state_change.unwrap().state,
+            AgentState::Working
+        );
+        assert_eq!(
+            terminal
+                .metadata_tokens
+                .values()
+                .get("command.status")
+                .map(String::as_str),
+            Some("running")
+        );
+        assert!(!terminal
+            .metadata_tokens
+            .values()
+            .contains_key("command.exit_code"));
+
+        // Completion transitions to Idle and keeps the exit result inspectable.
+        terminal
+            .observe_ordinary_command_markers(OrdinaryCommandState {
+                phase: OrdinaryCommandPhase::Finished,
+                exit_code: Some(7),
+            })
+            .unwrap();
+        assert_eq!(terminal.state, AgentState::Idle);
+        let tokens = terminal.metadata_tokens.values();
+        assert_eq!(
+            tokens.get("command.status").map(String::as_str),
+            Some("failure")
+        );
+        assert_eq!(
+            tokens.get("command.exit_code").map(String::as_str),
+            Some("7")
+        );
+
+        // The next start clears the prior result.
+        terminal
+            .observe_ordinary_command_markers(OrdinaryCommandState {
+                phase: OrdinaryCommandPhase::Executing,
+                exit_code: None,
+            })
+            .unwrap();
+        let tokens = terminal.metadata_tokens.values();
+        assert_eq!(
+            tokens.get("command.status").map(String::as_str),
+            Some("running")
+        );
+        assert!(!tokens.contains_key("command.exit_code"));
+    }
+
+    #[test]
+    fn ordinary_command_prompt_during_execution_completes_as_unknown() {
+        let mut terminal = test_terminal();
+        terminal
+            .observe_ordinary_command_markers(OrdinaryCommandState {
+                phase: OrdinaryCommandPhase::Executing,
+                exit_code: None,
+            })
+            .unwrap();
+
+        // A tracker restarted without its seed reports a plain prompt; the
+        // retained lifecycle must not stay stuck busy.
+        terminal
+            .observe_ordinary_command_markers(OrdinaryCommandState {
+                phase: OrdinaryCommandPhase::Prompt,
+                exit_code: None,
+            })
+            .unwrap();
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(
+            terminal.ordinary_command.phase,
+            OrdinaryCommandPhase::Finished
+        );
+        assert_eq!(terminal.ordinary_command.exit_code, None);
+        assert_eq!(
+            terminal
+                .metadata_tokens
+                .values()
+                .get("command.status")
+                .map(String::as_str),
+            Some("unknown")
+        );
+    }
+
+    #[test]
+    fn instrumented_idle_prompt_overrides_process_probe_fallback() {
+        let mut terminal = test_terminal();
+
+        // Process probe reports the outer transport busy (e.g. ssh foreground).
+        let _ = terminal.set_detected_state(None, AgentState::Working);
+        assert_eq!(terminal.state, AgentState::Working);
+
+        // An instrumented idle prompt takes precedence over that fallback.
+        terminal
+            .observe_ordinary_command_markers(OrdinaryCommandState {
+                phase: OrdinaryCommandPhase::Prompt,
+                exit_code: None,
+            })
+            .unwrap();
+        assert_eq!(terminal.state, AgentState::Unknown);
+
+        // Completion metadata survives the still-foreground outer process.
+        terminal
+            .observe_ordinary_command_markers(OrdinaryCommandState {
+                phase: OrdinaryCommandPhase::Executing,
+                exit_code: None,
+            })
+            .unwrap();
+        terminal
+            .observe_ordinary_command_markers(OrdinaryCommandState {
+                phase: OrdinaryCommandPhase::Finished,
+                exit_code: Some(2),
+            })
+            .unwrap();
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(
+            terminal
+                .metadata_tokens
+                .values()
+                .get("command.exit_code")
+                .map(String::as_str),
+            Some("2")
+        );
+
+        // Without markers the probe fallback still applies.
+        let mut uninstrumented = test_terminal();
+        let _ = uninstrumented.set_detected_state(None, AgentState::Working);
+        assert_eq!(uninstrumented.state, AgentState::Working);
+    }
+
+    #[test]
+    fn hook_authority_wins_over_ordinary_command_markers() {
+        let mut terminal = test_terminal();
+        terminal
+            .observe_ordinary_command_markers(OrdinaryCommandState {
+                phase: OrdinaryCommandPhase::Executing,
+                exit_code: None,
+            })
+            .unwrap();
+        assert_eq!(terminal.state, AgentState::Working);
+
+        let _ = terminal.set_hook_authority(
+            "custom:pi".into(),
+            "pi".into(),
+            AgentState::Blocked,
+            None,
+            None,
+        );
+        assert_eq!(terminal.state, AgentState::Blocked);
+
+        // Markers keep flowing underneath without overriding the agent.
+        let mutation = terminal
+            .observe_ordinary_command_markers(OrdinaryCommandState {
+                phase: OrdinaryCommandPhase::Finished,
+                exit_code: Some(0),
+            })
+            .unwrap();
+        assert_eq!(terminal.state, AgentState::Blocked);
+        assert!(mutation.effective_state_change.is_none());
+    }
+
+    #[test]
+    fn detected_agent_waiting_wins_over_shell_command_execution() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Waiting);
+
+        terminal.observe_ordinary_command_markers(OrdinaryCommandState {
+            phase: OrdinaryCommandPhase::Executing,
+            exit_code: None,
+        });
+
+        assert_eq!(terminal.state, AgentState::Waiting);
+        assert_eq!(terminal.indicator_state(false), AgentState::Waiting);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restoring_shell_command_preserves_full_lifecycle_hook_state() {
+        let mut terminal = test_terminal();
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::Pi,
+            "herdr:pi",
+            "pi",
+            crate::agent_resume::AgentSessionRef::path(test_session_path("handoff-root.jsonl"))
+                .unwrap(),
+        );
+        terminal.set_hook_authority(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Waiting,
+            None,
+            None,
+        );
+        assert_eq!(terminal.state, AgentState::Waiting);
+
+        terminal.restore_handoff_ordinary_command_state(OrdinaryCommandState {
+            phase: OrdinaryCommandPhase::Executing,
+            exit_code: None,
+        });
+
+        assert_eq!(terminal.state, AgentState::Waiting);
     }
 }

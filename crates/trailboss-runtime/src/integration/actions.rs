@@ -1,6 +1,7 @@
 use std::io;
 
 use super::registry::{integration_target_label, integration_target_supported};
+use super::shell::{install_shell, uninstall_shell};
 use super::targets::{
     install_antigravity_cli, install_claude, install_codex, install_copilot, install_cursor,
     install_devin, install_droid, install_grok, install_hermes, install_kilo, install_kimi,
@@ -72,6 +73,66 @@ pub(crate) fn uninstall_experimental_letta() -> io::Result<Vec<String>> {
     });
     let outcome = if result.is_ok() { "ok" } else { "error" };
     crate::logging::integration_action("uninstall", "letta", outcome);
+    result
+}
+
+/// Experimental shell install that bypasses the frozen client endpoint
+/// `IntegrationTarget` enum, following the Letta CLI-only precedent.
+pub(crate) fn install_experimental_shell() -> io::Result<Vec<String>> {
+    let result = install_shell().map(|installed| {
+        let mut messages = vec![format!(
+            "installed trailboss shell integration hook to {}",
+            installed.hook_path.display()
+        )];
+        for path in &installed.rc_paths {
+            if installed.created_rc_files.contains(path) {
+                messages.push(format!(
+                    "created {} with trailboss shell integration block",
+                    path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "added trailboss shell integration block to {}",
+                    path.display()
+                ));
+            }
+        }
+        messages
+    });
+    let outcome = if result.is_ok() { "ok" } else { "error" };
+    crate::logging::integration_action("install", "shell", outcome);
+    result
+}
+
+/// Experimental shell uninstall counterpart.
+pub(crate) fn uninstall_experimental_shell() -> io::Result<Vec<String>> {
+    let result = uninstall_shell().map(|removed| {
+        let mut messages = Vec::new();
+        if removed.removed_hook_file {
+            messages.push(format!(
+                "removed trailboss shell integration hook at {}",
+                removed.hook_path.display()
+            ));
+        } else {
+            messages.push(format!(
+                "no trailboss shell integration hook found at {}",
+                removed.hook_path.display()
+            ));
+        }
+        for path in &removed.updated_rc_files {
+            if removed.removed_created_rc_files.contains(path) {
+                messages.push(format!("removed created {}", path.display()));
+            } else {
+                messages.push(format!(
+                    "removed trailboss shell integration block from {}",
+                    path.display()
+                ));
+            }
+        }
+        messages
+    });
+    let outcome = if result.is_ok() { "ok" } else { "error" };
+    crate::logging::integration_action("uninstall", "shell", outcome);
     result
 }
 

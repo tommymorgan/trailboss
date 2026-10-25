@@ -29,6 +29,10 @@ pub(crate) struct HandoffRuntimeState {
     pub initial_history_ansi: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_state: Option<crate::terminal::state::HandoffAgentState>,
+    /// Ordinary OSC 133 command lifecycle at handoff time. Private internal
+    /// snapshot; serde-optional so older snapshots import unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinary_command: Option<crate::terminal::state::OrdinaryCommandState>,
 }
 
 #[cfg(unix)]

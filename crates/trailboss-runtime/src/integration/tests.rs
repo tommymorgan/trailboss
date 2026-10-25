@@ -4781,3 +4781,491 @@ fn grok_dir_honors_grok_home_after_config_dir_seam() {
     clear_integration_path_env();
     let _ = fs::remove_dir_all(base);
 }
+
+struct ShellTestEnv {
+    home: Option<std::ffi::OsString>,
+    xdg_config_home: Option<std::ffi::OsString>,
+    shell: Option<std::ffi::OsString>,
+}
+
+impl ShellTestEnv {
+    fn install(home: &Path) -> Self {
+        let env = Self {
+            home: std::env::var_os("HOME"),
+            xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
+            shell: std::env::var_os("SHELL"),
+        };
+        std::env::set_var("HOME", home);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::set_var("SHELL", "/bin/bash");
+        env
+    }
+}
+
+impl Drop for ShellTestEnv {
+    fn drop(&mut self) {
+        match self.home.take() {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        match self.xdg_config_home.take() {
+            Some(dir) => std::env::set_var("XDG_CONFIG_HOME", dir),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match self.shell.take() {
+            Some(shell) => std::env::set_var("SHELL", shell),
+            None => std::env::remove_var("SHELL"),
+        }
+    }
+}
+
+#[test]
+fn shell_block_round_trip_preserves_unrelated_bytes() {
+    for original in [
+        "",
+        "export A=1",
+        "export A=1\n",
+        "export A=1\n\n\n",
+        "export A=1\r\nalias ll='ls -l'\r\n\r\n",
+    ] {
+        let installed = super::shell::build_rc_with_shell_block(original);
+        assert!(installed.starts_with(original));
+        assert_eq!(
+            super::shell::remove_shell_block(&installed),
+            original,
+            "uninstall restores the original bytes"
+        );
+        assert_eq!(
+            super::shell::build_rc_with_shell_block(&installed),
+            installed,
+            "reinstall is idempotent"
+        );
+        assert_eq!(super::shell::remove_shell_block(original), original);
+    }
+}
+
+#[test]
+fn shell_install_uses_login_precedence_without_shadowing() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join(".bashrc"), "export RC=1\n").unwrap();
+    fs::write(home.join(".profile"), "export PROFILE=1\n").unwrap();
+    let _env = ShellTestEnv::install(&home);
+
+    let installed = super::shell::install_shell().unwrap();
+    assert!(installed.hook_path.ends_with("shell-integration.bash"));
+    assert_eq!(
+        installed.rc_paths,
+        vec![home.join(".bashrc"), home.join(".profile")]
+    );
+    assert!(installed.created_rc_files.is_empty());
+    assert!(
+        !home.join(".bash_profile").exists() && !home.join(".bash_login").exists(),
+        "a higher-precedence login file must not shadow the existing .profile"
+    );
+    let bashrc = fs::read_to_string(home.join(".bashrc")).unwrap();
+    assert!(bashrc.starts_with("export RC=1\n"));
+    assert!(super::shell::rc_file_contains_shell_block(&bashrc));
+    let profile = fs::read_to_string(home.join(".profile")).unwrap();
+    assert!(profile.starts_with("export PROFILE=1\n"));
+    assert!(super::shell::rc_file_contains_shell_block(&profile));
+
+    let after_first_install = fs::read_to_string(home.join(".bashrc")).unwrap();
+    super::shell::install_shell().unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join(".bashrc")).unwrap(),
+        after_first_install,
+        "reinstall does not duplicate the block"
+    );
+
+    let status = experimental_shell_integration_status();
+    assert_eq!(status.state, IntegrationStatusKind::Current);
+
+    let removed = super::shell::uninstall_shell().unwrap();
+    assert!(removed.removed_hook_file);
+    assert!(!installed.hook_path.exists());
+    assert_eq!(
+        fs::read_to_string(home.join(".bashrc")).unwrap(),
+        "export RC=1\n"
+    );
+    assert_eq!(
+        fs::read_to_string(home.join(".profile")).unwrap(),
+        "export PROFILE=1\n"
+    );
+    assert!(removed.removed_created_rc_files.is_empty());
+
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn shell_install_creates_bash_profile_only_when_no_login_file_exists() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let _env = ShellTestEnv::install(&home);
+
+    let installed = super::shell::install_shell().unwrap();
+    assert_eq!(
+        installed.created_rc_files,
+        vec![home.join(".bashrc"), home.join(".bash_profile")]
+    );
+    assert!(!home.join(".profile").exists());
+
+    super::shell::install_shell().unwrap();
+
+    let removed = super::shell::uninstall_shell().unwrap();
+    assert_eq!(
+        removed.removed_created_rc_files,
+        vec![home.join(".bashrc"), home.join(".bash_profile")],
+        "files the installer created are removed again"
+    );
+    assert!(!home.join(".bashrc").exists());
+    assert!(!home.join(".bash_profile").exists());
+
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn shell_install_refuses_non_bash_login_shell() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join(".bashrc"), "export RC=1\n").unwrap();
+    let _env = ShellTestEnv::install(&home);
+    std::env::set_var("SHELL", "/usr/bin/zsh");
+
+    let err = super::shell::install_shell().unwrap_err().to_string();
+    assert!(err.contains("supports interactive Bash only"), "{err}");
+    assert!(!super::shell::shell_hook_path().exists());
+    assert_eq!(
+        fs::read_to_string(home.join(".bashrc")).unwrap(),
+        "export RC=1\n"
+    );
+
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn shell_status_flags_hook_without_startup_block() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let _env = ShellTestEnv::install(&home);
+
+    super::shell::install_shell().unwrap();
+    assert_eq!(
+        experimental_shell_integration_status().state,
+        IntegrationStatusKind::Current
+    );
+
+    fs::write(home.join(".bashrc"), "export RC=1\n").unwrap();
+    fs::remove_file(home.join(".bash_profile")).unwrap();
+    assert_eq!(
+        experimental_shell_integration_status().state,
+        IntegrationStatusKind::Outdated,
+        "a hook file no startup file sources is nonfunctional"
+    );
+
+    let _ = fs::remove_dir_all(base);
+}
+
+#[cfg(unix)]
+fn find_marker(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+#[cfg(unix)]
+fn count_marker(haystack: &[u8], needle: &[u8]) -> usize {
+    let mut count = 0;
+    let mut start = 0;
+    while haystack.len() - start >= needle.len() {
+        match find_marker(&haystack[start..], needle) {
+            Some(found) => {
+                count += 1;
+                start += found + needle.len();
+            }
+            None => break,
+        }
+    }
+    count
+}
+
+#[cfg(unix)]
+fn assert_each_completion_pairs_with_user_status(out: &[u8], label: &str) {
+    const COMPLETION: &[u8] = b"\x1b]133;D;";
+    const USER_STATUS: &[u8] = b"user-pc:";
+    let mut start = 0;
+    while let Some(offset) = find_marker(&out[start..], COMPLETION) {
+        let completion = start + offset;
+        let status = out[completion + COMPLETION.len()];
+        let user = find_marker(&out[completion..], USER_STATUS)
+            .unwrap_or_else(|| panic!("no user status output follows a completion ({label})"));
+        let observed = out[completion + user + USER_STATUS.len()];
+        assert_eq!(
+            observed as char, status as char,
+            "the user entry observes the completed command's exit status ({label})"
+        );
+        start = completion + user + USER_STATUS.len() + 1;
+    }
+}
+
+#[cfg(unix)]
+fn run_bash_pty(home: &Path, args: &[&str], input: &[u8]) -> Vec<u8> {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+
+    let pty = native_pty_system();
+    let pair = pty
+        .openpty(PtySize {
+            rows: 24,
+            cols: 120,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("openpty");
+    let mut cmd = CommandBuilder::new("/bin/bash");
+    cmd.args(args);
+    cmd.env("HOME", home);
+    cmd.env("SHELL", "/bin/bash");
+    cmd.env("TERM", "xterm");
+    cmd.env_remove("XDG_CONFIG_HOME");
+    let mut child = pair.slave.spawn_command(cmd).expect("spawn bash");
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().expect("pty reader");
+    let mut writer = pair.master.take_writer().expect("pty writer");
+    writer.write_all(input).expect("write pty input");
+
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&output);
+    let reader_thread = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => sink.lock().unwrap().extend_from_slice(&buf[..read]),
+            }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match child.try_wait().expect("try_wait") {
+            Some(_) => break,
+            None if Instant::now() > deadline => {
+                let _ = child.kill();
+                break;
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+    let _ = reader_thread.join();
+    let _ = child.wait();
+    Arc::try_unwrap(output).unwrap().into_inner().unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_hook_login_session_reports_real_exit_markers() {
+    if !Path::new("/bin/bash").is_file() {
+        return;
+    }
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join(".profile"), "export PROFILE=1\n").unwrap();
+    let _env = ShellTestEnv::install(&home);
+    super::shell::install_shell().unwrap();
+
+    let out = run_bash_pty(&home, &["--login", "-i"], b"false\ntrue\nexit 0\n");
+    let a = find_marker(&out, b"\x1b]133;A\x07").expect("A marker at first prompt");
+    let c = find_marker(&out, b"\x1b]133;C\x07").expect("C marker while executing");
+    let d1 = find_marker(&out, b"\x1b]133;D;1\x07").expect("D;1 after failing command");
+    let d0 = find_marker(&out, b"\x1b]133;D;0\x07").expect("D;0 after succeeding command");
+    assert!(
+        a < c,
+        "the first prompt emits A before any command executes"
+    );
+    assert!(c < d1);
+    assert!(d1 < d0);
+    assert!(
+        find_marker(&out[..c], b"\x1b]133;D;").is_none(),
+        "no completion is reported before the first command runs"
+    );
+
+    let _ = fs::remove_dir_all(base);
+}
+
+#[cfg(unix)]
+#[test]
+fn pane_bash_wrapper_loads_hook_after_user_prompt_command_overwrite() {
+    if !Path::new("/bin/bash").is_file() {
+        return;
+    }
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(
+        home.join(".bashrc"),
+        "PROMPT_COMMAND='echo user-pc-ran'\nPS0='[user-ps0]'\n",
+    )
+    .unwrap();
+    let _env = ShellTestEnv::install(&home);
+
+    assert!(
+        super::shell::pane_bash_rcfile("/bin/sh").unwrap().is_none(),
+        "sh stays uninstrumented"
+    );
+    let rcfile = super::shell::pane_bash_rcfile("/bin/bash")
+        .unwrap()
+        .expect("bash rcfile wrapper");
+    let out = run_bash_pty(
+        &home,
+        &["--rcfile", rcfile.to_str().unwrap(), "-i"],
+        b"false\ntrue\nexit 0\n",
+    );
+    assert!(find_marker(&out, b"\x1b]133;C\x07").is_some());
+    assert!(find_marker(&out, b"\x1b]133;D;1\x07").is_some());
+    assert!(find_marker(&out, b"\x1b]133;D;0\x07").is_some());
+    assert!(
+        find_marker(&out, b"user-pc-ran").is_some(),
+        "the user PROMPT_COMMAND entry still runs"
+    );
+    let first_c = find_marker(&out, b"\x1b]133;C\x07").unwrap();
+    let user_ps0 = find_marker(&out, b"[user-ps0]").expect("user PS0 preserved");
+    assert!(
+        first_c < user_ps0,
+        "markers precede the preserved user PS0 expansion"
+    );
+
+    let _ = fs::remove_dir_all(base);
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_hook_reload_restores_overwritten_prompt_hooks() {
+    if !Path::new("/bin/bash").is_file() {
+        return;
+    }
+    let _lock = integration_env_lock();
+
+    // Re-running the rcfile after startup re-executes the user assignments,
+    // overwriting PROMPT_COMMAND and PS0 after the hook installed its
+    // entries; the managed block must then restore the missing hooks.
+    for (assignment, array_form) in [
+        ("PROMPT_COMMAND='echo user-pc:$?'", false),
+        ("PROMPT_COMMAND=('echo user-pc:$?' 'echo a; echo b')", true),
+    ] {
+        let base = unique_base();
+        let home = base.join("home");
+        fs::create_dir_all(&home).unwrap();
+        fs::write(
+            home.join(".bashrc"),
+            format!("{assignment}\nPS0='[user-ps0]'\n"),
+        )
+        .unwrap();
+        let _env = ShellTestEnv::install(&home);
+        super::shell::install_shell().unwrap();
+
+        let out = run_bash_pty(
+            &home,
+            &["-i"],
+            b"false\nsource ~/.bashrc\nfalse\ntrue\nexit 0\n",
+        );
+        assert_eq!(
+            count_marker(&out, b"\x1b]133;C\x07"),
+            5,
+            "one start marker per command across the reload ({assignment})"
+        );
+        assert_eq!(
+            count_marker(&out, b"\x1b]133;D;1\x07"),
+            2,
+            "failing commands still complete across the reload ({assignment})"
+        );
+        assert_eq!(
+            count_marker(&out, b"\x1b]133;D;0\x07"),
+            2,
+            "succeeding commands still complete across the reload ({assignment})"
+        );
+        // The first prompt's own $? is not contractual, so pair each
+        // completion with the user entry output that follows it instead of
+        // counting user statuses across the whole session.
+        assert_each_completion_pairs_with_user_status(&out, assignment);
+        assert_eq!(
+            count_marker(&out, b"[user-ps0]"),
+            5,
+            "user PS0 keeps expanding once per command after the reload ({assignment})"
+        );
+        let first_c = find_marker(&out, b"\x1b]133;C\x07").expect("C marker");
+        assert!(
+            find_marker(&out[..first_c], b"\x1b]133;D;").is_none(),
+            "the first prompt still completes nothing ({assignment})"
+        );
+        assert!(
+            first_c < find_marker(&out, b"[user-ps0]").expect("user PS0"),
+            "markers precede the preserved user PS0 expansion ({assignment})"
+        );
+        if array_form {
+            assert_eq!(
+                count_marker(&out, b"\r\na\r\n"),
+                5,
+                "array entries stay separate PROMPT_COMMAND entries"
+            );
+        }
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    // Sourcing the managed hook file directly is idempotent while its
+    // entries survive, and repairs hooks an interactive assignment
+    // overwrote.
+    let base = unique_base();
+    let home = base.join("home");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join(".bashrc"), "PS0='[user-ps0]'\n").unwrap();
+    let _env = ShellTestEnv::install(&home);
+    super::shell::install_shell().unwrap();
+    let hook = super::shell::shell_hook_path();
+    let hook = hook.to_str().expect("hook path is UTF-8");
+    let input = format!(
+        "source {hook}\nsource {hook}\nPROMPT_COMMAND='echo only-user'\nsource {hook}\nfalse\nexit 0\n"
+    );
+    let out = run_bash_pty(&home, &["-i"], input.as_bytes());
+    assert_eq!(
+        count_marker(&out, b"\x1b]133;C\x07"),
+        6,
+        "repeated sourcing emits exactly one start marker per command"
+    );
+    assert_eq!(
+        count_marker(&out, b"\x1b]133;D;0\x07"),
+        3,
+        "each succeeding command completes exactly once after repeated sourcing"
+    );
+    assert_eq!(
+        count_marker(&out, b"\x1b]133;D;1\x07"),
+        1,
+        "directly sourcing the hook repairs the overwritten completion hook"
+    );
+    assert_eq!(
+        count_marker(&out, b"only-user\r\n"),
+        3,
+        "the user entry keeps running after direct repair"
+    );
+    assert_eq!(
+        count_marker(&out, b"[user-ps0]"),
+        6,
+        "user PS0 survives repeated direct sourcing"
+    );
+
+    let _ = fs::remove_dir_all(base);
+}

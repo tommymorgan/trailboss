@@ -101,6 +101,43 @@ and is not retained across detach/reattach.
 
 The existing Ctrl-B, L switcher retains its explicit Enter/Escape finish.
 
+## Ordinary CLI command status
+
+The sidebar tracks commands in instrumented Bash panes, including remote
+commands reached through SSH:
+
+- Running commands show busy without being identified as coding agents.
+- Exit code `0` shows completion; a nonzero code shows failure attention.
+- Focusing the tab clears attention but retains `exit N` in its label.
+- Missing or malformed exit codes remain unknown, never assumed successful.
+
+New non-login Bash panes are instrumented automatically. For login shells
+and SSH, run this on each host whose Bash sessions should report:
+
+```sh
+trailboss integration install shell
+```
+
+The updated Trailboss CLI must be available on that host; no remote Core or
+background service is required. The installer writes
+`${XDG_CONFIG_HOME:-$HOME/.config}/trailboss/shell-integration.bash` and adds
+marked source blocks to `.bashrc` and the first existing login profile in
+Bash's order: `.bash_profile`, `.bash_login`, `.profile`. It creates
+`.bash_profile` only when none exists, so an existing lower-priority profile
+is not shadowed. Existing prompt hooks and `PS0` are preserved.
+
+New sessions load the helper through those startup files. To activate an
+existing interactive Bash session after its current command has finished:
+
+```sh
+source "${XDG_CONFIG_HOME:-$HOME/.config}/trailboss/shell-integration.bash"
+```
+
+Remove the managed helper and source blocks with
+`trailboss integration uninstall shell`. Other shell families remain
+uninstrumented. Process probing can still detect an uninstrumented command
+as busy, but cannot establish its exit result.
+
 ## Thanks
 
 Trailboss stands on [herdr](https://github.com/herdrdev/herdr) and its

@@ -584,6 +584,10 @@ fn restore_tab(
         let handoff_agent_state = imported_runtime
             .as_ref()
             .and_then(|imported| imported.state.agent_state.clone());
+        #[cfg(unix)]
+        let handoff_ordinary_command = imported_runtime
+            .as_ref()
+            .and_then(|imported| imported.state.ordinary_command);
         let pending_native_agent_restore = if was_imported {
             None
         } else {
@@ -725,6 +729,10 @@ fn restore_tab(
                 #[cfg(unix)]
                 if let Some(agent_state) = handoff_agent_state {
                     terminal.restore_handoff_agent_state(agent_state);
+                }
+                #[cfg(unix)]
+                if let Some(ordinary_command) = handoff_ordinary_command {
+                    terminal.restore_handoff_ordinary_command_state(ordinary_command);
                 }
                 panes.insert(*id, PaneState::new(terminal_id.clone()));
                 terminal_runtimes.insert(terminal_id, runtime);

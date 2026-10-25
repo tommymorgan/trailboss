@@ -762,7 +762,19 @@ impl App {
             .workspaces
             .get(update.ws_idx)
             .and_then(|ws| ws.pane_state(update.pane_id))
-            .map(|pane| pane_agent_status(update.state, pane.seen))
+            .and_then(|pane| {
+                self.state
+                    .terminals
+                    .get(&pane.attached_terminal_id)
+                    .map(|terminal| {
+                        let state = if terminal.state == update.state {
+                            terminal.indicator_state(pane.seen)
+                        } else {
+                            update.state
+                        };
+                        pane_agent_status(state, pane.seen)
+                    })
+            })
             .unwrap_or_else(|| pane_agent_status(update.state, update.seen));
 
         if previous_agent_status != agent_status

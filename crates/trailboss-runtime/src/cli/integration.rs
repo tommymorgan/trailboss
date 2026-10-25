@@ -46,7 +46,12 @@ fn integration_status(args: &[String]) -> std::io::Result<i32> {
         println!("{target}: {state} ({})", status.path.display());
     }
 
-    if let Some(status) = crate::integration::experimental_letta_integration_status() {
+    for status in crate::integration::experimental_letta_integration_status()
+        .into_iter()
+        .chain(std::iter::once(
+            crate::integration::experimental_shell_integration_status(),
+        ))
+    {
         let state = describe_integration_state(
             status.state,
             status.installed_version,
@@ -93,6 +98,7 @@ fn integration_install(args: &[String]) -> std::io::Result<i32> {
     let installed = match target {
         IntegrationCommandTarget::Builtin(target) => crate::integration::install_target(target),
         IntegrationCommandTarget::Letta => crate::integration::install_experimental_letta(),
+        IntegrationCommandTarget::Shell => crate::integration::install_experimental_shell(),
     };
     match installed {
         Ok(messages) => {
@@ -114,6 +120,7 @@ fn integration_uninstall(args: &[String]) -> std::io::Result<i32> {
     let removed = match target {
         IntegrationCommandTarget::Builtin(target) => crate::integration::uninstall_target(target),
         IntegrationCommandTarget::Letta => crate::integration::uninstall_experimental_letta(),
+        IntegrationCommandTarget::Shell => crate::integration::uninstall_experimental_shell(),
     };
     match removed {
         Ok(messages) => {
@@ -133,12 +140,14 @@ fn print_integration_messages(messages: Vec<String>) {
     }
 }
 
-/// Integration target accepted by the CLI. Letta is deliberately kept out of
-/// the frozen client endpoint `IntegrationTarget` enum and is handled as an
-/// experimental CLI-only target until the agent registry replaces it.
+/// Integration target accepted by the CLI. Letta and shell are deliberately
+/// kept out of the frozen client endpoint `IntegrationTarget` enum and are
+/// handled as experimental CLI-only targets until the agent registry replaces
+/// them.
 enum IntegrationCommandTarget {
     Builtin(IntegrationTarget),
     Letta,
+    Shell,
 }
 
 fn parse_integration_target(
@@ -147,13 +156,13 @@ fn parse_integration_target(
 ) -> std::io::Result<Option<IntegrationCommandTarget>> {
     let Some(target) = args.first().map(|arg| arg.as_str()) else {
         eprintln!(
-            "usage: trailboss integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|qwen|letta|cursor|mastracode|grok>"
+            "usage: trailboss integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|qwen|letta|shell|cursor|mastracode|grok>"
         );
         return Ok(None);
     };
     if args.len() != 1 {
         eprintln!(
-            "usage: trailboss integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|qwen|letta|cursor|mastracode|grok>"
+            "usage: trailboss integration {action} <pi|omp|claude|codex|copilot|devin|droid|kimi|opencode|kilo|hermes|qodercli|qwen|letta|shell|cursor|mastracode|grok>"
         );
         return Ok(None);
     }
@@ -173,6 +182,7 @@ fn parse_integration_target(
         "qodercli" => IntegrationCommandTarget::Builtin(IntegrationTarget::Qodercli),
         "qwen" => IntegrationCommandTarget::Builtin(IntegrationTarget::Qwen),
         "letta" => IntegrationCommandTarget::Letta,
+        "shell" => IntegrationCommandTarget::Shell,
         "cursor" => IntegrationCommandTarget::Builtin(IntegrationTarget::Cursor),
         "mastracode" => IntegrationCommandTarget::Builtin(IntegrationTarget::Mastracode),
         "antigravity-cli" | "antigravity_cli" => {
@@ -182,7 +192,7 @@ fn parse_integration_target(
         _ => {
             eprintln!("unknown integration target: {target}");
             eprintln!(
-                "currently supported: pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, qwen, letta, cursor, mastracode, antigravity-cli, grok"
+                "currently supported: pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, qwen, letta, shell, cursor, mastracode, antigravity-cli, grok"
             );
             return Ok(None);
         }
@@ -207,6 +217,7 @@ fn print_integration_help() {
     eprintln!("  trailboss integration install qodercli");
     eprintln!("  trailboss integration install qwen");
     eprintln!("  trailboss integration install letta");
+    eprintln!("  trailboss integration install shell");
     eprintln!("  trailboss integration install cursor");
     eprintln!("  trailboss integration install mastracode");
     eprintln!("  trailboss integration install antigravity-cli");
@@ -225,6 +236,7 @@ fn print_integration_help() {
     eprintln!("  trailboss integration uninstall qodercli");
     eprintln!("  trailboss integration uninstall qwen");
     eprintln!("  trailboss integration uninstall letta");
+    eprintln!("  trailboss integration uninstall shell");
     eprintln!("  trailboss integration uninstall cursor");
     eprintln!("  trailboss integration uninstall mastracode");
     eprintln!("  trailboss integration uninstall antigravity-cli");

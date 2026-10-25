@@ -9,6 +9,25 @@ import {
 import { z } from 'zod'
 import { type SubscriptionHandle, topologySubscriptions, trailbossTransport } from './transport'
 
+const CommandResult = z.object({
+  status: z.enum(['running', 'success', 'failure', 'unknown']),
+  exitCode: z.number().int().min(0).max(255).nullable(),
+})
+const CommandTokens = z
+  .object({
+    'command.status': CommandResult.shape.status,
+    'command.exit_code': z
+      .string()
+      .regex(/^(0|[1-9]\d{0,2})$/)
+      .transform(Number)
+      .pipe(z.number().max(255))
+      .optional(),
+  })
+  .transform((tokens) => ({
+    status: tokens['command.status'],
+    exitCode: tokens['command.exit_code'] ?? null,
+  }))
+
 // A single collection makes cross-workspace/tab/pane snapshot changes atomic.
 export const Entity = z.object({
   id: z.string(),
@@ -24,6 +43,7 @@ export const Entity = z.object({
   agentStatus: z.string(),
   agent: z.string().nullable(),
   cwd: z.string().nullable(),
+  command: CommandResult.optional(),
 })
 export type EntityRow = z.infer<typeof Entity>
 export const TreeRow = z.object({
@@ -56,6 +76,7 @@ const Pane = Common.extend({
   title: z.string().nullable().optional(),
   agent: z.string().nullable().optional(),
   cwd: z.string().nullable().optional(),
+  tokens: z.record(z.string(), z.string()).optional(),
 })
 const Snapshot = z.object({
   type: z.literal('session_snapshot'),
@@ -117,6 +138,7 @@ export function snapshotRows(value: unknown): EntityRow[] {
         agentStatus: p.agent_status,
         agent: p.agent ?? null,
         cwd: p.cwd ?? null,
+        command: CommandTokens.safeParse(p.tokens).data,
       }),
     ),
   ]
@@ -134,8 +156,7 @@ export function createTrailbossStore(
   onError: (error: unknown) => void = console.error,
   onPerf?: (stage: PerfStage, detail?: Record<string, number | string>) => void,
 ) {
-  if (!socketPath)
-    throw new Error('Provide a Trailboss JSON API socket path or HERDR_SOCKET_PATH')
+  if (!socketPath) throw new Error('Provide a Trailboss JSON API socket path or HERDR_SOCKET_PATH')
   const transport = trailbossTransport(socketPath)
   const commands = {
     request: transport.request,

@@ -30,6 +30,81 @@ const entities = snapshotRows({
   },
 })
 
+test('keeps a completed command exit result visible after its dot is acknowledged', () => {
+  const source = {
+    type: 'session_snapshot',
+    snapshot: {
+      workspaces: [
+        { workspace_id: 'w', label: 'Space', number: 1, focused: true, agent_status: 'idle' },
+      ],
+      tabs: [
+        {
+          workspace_id: 'w',
+          tab_id: 't',
+          label: 'Shell',
+          number: 1,
+          focused: true,
+          agent_status: 'idle',
+        },
+      ],
+      panes: [
+        {
+          workspace_id: 'w',
+          tab_id: 't',
+          pane_id: 'p',
+          focused: true,
+          agent_status: 'idle',
+          tokens: { 'command.status': 'failure', 'command.exit_code': '7' },
+        },
+      ],
+    },
+  }
+  const tab = projectTree(snapshotRows(source), new Set()).children.find(
+    (row) => row.context?.tab_id === 't',
+  )
+  expect(tab?.children[0]).toEqual({ type: 'label', text: '○', role: 'status-idle' })
+  expect(tab?.children).toContainEqual({
+    type: 'label',
+    text: ' · exit 7',
+    role: 'muted',
+  })
+})
+
+test('shows each split pane command result on its own focus target', () => {
+  const pane: EntityRow = {
+    ...entities[1],
+    id: 'pane:p',
+    kind: 'pane',
+    paneId: 'p',
+    label: 'Build',
+    command: { status: 'failure', exitCode: 7 },
+  }
+  const rows = projectTree(
+    [
+      ...entities,
+      pane,
+      {
+        ...pane,
+        id: 'pane:q',
+        paneId: 'q',
+        label: 'Check',
+        command: { status: 'success', exitCode: 0 },
+      },
+    ],
+    new Set(),
+  ).children
+  expect(rows.find((row) => row.context?.pane_id === 'p')?.children).toContainEqual({
+    type: 'label',
+    text: ' · exit 7',
+    role: 'muted',
+  })
+  expect(rows.find((row) => row.context?.pane_id === 'q')?.children).toContainEqual({
+    type: 'label',
+    text: ' · exit 0',
+    role: 'muted',
+  })
+})
+
 test('separates the session title from the first workspace section', () => {
   const rows = declareTree('junkman', entities, new Set()).zones[0].tree.children
   expect(rows[1]).toEqual({

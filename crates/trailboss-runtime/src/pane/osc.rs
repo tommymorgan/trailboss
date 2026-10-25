@@ -496,15 +496,27 @@ pub(super) struct AgentOscStateTracker {
     latest_title: Option<String>,
     terminal_title: Option<String>,
     latest_progress: Option<String>,
+    shell_command: ShellCommandOscState,
+}
+
+/// OSC 133 ordinary-command lifecycle derived from the same collected bodies.
+/// `dirty` is set only when a marker changed the phase or exit result, so
+/// `process_pty_bytes` can forward observations without extra bookkeeping.
+#[derive(Debug, Default)]
+struct ShellCommandOscState {
+    phase: crate::terminal::state::OrdinaryCommandPhase,
+    exit_code: Option<u8>,
+    dirty: bool,
 }
 
 impl AgentOscStateTracker {
     pub(super) fn observe(&mut self, bytes: &[u8]) -> bool {
-        let (collector, latest_title, terminal_title, latest_progress) = (
+        let (collector, latest_title, terminal_title, latest_progress, shell_command) = (
             &mut self.collector,
             &mut self.latest_title,
             &mut self.terminal_title,
             &mut self.latest_progress,
+            &mut self.shell_command,
         );
         let mut terminal_title_changed = false;
         collector.observe(bytes, |body| {
@@ -523,10 +535,40 @@ impl AgentOscStateTracker {
                     *latest_progress =
                         Some(sanitize_agent_osc_string(payload, AGENT_OSC_MAX_CHARS));
                 }
+                b"133" => shell_command.observe_marker(payload),
                 _ => {}
             }
         });
         terminal_title_changed
+    }
+
+    /// Returns the ordinary-command observation when an OSC 133 marker changed
+    /// the phase or exit result since the last take, for forwarding through
+    /// the pane's `ProcessBytesResult`.
+    pub(super) fn take_shell_command_observation(
+        &mut self,
+    ) -> Option<crate::terminal::state::OrdinaryCommandState> {
+        if !self.shell_command.dirty {
+            return None;
+        }
+        self.shell_command.dirty = false;
+        Some(crate::terminal::state::OrdinaryCommandState {
+            phase: self.shell_command.phase,
+            exit_code: self.shell_command.exit_code,
+        })
+    }
+
+    /// Restores the ordinary-command lifecycle across a live handoff so a
+    /// completion marker arriving after the handoff is attributed to the
+    /// command that was already executing. Does not mark the state dirty.
+    #[cfg(unix)]
+    pub(super) fn seed_shell_command_state(
+        &mut self,
+        command: crate::terminal::state::OrdinaryCommandState,
+    ) {
+        self.shell_command.phase = command.phase;
+        self.shell_command.exit_code = command.exit_code;
+        self.shell_command.dirty = false;
     }
 
     pub(super) fn terminal_title(&self) -> Option<&str> {
@@ -559,6 +601,83 @@ impl AgentOscStateTracker {
         self.latest_title = None;
         self.latest_progress = None;
     }
+}
+
+impl ShellCommandOscState {
+    /// Applies one OSC 133 payload (`A`, `B`, `C`, or `D[;exit]`).
+    ///
+    /// - `C` marks a command executing and clears any prior exit result.
+    /// - `D` completes the running command; its argument is honored only
+    ///   when a command was executing, so stray or startup `D` markers are
+    ///   ignored. A missing or malformed argument stays unknown, never 0.
+    /// - `A` at a prompt while a command was still executing (no `D` seen)
+    ///   completes that command with an unknown exit status.
+    fn observe_marker(&mut self, payload: &[u8]) {
+        let (&marker, argument) = payload.split_first().unwrap_or((&0, &[][..]));
+        let argument = argument.strip_prefix(b";").unwrap_or(&[]);
+        let next = match marker {
+            b'A' => match self.phase {
+                crate::terminal::state::OrdinaryCommandPhase::Executing => {
+                    self.set_exit(None);
+                    Some(crate::terminal::state::OrdinaryCommandPhase::Finished)
+                }
+                crate::terminal::state::OrdinaryCommandPhase::Unobserved => {
+                    Some(crate::terminal::state::OrdinaryCommandPhase::Prompt)
+                }
+                _ => None,
+            },
+            b'B' => match self.phase {
+                crate::terminal::state::OrdinaryCommandPhase::Unobserved => {
+                    Some(crate::terminal::state::OrdinaryCommandPhase::Prompt)
+                }
+                _ => None,
+            },
+            b'C' => {
+                self.set_exit(None);
+                Some(crate::terminal::state::OrdinaryCommandPhase::Executing)
+            }
+            b'D' => {
+                if self.phase == crate::terminal::state::OrdinaryCommandPhase::Executing {
+                    self.set_exit(parse_osc133_exit_code(argument));
+                    Some(crate::terminal::state::OrdinaryCommandPhase::Finished)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(phase) = next {
+            if self.phase != phase {
+                self.phase = phase;
+                self.dirty = true;
+            }
+        }
+    }
+
+    fn set_exit(&mut self, exit_code: Option<u8>) {
+        if self.exit_code != exit_code {
+            self.exit_code = exit_code;
+            self.dirty = true;
+        }
+    }
+}
+
+/// Parses an OSC 133;D exit argument. Accepts a decimal code in 0..=255,
+/// optionally followed by the finality `:errno` suffix. Anything else —
+/// empty, non-numeric, negative, or out of range — stays unknown.
+fn parse_osc133_exit_code(argument: &[u8]) -> Option<u8> {
+    let value = argument
+        .split(|&byte| byte == b':')
+        .next()
+        .filter(|digits| !digits.is_empty())?;
+    let mut parsed: u8 = 0;
+    for &digit in value {
+        if !digit.is_ascii_digit() {
+            return None;
+        }
+        parsed = parsed.checked_mul(10)?.checked_add(digit - b'0')?;
+    }
+    Some(parsed)
 }
 
 /// Splits an OSC body at the first `;`, returning `(command, payload)`.
@@ -897,7 +1016,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::layout::PaneId;
+    use crate::{layout::PaneId, terminal::state::OrdinaryCommandState};
 
     fn pane_default_theme(
         pane: &super::super::GhosttyPaneTerminal,
@@ -1475,5 +1594,172 @@ mod tests {
 
         assert_eq!(pane_default_theme(&pane).background, host_theme.background);
         assert_eq!(pane_default_theme(&pane).foreground, host_theme.foreground);
+    }
+
+    #[test]
+    fn shell_command_markers_track_full_lifecycle_with_bel_and_st_framing() {
+        use crate::terminal::state::OrdinaryCommandPhase as Phase;
+        let mut tracker = AgentOscStateTracker::default();
+
+        // Initial prompt: A then B, BEL-terminated; no command yet.
+        tracker.observe(b"\x1b]133;A\x07\x1b]133;B\x07");
+        assert_eq!(
+            tracker.take_shell_command_observation(),
+            Some(OrdinaryCommandState {
+                phase: Phase::Prompt,
+                exit_code: None
+            })
+        );
+        assert_eq!(tracker.take_shell_command_observation(), None);
+
+        // Command executes; prior result must clear at C.
+        tracker.observe(b"\x1b]133;C\x07");
+        assert_eq!(
+            tracker.take_shell_command_observation(),
+            Some(OrdinaryCommandState {
+                phase: Phase::Executing,
+                exit_code: None
+            })
+        );
+
+        // Completion with ST framing, then the next prompt in the same chunk.
+        tracker.observe(b"\x1b]133;D;0\x1b\\\x1b]133;A\x07");
+        assert_eq!(
+            tracker.take_shell_command_observation(),
+            Some(OrdinaryCommandState {
+                phase: Phase::Finished,
+                exit_code: Some(0)
+            })
+        );
+
+        // Failure path with errno-style suffix.
+        tracker.observe(b"\x1b]133;C\x07\x1b]133;D;130:2\x07");
+        assert_eq!(
+            tracker.take_shell_command_observation(),
+            Some(OrdinaryCommandState {
+                phase: Phase::Finished,
+                exit_code: Some(130)
+            })
+        );
+    }
+
+    #[test]
+    fn shell_command_markers_survive_chunked_framing() {
+        let mut tracker = AgentOscStateTracker::default();
+        tracker.observe(b"\x1b]13");
+        tracker.observe(b"3;C");
+        tracker.observe(b"\x07");
+        assert_eq!(
+            tracker.take_shell_command_observation(),
+            Some(OrdinaryCommandState {
+                phase: crate::terminal::state::OrdinaryCommandPhase::Executing,
+                exit_code: None
+            })
+        );
+
+        // ST terminator split across chunk boundaries.
+        tracker.observe(b"\x1b]133;D;0\x1b");
+        tracker.observe(b"\\");
+        assert_eq!(
+            tracker.take_shell_command_observation(),
+            Some(OrdinaryCommandState {
+                phase: crate::terminal::state::OrdinaryCommandPhase::Finished,
+                exit_code: Some(0)
+            })
+        );
+    }
+
+    #[test]
+    fn shell_command_markers_ignore_stray_and_malformed_completions() {
+        use crate::terminal::state::OrdinaryCommandPhase as Phase;
+        let mut tracker = AgentOscStateTracker::default();
+
+        // D without a preceding C is ignored, including at shell start.
+        tracker.observe(b"\x1b]133;D;0\x07");
+        assert_eq!(tracker.take_shell_command_observation(), None);
+
+        // Run a command; a D with no argument completes as unknown.
+        tracker.observe(b"\x1b]133;C\x07\x1b]133;D\x07");
+        assert_eq!(
+            tracker.take_shell_command_observation(),
+            Some(OrdinaryCommandState {
+                phase: Phase::Finished,
+                exit_code: None
+            })
+        );
+
+        // A later D;0 at the prompt must not overwrite the unknown result.
+        tracker.observe(b"\x1b]133;D;0\x07");
+        assert_eq!(tracker.take_shell_command_observation(), None);
+
+        // Out-of-range and malformed exit codes stay unknown, never 0.
+        for (argument, expected) in [
+            (&b"256"[..], None),
+            (&b"999999999999"[..], None),
+            (&b"-1"[..], None),
+            (&b"7x"[..], None),
+            (&b""[..], None),
+            (&b"007"[..], Some(7)),
+        ] {
+            let mut parser = AgentOscStateTracker::default();
+            parser.observe(b"\x1b]133;C\x07");
+            let _ = parser.take_shell_command_observation();
+            let body = format!("\x1b]133;D;{}\x07", String::from_utf8_lossy(argument));
+            parser.observe(body.as_bytes());
+            assert_eq!(
+                parser.take_shell_command_observation(),
+                Some(OrdinaryCommandState {
+                    phase: Phase::Finished,
+                    exit_code: expected
+                }),
+                "argument {:?}",
+                argument
+            );
+        }
+    }
+
+    #[test]
+    fn shell_command_markers_treat_new_prompt_without_d_as_unknown_completion() {
+        use crate::terminal::state::OrdinaryCommandPhase as Phase;
+        let mut tracker = AgentOscStateTracker::default();
+        tracker.observe(b"\x1b]133;A\x07\x1b]133;C\x07");
+        let _ = tracker.take_shell_command_observation();
+
+        // Prompt arrives while the command was still executing.
+        tracker.observe(b"\x1b]133;A\x07");
+        assert_eq!(
+            tracker.take_shell_command_observation(),
+            Some(OrdinaryCommandState {
+                phase: Phase::Finished,
+                exit_code: None
+            })
+        );
+
+        // A remote shell's fresh prompt is not a success completion either:
+        // the following D;0 from the outer prompt is ignored because no
+        // command is executing.
+        tracker.observe(b"\x1b]133;D;0\x07");
+        assert_eq!(tracker.take_shell_command_observation(), None);
+    }
+
+    #[test]
+    fn shell_command_seed_restores_executing_state_for_post_handoff_completion() {
+        use crate::terminal::state::OrdinaryCommandPhase as Phase;
+        let mut tracker = AgentOscStateTracker::default();
+        tracker.seed_shell_command_state(OrdinaryCommandState {
+            phase: Phase::Executing,
+            exit_code: None,
+        });
+        assert_eq!(tracker.take_shell_command_observation(), None);
+
+        // The D arriving after the handoff completes the seeded command.
+        tracker.observe(b"\x1b]133;D;7\x07");
+        assert_eq!(
+            tracker.take_shell_command_observation(),
+            Some(OrdinaryCommandState {
+                phase: Phase::Finished,
+                exit_code: Some(7)
+            })
+        );
     }
 }

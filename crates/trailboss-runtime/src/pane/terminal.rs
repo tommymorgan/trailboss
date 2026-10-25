@@ -170,6 +170,9 @@ pub(crate) struct ProcessBytesResult {
     pub clipboard_writes: Vec<Vec<u8>>,
     pub reported_cwd: Option<std::path::PathBuf>,
     pub terminal_responses: Vec<Bytes>,
+    /// Ordinary-command OSC 133 observation when the retained lifecycle
+    /// changed while processing these bytes.
+    pub shell_command: Option<crate::terminal::state::OrdinaryCommandState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1315,6 +1318,16 @@ impl GhosttyPaneTerminal {
         }
     }
 
+    /// Seeds the OSC 133 ordinary-command lifecycle captured at live handoff,
+    /// so a completion marker arriving after the handoff is attributed to the
+    /// command that was already executing.
+    #[cfg(unix)]
+    pub fn seed_shell_command_state(&self, command: crate::terminal::state::OrdinaryCommandState) {
+        if let Ok(mut core) = self.core.lock() {
+            core.agent_osc_state.seed_shell_command_state(command);
+        }
+    }
+
     /// Returns the latest OSC 0/2 title retained for agent detection, or `""`
     /// if no title has been seen or the last update was an empty clear.
     pub fn agent_osc_title(&self) -> String {
@@ -1359,6 +1372,7 @@ impl GhosttyPaneTerminal {
                 clipboard_writes: Vec::new(),
                 reported_cwd: None,
                 terminal_responses: Vec::new(),
+                shell_command: None,
             };
         };
 
@@ -1388,6 +1402,7 @@ impl GhosttyPaneTerminal {
             );
         }
         let terminal_title_changed = core.agent_osc_state.observe(bytes);
+        let shell_command = core.agent_osc_state.take_shell_command_observation();
 
         core.kitty_keyboard.observe(bytes);
         let mut terminal_responses = Vec::new();
@@ -1476,6 +1491,7 @@ impl GhosttyPaneTerminal {
             clipboard_writes,
             reported_cwd,
             terminal_responses,
+            shell_command,
         }
     }
 

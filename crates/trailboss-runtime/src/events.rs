@@ -194,6 +194,12 @@ pub enum AppEvent {
         pane_id: PaneId,
         cwd: std::path::PathBuf,
     },
+    /// Ordinary-command OSC 133 markers changed the pane's retained lifecycle.
+    /// Private internal projection; never part of an external client codec.
+    ShellCommandMarkersObserved {
+        pane_id: PaneId,
+        command: crate::terminal::state::OrdinaryCommandState,
+    },
     /// Background git status refresh completed for workspaces.
     GitStatusRefreshed {
         results: Vec<WorkspaceGitStatus>,

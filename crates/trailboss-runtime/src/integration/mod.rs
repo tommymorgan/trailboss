@@ -7,12 +7,14 @@ mod env;
 mod file_ops;
 mod opencode_config;
 mod registry;
+mod shell;
 mod targets;
 mod types;
 mod version;
 
 pub(crate) use actions::{
-    install_experimental_letta, install_target, uninstall_experimental_letta, uninstall_target,
+    install_experimental_letta, install_experimental_shell, install_target,
+    uninstall_experimental_letta, uninstall_experimental_shell, uninstall_target,
 };
 #[cfg(test)]
 pub(crate) use env::integration_env_lock;
@@ -21,9 +23,11 @@ pub(crate) use env::{
     TRAILBOSS_WORKSPACE_ID_ENV_VAR,
 };
 pub(crate) use registry::{
-    experimental_letta_integration_status, installed_integration_statuses,
-    integration_recommendations, integration_target_label, print_outdated_update_notice,
+    experimental_letta_integration_status, experimental_shell_integration_status,
+    installed_integration_statuses, integration_recommendations, integration_target_label,
+    print_outdated_update_notice,
 };
+pub(crate) use shell::pane_bash_rcfile;
 pub(crate) use types::{
     ExperimentalIntegrationStatus, IntegrationRecommendation, IntegrationStatus,
     IntegrationStatusKind,
@@ -32,7 +36,7 @@ pub(crate) use types::{
 /// CLI labels for experimental integrations that are intentionally not part of
 /// the frozen client endpoint `IntegrationTarget` enum. Empty this list once the
 /// agent registry provides first-class target registration.
-pub(crate) const EXPERIMENTAL_INTEGRATION_TARGET_LABELS: &[&str] = &["letta"];
+pub(crate) const EXPERIMENTAL_INTEGRATION_TARGET_LABELS: &[&str] = &["letta", "shell"];
 
 const PI_EXTENSION_INSTALL_NAME: &str = "trailboss-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/trailboss-agent-state.ts");

@@ -134,6 +134,36 @@ impl ShellCore {
             });
         }
     }
+
+    fn request(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let request: Request = serde_json::from_value(json!({
+            "id": "shell-observation",
+            "method": method,
+            "params": params
+        }))
+        .unwrap();
+        let mut response = self
+            .api
+            .request_value_with_timeout(&request, Duration::from_secs(2))
+            .unwrap();
+        assert!(response.get("result").is_some(), "{response}");
+        response["result"].take()
+    }
+
+    fn wait_for_pane_status(&self, pane_id: &str, status: &str) -> serde_json::Value {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let mut response = self.request("pane.get", json!({"pane_id": pane_id}));
+            if response["pane"]["agent_status"] == status {
+                return response["pane"].take();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "expected {status}, got {response}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 #[test]
@@ -200,4 +230,121 @@ fn configured_shell_overrides_nonempty_shell_environment() {
 fn configured_shell_overrides_restored_login_shell() {
     let mut core = ShellCore::launch(None, "[terminal]\ndefault_shell = \"/bin/sh\"\n");
     assert_sh_selected(&mut core);
+}
+
+#[test]
+fn ordinary_command_markers_show_busy_without_inventing_an_agent() {
+    let mut core = ShellCore::launch(Some("/bin/bash"), "");
+    core.wait_for("bash-ready> ");
+    core.client
+        .as_mut()
+        .unwrap()
+        .type_text("PS0=$'\\e]133;C\\a'; PROMPT_COMMAND='s=$?; printf \"\\033]133;D;%s\\007\\033]133;A\\007\" \"$s\"'; printf 'hooks-%s\\n' ready\r")
+        .unwrap();
+    core.wait_for("hooks-ready");
+    core.client
+        .as_mut()
+        .unwrap()
+        .type_text("(printf 'command-%s\\n' entered; while [ ! -e release-command ]; do sleep 0.02; done)\r")
+        .unwrap();
+    core.wait_for("command-entered");
+    let pane_id = core
+        .client
+        .as_ref()
+        .unwrap()
+        .focused_pane_id
+        .as_ref()
+        .unwrap();
+    let request: Request = serde_json::from_value(json!({
+        "id": "command-state",
+        "method": "pane.get",
+        "params": {"pane_id": pane_id}
+    }))
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let response = core
+            .api
+            .request_value_with_timeout(&request, Duration::from_secs(2))
+            .unwrap();
+        let pane = &response["result"]["pane"];
+        if pane["agent_status"] == "working" {
+            assert!(pane["agent"].is_null(), "ordinary commands are not agents");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ordinary command never became busy: {response}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::fs::write(core.home.join("release-command"), "").unwrap();
+}
+
+#[test]
+fn failed_command_is_red_until_acknowledged_and_retains_its_exit_code() {
+    let mut core = ShellCore::launch(Some("/bin/bash"), "");
+    core.wait_for("bash-ready> ");
+    let snapshot = core.request("session.snapshot", json!({}));
+    let snapshot = &snapshot["snapshot"];
+    let pane_id = snapshot["focused_pane_id"].as_str().unwrap();
+    let tab_id = snapshot["focused_tab_id"].as_str().unwrap();
+    let workspace_id = snapshot["focused_workspace_id"].as_str().unwrap();
+    let observer = core.request(
+        "tab.create",
+        json!({"workspace_id":workspace_id, "label":"Observer", "focus":false}),
+    );
+    let observer_id = observer["tab"]["tab_id"].as_str().unwrap();
+    core.client
+        .as_mut()
+        .unwrap()
+        .type_text("(while [ ! -e release-failure ]; do sleep 0.02; done; exit 7)\r")
+        .unwrap();
+    core.wait_for_pane_status(pane_id, "working");
+    core.request("tab.focus", json!({"tab_id":observer_id}));
+    std::fs::write(core.home.join("release-failure"), "").unwrap();
+    let completed = core.wait_for_pane_status(pane_id, "blocked");
+    assert_eq!(completed["tokens"]["command.status"], "failure");
+    assert_eq!(completed["tokens"]["command.exit_code"], "7");
+    assert!(completed["agent"].is_null());
+    let tabs = core.request("tab.list", json!({}));
+    let tab = tabs["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tab| tab["tab_id"] == tab_id)
+        .unwrap();
+    assert_eq!(tab["agent_status"], "blocked");
+    let spaces = core.request("workspace.list", json!({}));
+    let space = spaces["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|space| space["workspace_id"] == workspace_id)
+        .unwrap();
+    assert_eq!(space["agent_status"], "blocked");
+    core.request("tab.focus", json!({"tab_id":tab_id}));
+    let acknowledged = core.wait_for_pane_status(pane_id, "idle");
+    assert_eq!(acknowledged["tokens"]["command.status"], "failure");
+    assert_eq!(acknowledged["tokens"]["command.exit_code"], "7");
+}
+
+#[test]
+fn completion_without_an_exit_code_never_uses_a_success_dot() {
+    let mut core = ShellCore::launch(Some("/bin/bash"), "");
+    core.wait_for("bash-ready> ");
+    let snapshot = core.request("session.snapshot", json!({}));
+    let pane_id = snapshot["snapshot"]["focused_pane_id"].as_str().unwrap();
+    core.client
+        .as_mut()
+        .unwrap()
+        .type_text(
+            "(while [ ! -e release-unknown ]; do sleep 0.02; done; printf '\\033]133;D\\007')\r",
+        )
+        .unwrap();
+    core.wait_for_pane_status(pane_id, "working");
+    std::fs::write(core.home.join("release-unknown"), "").unwrap();
+    let completed = core.wait_for_pane_status(pane_id, "unknown");
+    assert_eq!(completed["tokens"]["command.status"], "unknown");
+    assert!(completed["tokens"].get("command.exit_code").is_none());
 }

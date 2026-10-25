@@ -515,6 +515,26 @@ pub(crate) fn experimental_letta_integration_status() -> Option<super::Experimen
     })
 }
 
+/// Shell integration is intentionally CLI-only like Letta: the frozen client
+/// endpoint `IntegrationTarget` enum must not grow variants. A hook file
+/// without a managed source block in any Bash startup file is nonfunctional,
+/// so it is reported as outdated the same way Grok's broken config is.
+pub(crate) fn experimental_shell_integration_status() -> super::ExperimentalIntegrationStatus {
+    let path = super::shell::shell_hook_path();
+    let (mut state, installed_version) =
+        integration_state_for_path(&path, super::shell::SHELL_INTEGRATION_VERSION);
+    if state == super::IntegrationStatusKind::Current && !super::shell::shell_block_is_installed() {
+        state = super::IntegrationStatusKind::Outdated;
+    }
+    super::ExperimentalIntegrationStatus {
+        label: "shell",
+        path,
+        state,
+        installed_version,
+        expected_version: super::shell::SHELL_INTEGRATION_VERSION,
+    }
+}
+
 pub(crate) fn parse_integration_version(content: &str) -> Option<u32> {
     content.lines().find_map(|line| {
         let marker_line = line

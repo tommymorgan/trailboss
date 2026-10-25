@@ -311,6 +311,57 @@ async fn publish_agent_process_detected_event(
     }
 }
 
+/// Publishes fallback ordinary-command state from the existing process probe.
+///
+/// Only an observed foreground job that does not contain the pane's shell is
+/// evidence that an ordinary command is running; a probe that merely echoes a
+/// remembered pgid is not. The published fallback never infers success or
+/// failure: an uninstrumented command's exit status stays unknown. OSC 133
+/// markers take precedence over this fallback in `TerminalState`, so an idle
+/// instrumented remote prompt overrides a still-live outer process such as an
+/// SSH transport.
+async fn publish_ordinary_probe_state(
+    state_events: &mpsc::Sender<AppEvent>,
+    pane_id: PaneId,
+    agent: Option<Agent>,
+    lifecycle_authority_active: bool,
+    suppressed_agent: Option<Agent>,
+    probe: &ProcessProbeResult,
+    now: std::time::Instant,
+    last_published: &mut Option<AgentState>,
+) {
+    if lifecycle_authority_active || agent.is_some() || suppressed_agent.is_some() {
+        return;
+    }
+    let state = if probe.foreground_job_observed && !probe.foreground_is_pane_shell {
+        AgentState::Working
+    } else {
+        AgentState::Unknown
+    };
+    if *last_published == Some(state) {
+        return;
+    }
+    *last_published = Some(state);
+    if let Err(err) = state_events
+        .send(AppEvent::StateChanged {
+            pane_id,
+            agent: None,
+            state,
+            visible_blocker: false,
+            visible_working: state == AgentState::Working,
+            process_exited: false,
+            observed_at: now,
+        })
+        .await
+    {
+        warn!(
+            pane = pane_id.raw(),
+            err = %err,
+            "failed to deliver ordinary command probe state"
+        );
+    }
+}
+
 async fn publish_codex_prompt_observation(
     state_events: &mpsc::Sender<AppEvent>,
     pane_id: PaneId,
@@ -799,6 +850,10 @@ fn sync_content_change_acquisition(
 struct ProcessProbeResult {
     process_group_id: Option<u32>,
     foreground_is_pane_shell: bool,
+    /// True only when an actual foreground job was observed. The fallback
+    /// shape with just a remembered pgid is not evidence a non-shell process
+    /// is running.
+    foreground_job_observed: bool,
     agent: Option<Agent>,
     /// The process that identified as `agent`, which need not lead its job.
     agent_pid: Option<u32>,
@@ -846,6 +901,7 @@ fn process_probe_result(
     ProcessProbeResult {
         process_group_id: Some(job.process_group_id),
         foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
+        foreground_job_observed: true,
         agent: Some(agent),
         agent_pid: Some(agent_pid),
         process_name: Some(process_name),
@@ -901,6 +957,7 @@ fn probe_foreground_process_from_jobs(
         return ProcessProbeResult {
             process_group_id: Some(job.process_group_id),
             foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
+            foreground_job_observed: true,
             agent: None,
             agent_pid: None,
             process_name: None,
@@ -910,6 +967,7 @@ fn probe_foreground_process_from_jobs(
     ProcessProbeResult {
         process_group_id: foreground_pgid,
         foreground_is_pane_shell: false,
+        foreground_job_observed: false,
         agent: None,
         agent_pid: None,
         process_name: None,
@@ -967,6 +1025,7 @@ fn spawn_basic_detection_task(
         let mut last_codex_prompt_ready = false;
         let mut last_self_reported_shell_check = None;
         let mut agent_job = AgentJobTracker::default();
+        let mut last_ordinary_probe_state: Option<AgentState> = None;
 
         loop {
             let sleep_duration = if pending_idle.active() {
@@ -1000,6 +1059,7 @@ fn spawn_basic_detection_task(
                     agent_startup_grace_until = None;
                     pending_idle.clear();
                     agent_job = AgentJobTracker::default();
+                    last_ordinary_probe_state = None;
                 }
             }
 
@@ -1125,6 +1185,17 @@ fn spawn_basic_detection_task(
                         }
                     }
                 }
+                publish_ordinary_probe_state(
+                    &state_events,
+                    pane_id,
+                    agent,
+                    lifecycle_authority_active,
+                    suppressed_agent,
+                    &probe,
+                    now,
+                    &mut last_ordinary_probe_state,
+                )
+                .await;
             }
 
             let process_exited = pending_foreground_shell_clear
@@ -2140,6 +2211,29 @@ fn pane_shell_command_builder_for_target(
     let mut cmd = CommandBuilder::new(&shell);
     if shell_mode_uses_login_shell(shell_config.mode, target) {
         cmd.args(windows_login_shell_args(&shell));
+    } else if target != ShellLaunchTarget::Windows {
+        // Interactive non-login Bash panes read a Trailboss rcfile that
+        // replays Bash's own startup files and then loads the OSC 133 hook
+        // after user configuration; user rc files are not modified. Login
+        // shells keep native startup semantics and load the hook through the
+        // managed `integration install shell` blocks. Every other shell
+        // stays explicitly uninstrumented. The wrapper is optional: when the
+        // config location cannot store it, warn and launch Bash without it
+        // rather than failing the whole pane spawn. Underlying shell spawn
+        // failures still propagate from the PTY spawn itself.
+        match crate::integration::pane_bash_rcfile(&shell) {
+            Ok(Some(rcfile)) => {
+                cmd.arg("--rcfile");
+                cmd.arg(&rcfile);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                warn!(
+                    err = %err,
+                    "cannot store the Bash pane rcfile wrapper; launching Bash without --rcfile"
+                );
+            }
+        }
     }
     if uses_windows_powershell_pane_shell_for_target(shell_config, target) {
         cmd.args([
@@ -2204,6 +2298,40 @@ fn publish_terminal_bells(pane_id: PaneId, count: u16, events: &mpsc::Sender<App
             "failed to queue terminal bell"
         );
     }
+}
+
+/// Keep the latest observation while the bounded app queue is full, without
+/// blocking the PTY actor (which must remain responsive to live handoff).
+fn publish_shell_command_observation(
+    publisher: &mut Option<
+        tokio::sync::watch::Sender<crate::terminal::state::OrdinaryCommandState>,
+    >,
+    rt: &tokio::runtime::Handle,
+    events: &mpsc::Sender<AppEvent>,
+    pane_id: PaneId,
+    command: crate::terminal::state::OrdinaryCommandState,
+) {
+    if let Some(publisher) = publisher {
+        publisher.send_replace(command);
+        return;
+    }
+
+    let (sender, mut receiver) = tokio::sync::watch::channel(command);
+    let events = events.clone();
+    rt.spawn(async move {
+        loop {
+            let command = *receiver.borrow_and_update();
+            if events
+                .send(AppEvent::ShellCommandMarkersObserved { pane_id, command })
+                .await
+                .is_err()
+                || receiver.changed().await.is_err()
+            {
+                break;
+            }
+        }
+    });
+    *publisher = Some(sender);
 }
 
 fn publish_reported_cwd(
@@ -2311,6 +2439,7 @@ impl PaneRuntime {
             terminal_title: self.terminal_title(),
             initial_history_ansi: None,
             agent_state: None,
+            ordinary_command: None,
         }
     }
 
@@ -2522,6 +2651,7 @@ impl PaneRuntime {
             terminal_title,
             initial_history_ansi,
             agent_state: _,
+            ordinary_command,
         } = state;
         let pane_id = PaneId::from_raw(pane_id);
         use std::os::fd::FromRawFd;
@@ -2543,6 +2673,9 @@ impl PaneRuntime {
         pane_terminal.apply_host_terminal_theme(host_terminal_theme);
         let _ = pane_terminal.apply_host_terminal_appearance(host_terminal_appearance);
         pane_terminal.seed_terminal_title(terminal_title);
+        if let Some(ordinary_command) = ordinary_command {
+            pane_terminal.seed_shell_command_state(ordinary_command);
+        }
         if let Some(input_state) = input_state {
             pane_terminal.seed_handoff_input_state(input_state);
         }
@@ -2578,6 +2711,7 @@ impl PaneRuntime {
             let compression_wake = compression.notifier();
             let rt = tokio::runtime::Handle::current();
             let delay_rt = rt.clone();
+            let mut command_publisher = None;
             let on_read = Box::new(move |bytes: &[u8]| {
                 let _content_write_guard = match content_write_lock.lock() {
                     Ok(guard) => guard,
@@ -2610,6 +2744,15 @@ impl PaneRuntime {
                 }
                 if let Some(cwd) = result.reported_cwd.clone() {
                     publish_reported_cwd(pane_id, cwd, &reported_cwd, &read_events);
+                }
+                if let Some(command) = result.shell_command {
+                    publish_shell_command_observation(
+                        &mut command_publisher,
+                        &delay_rt,
+                        &read_events,
+                        pane_id,
+                        command,
+                    );
                 }
                 for content in result.clipboard_writes {
                     if let Err(err) = read_events.try_send(AppEvent::ClipboardWrite { content }) {
@@ -2780,6 +2923,7 @@ impl PaneRuntime {
             let reported_cwd = reported_cwd.clone();
             let compression_wake = compression.notifier();
             let rt = tokio::runtime::Handle::current();
+            let mut command_publisher = None;
             let on_read = Box::new(move |bytes: &[u8]| {
                 let _content_write_guard = match content_write_lock.lock() {
                     Ok(guard) => guard,
@@ -2814,6 +2958,15 @@ impl PaneRuntime {
                 }
                 if let Some(cwd) = result.reported_cwd.clone() {
                     publish_reported_cwd(pane_id, cwd, &reported_cwd, &events);
+                }
+                if let Some(command) = result.shell_command {
+                    publish_shell_command_observation(
+                        &mut command_publisher,
+                        &rt,
+                        &events,
+                        pane_id,
+                        command,
+                    );
                 }
                 for content in result.clipboard_writes {
                     if let Err(err) = events.try_send(AppEvent::ClipboardWrite { content }) {
@@ -2890,6 +3043,7 @@ impl PaneRuntime {
                 let mut last_codex_prompt_ready = false;
                 let mut last_self_reported_shell_check = None;
                 let mut agent_job = AgentJobTracker::default();
+                let mut last_ordinary_probe_state: Option<AgentState> = None;
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -2932,6 +3086,7 @@ impl PaneRuntime {
                             last_screen_scan_detection_content_seq = None;
                             agent_startup_grace_until = None;
                             pending_idle.clear();
+                            last_ordinary_probe_state = None;
                             agent_job = AgentJobTracker::default();
                         }
                     }
@@ -3015,8 +3170,8 @@ impl PaneRuntime {
                         let had_process_probe = has_process_probe;
                         has_process_probe = true;
                         if pid > 0 {
-                            let probe = probe_foreground_process(pid, foreground_pgid);
-                            let process_name = probe.process_name;
+                            let mut probe = probe_foreground_process(pid, foreground_pgid);
+                            let process_name = probe.process_name.take();
                             let process_group_id = probe.process_group_id;
                             let tracked_process_group_id = process_group_for_change_tracking(
                                 foreground_pgid,
@@ -3118,6 +3273,17 @@ impl PaneRuntime {
                                 }
                                 agent_changed = true;
                             }
+                            publish_ordinary_probe_state(
+                                &state_events,
+                                pane_id,
+                                agent,
+                                lifecycle_authority_active,
+                                suppressed_agent,
+                                &probe,
+                                now,
+                                &mut last_ordinary_probe_state,
+                            )
+                            .await;
                         }
                     }
 
@@ -4029,7 +4195,7 @@ impl PaneRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsStr;
+    use std::{ffi::OsStr, time::Duration};
 
     #[tokio::test]
     async fn clear_pane_preserves_wrapped_input_and_unfinished_vt_sequence() {
@@ -4998,6 +5164,104 @@ mod tests {
         .unwrap();
         assert!(!cmd.is_default_prog());
         assert_eq!(cmd.get_argv(), &[std::ffi::OsString::from("/bin/sh")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_login_bash_pane_launches_when_config_location_cannot_store_wrapper() {
+        if !Path::new("/bin/bash").is_file() {
+            return;
+        }
+        let _lock = crate::integration::integration_env_lock();
+        let base = std::env::temp_dir().join(format!(
+            "trailboss-pane-rcfile-unwritable-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        // A regular file where the Trailboss config directory is needed:
+        // storing the rcfile wrapper must fail with a filesystem error
+        // without relying on root-sensitive permission bits.
+        let config_home = base.join("config-home");
+        std::fs::write(&config_home, "regular file, not a directory").unwrap();
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::set_var("HOME", &home);
+
+        let mut cmd = pane_shell_command_builder(PaneShellConfig::new(
+            "/bin/bash",
+            crate::config::ShellModeConfig::NonLogin,
+        ))
+        .expect("pane shell builder must survive an unusable config location");
+        cmd.env("TERM", "xterm");
+        let out = run_pane_command_on_pty(cmd, b"printf 'trailboss-%s\\n' fallback-ran\nexit 0\n");
+        let out = String::from_utf8_lossy(&out);
+        assert!(
+            out.contains("trailboss-fallback-ran"),
+            "bash pane did not run commands; pty output: {out:?}"
+        );
+
+        match previous_config_home {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    fn run_pane_command_on_pty(cmd: CommandBuilder, input: &[u8]) -> Vec<u8> {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+        let mut child = pair.slave.spawn_command(cmd).expect("spawn pane command");
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().expect("pty reader");
+        let mut writer = pair.master.take_writer().expect("pty writer");
+        writer.write_all(input).expect("write pty input");
+
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&output);
+        let reader_thread = std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => sink.lock().unwrap().extend_from_slice(&buf[..read]),
+                }
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match child.try_wait().expect("try wait") {
+                Some(_) => break,
+                None if Instant::now() > deadline => {
+                    let _ = child.kill();
+                    break;
+                }
+                None => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+        let _ = reader_thread.join();
+        let _ = child.wait();
+        Arc::try_unwrap(output).unwrap().into_inner().unwrap()
     }
 
     #[cfg(unix)]
@@ -6478,6 +6742,59 @@ mod tests {
 
         assert_eq!(bell, (pane_id, 2));
         runtime.shutdown();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_completion_survives_a_full_event_queue() {
+        let (events, mut event_rx) = mpsc::channel(1);
+        events
+            .try_send(AppEvent::UpdateReady {
+                version: "9.9.9".into(),
+                install_command: "trailboss update".into(),
+            })
+            .unwrap();
+        let pane_id = PaneId::from_raw(42);
+        let runtime = PaneRuntime::spawn_shell_command(
+            pane_id,
+            24,
+            80,
+            std::env::temp_dir(),
+            "printf '\\033]133;C\\007\\033]133;D;7\\007MARKERS_READ'; sleep 5",
+            &PaneLaunchEnv::default(),
+            AgentDetection::Disabled,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !runtime.visible_text().contains("MARKERS_READ") {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the reader consumes the completion while the queue is full");
+        runtime
+            .pause_handoff_reader(Duration::from_secs(1))
+            .expect("event backpressure must not block the PTY actor");
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(AppEvent::UpdateReady { .. })
+        ));
+        let completion = tokio::time::timeout(Duration::from_secs(1), event_rx.recv()).await;
+        runtime.shutdown();
+
+        assert!(matches!(
+            completion.expect("the pending completion must be delivered"),
+            Some(AppEvent::ShellCommandMarkersObserved { pane_id: delivered_pane, command })
+                if delivered_pane == pane_id
+                    && command.phase == crate::terminal::state::OrdinaryCommandPhase::Finished
+                    && command.exit_code == Some(7)
+        ));
     }
 
     #[tokio::test]

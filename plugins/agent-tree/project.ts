@@ -50,6 +50,11 @@ function label(text: string, role: z.infer<typeof Role>): z.infer<typeof Label> 
   return { type: 'label', text, role }
 }
 
+function commandResultText(pane: EntityRow | undefined): string | undefined {
+  if (!pane?.command || pane.agent || pane.command.status === 'running') return undefined
+  return ` · exit ${pane.command.exitCode ?? 'unknown'}`
+}
+
 // The producer specifies structure and semantic roles, never terminal widths.
 export function projectTree(entities: EntityRow[], collapsed: Set<string>): z.infer<typeof Column> {
   const workspaces = entities
@@ -84,6 +89,10 @@ export function projectTree(entities: EntityRow[], collapsed: Set<string>): z.in
     if (hidden) continue
     for (const tab of children) {
       if (tab.tabId === null) throw new Error('Tab entity has no tab identity')
+      const panes = entities
+        .filter((pane) => pane.kind === 'pane' && pane.tabId === tab.tabId)
+        .sort((a, b) => a.position - b.position)
+      const result = panes.length === 1 ? commandResultText(panes[0]) : undefined
       rows.push({
         type: 'row',
         action: 'focus-tab',
@@ -92,14 +101,13 @@ export function projectTree(entities: EntityRow[], collapsed: Set<string>): z.in
         children: [
           label(icon(tab.agentStatus), statusRole(tab.agentStatus)),
           label(` ${tab.label}`, 'label'),
+          ...(result === undefined ? [] : [label(result, 'muted')]),
         ],
       })
-      const panes = entities
-        .filter((pane) => pane.kind === 'pane' && pane.tabId === tab.tabId)
-        .sort((a, b) => a.position - b.position)
       if (panes.length > 1) {
         for (const pane of panes) {
           if (pane.paneId === null) throw new Error('Pane entity has no pane identity')
+          const paneResult = commandResultText(pane)
           rows.push({
             type: 'row',
             action: 'focus-pane',
@@ -108,7 +116,10 @@ export function projectTree(entities: EntityRow[], collapsed: Set<string>): z.in
               tab_id: tab.tabId,
               pane_id: pane.paneId,
             },
-            children: [label(`  ${pane.label || pane.paneId}`, 'muted')],
+            children: [
+              label(`  ${pane.label || pane.paneId}`, 'muted'),
+              ...(paneResult === undefined ? [] : [label(paneResult, 'muted')]),
+            ],
           })
         }
       }

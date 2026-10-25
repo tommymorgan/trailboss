@@ -1465,6 +1465,26 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
+            AppEvent::ShellCommandMarkersObserved { pane_id, command } => {
+                use crate::terminal::state::{OrdinaryCommandPhase, OrdinaryCommandState};
+
+                // C and D can share a PTY read. A finished observation implies
+                // execution even when its intermediate phase was coalesced away.
+                let started = if command.phase == OrdinaryCommandPhase::Finished {
+                    self.update_terminal_state(pane_id, |terminal| {
+                        terminal.observe_ordinary_command_markers(OrdinaryCommandState {
+                            phase: OrdinaryCommandPhase::Executing,
+                            exit_code: None,
+                        })
+                    })
+                } else {
+                    None
+                };
+                let completed = self.update_terminal_state(pane_id, |terminal| {
+                    terminal.observe_ordinary_command_markers(command)
+                });
+                started.into_iter().chain(completed).collect()
+            }
             AppEvent::HookStateReported {
                 pane_id,
                 source,
@@ -3007,6 +3027,35 @@ mod tests {
         let terminal = state.terminals.get(&terminal_id).unwrap();
         assert_eq!(terminal.state, AgentState::Working);
         assert_eq!(terminal.detected_agent, Some(Agent::Pi));
+    }
+
+    #[test]
+    fn coalesced_command_completions_each_mark_a_background_pane_unseen() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        let pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[1].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+
+        // A single PTY read may contain C, D and the next prompt. The reader
+        // reports the final phase, including when two commands share an exit code.
+        for _ in 0..2 {
+            state.workspaces[1].panes.get_mut(&pane_id).unwrap().seen = true;
+            state.handle_app_event(AppEvent::ShellCommandMarkersObserved {
+                pane_id,
+                command: crate::terminal::state::OrdinaryCommandState {
+                    phase: crate::terminal::state::OrdinaryCommandPhase::Finished,
+                    exit_code: Some(7),
+                },
+            });
+            let pane = &state.workspaces[1].panes[&pane_id];
+            let terminal = &state.terminals[&terminal_id];
+            assert!(!pane.seen);
+            assert_eq!(terminal.indicator_state(pane.seen), AgentState::Blocked);
+            assert!(terminal.effective_agent_label().is_none());
+            assert_eq!(terminal.metadata_tokens.values()["command.exit_code"], "7");
+        }
     }
 
     #[test]

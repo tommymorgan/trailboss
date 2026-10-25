@@ -147,6 +147,20 @@ pub(crate) struct LettaUninstallResult {
     pub removed_hook_file: bool,
     pub updated_settings: bool,
 }
+#[derive(Debug)]
+pub(crate) struct ShellInstallPaths {
+    pub hook_path: PathBuf,
+    pub rc_paths: Vec<PathBuf>,
+    pub created_rc_files: Vec<PathBuf>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ShellUninstallResult {
+    pub hook_path: PathBuf,
+    pub removed_hook_file: bool,
+    pub updated_rc_files: Vec<PathBuf>,
+    pub removed_created_rc_files: Vec<PathBuf>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IntegrationStatus {
