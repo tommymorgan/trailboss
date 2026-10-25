@@ -2,7 +2,7 @@
 // managed by trailboss; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // TRAILBOSS_INTEGRATION_ID=omp
-// TRAILBOSS_INTEGRATION_VERSION=16
+// TRAILBOSS_INTEGRATION_VERSION=17
 // @ts-nocheck
 
 import net, { type Server, type Socket } from "node:net";
@@ -15,10 +15,79 @@ const socketEndpoint =
   process.platform === "win32" && socketPath ? `\\\\.\\pipe\\${socketPath}` : socketPath;
 const paneId = process.env.HERDR_PANE_ID;
 const source = "herdr:omp";
+
+function procEnvironValue(environ: string, name: string): string | undefined {
+  for (const entry of environ.split("\0")) {
+    if (entry.startsWith(`${name}=`)) {
+      return entry.slice(name.length + 1);
+    }
+  }
+  return undefined;
+}
+
+function readProcText(pid: number, leaf: string): string | undefined {
+  try {
+    return fs.readFileSync(`/proc/${pid}/${leaf}`, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+function procParentPid(pid: number): number | undefined {
+  const status = readProcText(pid, "status");
+  const match = status ? /^PPid:\s+(\d+)$/m.exec(status) : null;
+  return match ? Number(match[1]) : undefined;
+}
+
+// Linux-only, once at module load: a nested `omp` can also be spawned directly
+// by the pane's root agent, without a marked shell in between. A process whose
+// ancestor chain still inside this pane's context contains an `omp` process is
+// such a nested child. The pane context is the boundary: the Core overwrites
+// HERDR_SOCKET_PATH and HERDR_PANE_ID when spawning a pane, so the first
+// ancestor whose initial environment no longer matches this pane's values is
+// outside the pane (the Core or beyond); the walk stops before classifying or
+// traversing it. Unverifiable ancestry (unreadable hop, pid<=1, depth cap)
+// fails open to OMPCODE-only behavior, so a genuine root keeps reporting.
+function ompAncestorWithinPaneContext(): boolean {
+  if (process.platform !== "linux" || !socketPath || !paneId) {
+    return false;
+  }
+  let pid = process.ppid;
+  for (let hop = 0; pid > 1 && hop < 32; hop += 1) {
+    const environ = readProcText(pid, "environ");
+    if (environ === undefined) {
+      return false;
+    }
+    if (
+      procEnvironValue(environ, "HERDR_SOCKET_PATH") !== socketPath ||
+      procEnvironValue(environ, "HERDR_PANE_ID") !== paneId
+    ) {
+      return false;
+    }
+    let name = readProcText(pid, "comm")?.trim();
+    if (!name) {
+      try {
+        name = path.basename(fs.readlinkSync(`/proc/${pid}/exe`));
+      } catch {
+        name = undefined;
+      }
+    }
+    if (name === "omp") {
+      return true;
+    }
+    const parent = procParentPid(pid);
+    if (parent === undefined || parent <= 1) {
+      return false;
+    }
+    pid = parent;
+  }
+  return false;
+}
+
 // OMP marks every shell it spawns with OMPCODE=1. A nested `omp` launched from
 // a parent session's shell inherits it, so that process is not the pane's root
 // agent and must not report its short-lived session over the parent's.
-const nestedOmpSession = process.env.OMPCODE === "1";
+const nestedOmpSession = process.env.OMPCODE === "1" || ompAncestorWithinPaneContext();
 
 function enabled() {
   return HERDR_ENV === "1" && !!socketPath && !!paneId && !nestedOmpSession;

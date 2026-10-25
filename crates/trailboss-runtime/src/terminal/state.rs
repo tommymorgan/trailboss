@@ -1014,6 +1014,23 @@ impl TerminalState {
             .is_some_and(|session| session.source == source && session.agent == agent)
     }
 
+    fn session_ref_for_owner(
+        &self,
+        source: &str,
+        agent: &str,
+    ) -> Option<&crate::agent_resume::AgentSessionRef> {
+        self.hook_authority
+            .as_ref()
+            .filter(|authority| authority.source == source && authority.agent_label == agent)
+            .and_then(|authority| authority.session_ref.as_ref())
+            .or_else(|| {
+                self.persisted_agent_session
+                    .as_ref()
+                    .filter(|session| session.source == source && session.agent == agent)
+                    .map(|session| &session.session_ref)
+            })
+    }
+
     fn suppress_current_full_lifecycle_hook_authority(
         &mut self,
         reason: FullLifecycleHookSuppressionReason,
@@ -1108,28 +1125,20 @@ impl TerminalState {
         let process_present = known_agent.is_some()
             && self.detected_agent == known_agent
             && self.recent_agent_process_exit.is_none();
-        let anchored_session_ref = self
-            .hook_authority
-            .as_ref()
-            .filter(|authority| authority.source == source && authority.agent_label == agent_label)
-            .and_then(|authority| authority.session_ref.as_ref())
-            .or_else(|| {
-                self.persisted_agent_session
-                    .as_ref()
-                    .filter(|session| session.source == source && session.agent == agent_label)
-                    .map(|session| &session.session_ref)
-            });
+        let anchored_session_ref = self.session_ref_for_owner(source, agent_label);
         let session_anchored = anchored_session_ref.is_some_and(|anchored| {
             session_ref
                 .as_ref()
                 .is_none_or(|incoming| incoming == anchored)
         });
-        let opencode_cross_talk = (source, agent_label) == ("herdr:opencode", "opencode")
-            && process_present
+        let root_session_cross_talk = matches!(
+            (source, agent_label),
+            ("herdr:opencode", "opencode") | ("herdr:omp", "omp")
+        ) && process_present
             && anchored_session_ref
                 .zip(session_ref.as_ref())
                 .is_some_and(|(anchored, incoming)| anchored != incoming);
-        if opencode_cross_talk {
+        if root_session_cross_talk {
             return FullLifecycleHookReportRoute::Ignore;
         }
         if let Some(suppressed) = self.suppressed_full_lifecycle_hook_reports.get(source) {
@@ -1559,11 +1568,7 @@ impl TerminalState {
                 | ("herdr:opencode", "opencode", Some("select"))
                 | ("herdr:pi", "pi", Some("new" | "resume" | "fork"))
                 | ("herdr:grok", "grok", Some("new"))
-                | (
-                    "herdr:omp",
-                    "omp",
-                    Some("startup" | "new" | "resume" | "fork")
-                )
+                | ("herdr:omp", "omp", Some("new" | "resume" | "fork"))
                 | (
                     "herdr:qwen",
                     "qwen",
@@ -1637,11 +1642,7 @@ impl TerminalState {
                 suppressed.agent_label == agent_label
                     && suppressed.reason != FullLifecycleHookSuppressionReason::HookClear
             });
-        let session_anchored = self.hook_authority.as_ref().is_some_and(|authority| {
-            authority.source == source
-                && authority.agent_label == agent_label
-                && authority.session_ref.is_some()
-        }) || self.persisted_agent_session_matches(&source, &agent_label);
+        let session_anchored = self.session_ref_for_owner(&source, &agent_label).is_some();
         let unsequenced_selection = Self::is_unsequenced_opencode_selection(
             &source,
             &agent_label,
@@ -1745,17 +1746,47 @@ impl TerminalState {
             }
             return None;
         }
-        if !unsequenced_selection && !self.accept_hook_report(&source, seq) {
-            return None;
-        }
         if self.known_agent_label_conflicts_with_detected_agent(&agent_label) {
             return None;
         }
-        let session_replacement_allowed = Self::session_report_allows_session_replacement(
-            &source,
-            &agent_label,
+        // OMP moves a journal between CWD directories without a session-switch
+        // event. Its unchanged filename identifies that relocation.
+        let session_relocated = (
+            source.as_str(),
+            agent_label.as_str(),
             session_start_source.as_deref(),
-        );
+        ) == ("herdr:omp", "omp", Some("startup"))
+            && self
+                .session_ref_for_owner(&source, &agent_label)
+                .is_some_and(|current| {
+                    current.kind == crate::agent_resume::AgentSessionRefKind::Path
+                        && session_ref.kind == current.kind
+                        && std::path::Path::new(&current.value)
+                            .file_name()
+                            .is_some_and(|name| {
+                                std::path::Path::new(&session_ref.value).file_name() == Some(name)
+                            })
+                });
+        let session_replacement_allowed = session_relocated
+            || Self::session_report_allows_session_replacement(
+                &source,
+                &agent_label,
+                session_start_source.as_deref(),
+            );
+        if (source.as_str(), agent_label.as_str()) == ("herdr:omp", "omp")
+            && !session_replacement_allowed
+            && self
+                .persisted_agent_session
+                .as_ref()
+                .is_some_and(|session| {
+                    session.source == source
+                        && session.agent == agent_label
+                        && session.session_ref.kind == session_ref.kind
+                        && session.session_ref != session_ref
+                })
+        {
+            return None;
+        }
         let replacing_identity_only_session =
             crate::detect::session_identity_only_integration(&source, &agent_label)
                 && session_replacement_allowed
@@ -1799,6 +1830,9 @@ impl TerminalState {
             &session_ref,
         );
         if replaced_hook_session.is_some() && !session_replacement_allowed {
+            return None;
+        }
+        if !unsequenced_selection && !self.accept_hook_report(&source, seq) {
             return None;
         }
 
@@ -3330,6 +3364,154 @@ mod tests {
 
         assert!(stale.is_none());
         assert_eq!(terminal.state, AgentState::Waiting);
+    }
+
+    #[test]
+    fn omp_nested_startup_preserves_root_identity_and_idle_ordering() {
+        let mut terminal = test_terminal();
+        let root = crate::agent_resume::AgentSessionRef::path(test_session_path("omp-root.jsonl"))
+            .unwrap();
+        let nested =
+            crate::agent_resume::AgentSessionRef::path(test_session_path("omp-nested.jsonl"))
+                .unwrap();
+        anchor_full_lifecycle_session(&mut terminal, Agent::Omp, "herdr:omp", "omp", root.clone());
+        terminal
+            .set_hook_authority_with_session_ref(
+                "herdr:omp".into(),
+                "omp".into(),
+                AgentState::Working,
+                None,
+                Some(root.clone()),
+                Some(10),
+            )
+            .expect("root Working report must establish lifecycle authority");
+
+        let nested_session = terminal.set_agent_session_ref_for_session_start(
+            "herdr:omp".into(),
+            "omp".into(),
+            Some(nested.clone()),
+            Some(1000),
+            Some("startup".into()),
+        );
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:omp".into(),
+            "omp".into(),
+            AgentState::Working,
+            None,
+            Some(nested),
+            Some(1001),
+        );
+        let root_idle = terminal.set_hook_authority_with_session_ref(
+            "herdr:omp".into(),
+            "omp".into(),
+            AgentState::Idle,
+            None,
+            Some(root.clone()),
+            Some(11),
+        );
+
+        assert!(
+            nested_session.is_none(),
+            "nested startup must not replace the root"
+        );
+        assert!(
+            root_idle.is_some(),
+            "rejected child reports must not poison root ordering"
+        );
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(
+            terminal.hook_authority.as_ref().unwrap().session_ref,
+            Some(root)
+        );
+    }
+
+    #[test]
+    fn omp_nested_startup_preserves_persisted_root_before_first_state_report() {
+        let mut terminal = test_terminal();
+        let root = crate::agent_resume::AgentSessionRef::path(test_session_path("omp-root.jsonl"))
+            .unwrap();
+        anchor_full_lifecycle_session(&mut terminal, Agent::Omp, "herdr:omp", "omp", root.clone());
+
+        let nested_session = terminal.set_agent_session_ref_for_session_start(
+            "herdr:omp".into(),
+            "omp".into(),
+            crate::agent_resume::AgentSessionRef::path(test_session_path("omp-nested.jsonl")),
+            Some(1000),
+            Some("startup".into()),
+        );
+        let root_idle = terminal.set_hook_authority_with_session_ref(
+            "herdr:omp".into(),
+            "omp".into(),
+            AgentState::Idle,
+            None,
+            Some(root.clone()),
+            Some(11),
+        );
+
+        assert!(
+            nested_session.is_none(),
+            "persisted root identity must not be replaced"
+        );
+        assert!(
+            root_idle.is_some(),
+            "the root's first lifecycle report must be accepted"
+        );
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(
+            terminal.hook_authority.as_ref().unwrap().session_ref,
+            Some(root)
+        );
+    }
+
+    #[test]
+    fn omp_startup_after_session_move_preserves_lifecycle_reporting() {
+        let mut terminal = test_terminal();
+        let root = crate::agent_resume::AgentSessionRef::path(test_session_path(
+            "before/2026-10-25_omp-root.jsonl",
+        ))
+        .unwrap();
+        let relocated = crate::agent_resume::AgentSessionRef::path(test_session_path(
+            "after/2026-10-25_omp-root.jsonl",
+        ))
+        .unwrap();
+        anchor_full_lifecycle_session(&mut terminal, Agent::Omp, "herdr:omp", "omp", root.clone());
+        terminal
+            .set_hook_authority_with_session_ref(
+                "herdr:omp".into(),
+                "omp".into(),
+                AgentState::Working,
+                None,
+                Some(root),
+                Some(10),
+            )
+            .expect("root Working report");
+
+        let moved = terminal.set_agent_session_ref_for_session_start(
+            "herdr:omp".into(),
+            "omp".into(),
+            Some(relocated.clone()),
+            Some(11),
+            Some("startup".into()),
+        );
+        let idle = terminal.set_hook_authority_with_session_ref(
+            "herdr:omp".into(),
+            "omp".into(),
+            AgentState::Idle,
+            None,
+            Some(relocated.clone()),
+            Some(12),
+        );
+
+        assert!(
+            moved.is_some(),
+            "moving the same journal must preserve root ownership"
+        );
+        assert!(idle.is_some(), "the moved root must still report Idle");
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(
+            terminal.hook_authority.as_ref().unwrap().session_ref,
+            Some(relocated)
+        );
     }
 
     #[test]
@@ -4945,10 +5127,6 @@ mod tests {
         );
 
         assert!(mutation.is_none());
-        assert_eq!(
-            terminal.hook_report_sequences.get("herdr:claude"),
-            Some(&21)
-        );
         assert_eq!(
             terminal
                 .persisted_agent_session

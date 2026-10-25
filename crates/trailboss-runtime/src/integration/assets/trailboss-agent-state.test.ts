@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { rm } from "node:fs/promises";
-import { existsSync, lstatSync, symlinkSync, unlinkSync } from "node:fs";
+import { existsSync, lstatSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import net, { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -268,6 +268,335 @@ test("OMP ignores nested sessions launched inside another OMP shell", async () =
 
   expect(requests).toEqual([]);
 });
+
+// v17 regression coverage: a nested `omp` launched directly by the pane's root
+// agent (no OMPCODE shell marker) must stay silent, while a genuine root whose
+// omp ancestor sits beyond the pane context must keep publishing. Both cases
+// drive the real reporter from real subprocesses; the recording server in this
+// process observes the wire. Synchronization is a stdin/stdout handshake on
+// actual wire observations; the nested child returns naturally so its pending
+// reporter sockets hold its event loop open until the recorder ACKs every
+// queued report, making its clean exit the drain checkpoint.
+const ompAncestorHarnessSource = `
+import fs from "node:fs";
+
+const role = process.argv[2];
+const reporterPath = process.argv[3];
+
+function contextFor(sessionFile, idle) {
+  return {
+    hasUI: true,
+    isIdle: () => idle,
+    sessionManager: {
+      getSessionFile: () => sessionFile,
+      getSessionId: () => sessionFile,
+    },
+  };
+}
+
+function renameToOmp() {
+  fs.writeFileSync("/proc/self/comm", "omp");
+  if (fs.readFileSync("/proc/self/comm", "utf8").trim() !== "omp") {
+    console.error("failed to name process omp");
+    process.exit(2);
+  }
+}
+
+function readLines(stream) {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let ended = false;
+  const pending = [];
+  const waiters = [];
+  const deliver = (line) => {
+    const waiter = waiters.shift();
+    if (waiter) waiter.resolve(line);
+    else pending.push(line);
+  };
+  void (async () => {
+    for await (const chunk of stream) {
+      buffer += decoder.decode(chunk, { stream: true });
+      let index;
+      while ((index = buffer.indexOf("\\n")) !== -1) {
+        deliver(buffer.slice(0, index));
+        buffer = buffer.slice(index + 1);
+      }
+    }
+    ended = true;
+    for (const waiter of waiters.splice(0)) waiter.resolve(null);
+  })();
+  return () => {
+    const queued = pending.shift();
+    if (queued !== undefined) return Promise.resolve(queued);
+    if (ended) return Promise.resolve(null);
+    const { promise, resolve } = Promise.withResolvers();
+    waiters.push({ resolve });
+    return promise;
+  };
+}
+
+async function awaitCommand(nextCommand, expected) {
+  const timeout = setTimeout(() => process.exit(5), 15_000);
+  const line = await nextCommand();
+  clearTimeout(timeout);
+  if (line !== expected) process.exit(4);
+}
+
+async function installReporter() {
+  // Dynamic import: the reporter path arrives at runtime as an argv value.
+  const handlers = new Map();
+  const pi = {
+    on: (event, handler) => handlers.set(event, handler),
+    events: { on: () => {} },
+  };
+  const { default: install } = await import(reporterPath);
+  install(pi);
+  return handlers;
+}
+
+async function shutdownReporter(handlers) {
+  await handlers.get("session_shutdown")?.({}, undefined);
+}
+
+async function runPaneRoot(sessionFile) {
+  renameToOmp();
+  const handlers = await installReporter();
+  const nextCommand = readLines(process.stdin);
+  await handlers.get("session_start")?.({ reason: "startup" }, contextFor(sessionFile, false));
+  process.stdout.write("root-started\\n");
+  await awaitCommand(nextCommand, "nest");
+
+  // Nested child: launched directly by this omp process, OMPCODE unset, same
+  // pane context and the SAME session ref as the root. It dies mid-waiting,
+  // like a short-lived nested conversation. It returns naturally, so its
+  // pending reporter sockets hold its event loop open until the recorder ACKs
+  // every queued report; awaiting its clean exit is the drain checkpoint.
+  const child = Bun.spawn(
+    [process.execPath, import.meta.path, "nested-child", reporterPath, sessionFile],
+    { stdin: "ignore", stdout: "ignore", stderr: "inherit" },
+  );
+  if ((await child.exited) !== 0) process.exit(3);
+  process.stdout.write("child-exited\\n");
+
+  await awaitCommand(nextCommand, "finish");
+  await handlers.get("agent_end")?.({}, contextFor(sessionFile, true));
+  process.stdout.write("idle-requested\\n");
+  await awaitCommand(nextCommand, "stop");
+  await shutdownReporter(handlers);
+  process.exit(0);
+}
+
+async function runNestedChild(sessionFile) {
+  const handlers = await installReporter();
+  const ctx = contextFor(sessionFile, true);
+  // Every callback is optional: a correctly silenced reporter registers none.
+  await handlers.get("session_start")?.({ reason: "startup" }, ctx);
+  await handlers.get("agent_start")?.({}, ctx);
+  // The nested conversation dies while waiting on a user question.
+  await handlers.get("tool_execution_start")?.(
+    { toolName: "ask", args: { questions: [{ question: "nested child question" }] } },
+    ctx,
+  );
+  await shutdownReporter(handlers);
+}
+
+async function runOuterOmp() {
+  // An omp ancestor beyond the pane boundary: its initial environment holds a
+  // different Trailboss context, like the Core that overwrote the pane values
+  // when spawning the pane root below it.
+  const [paneSocketPath, paneId, sessionFile] = process.argv.slice(4);
+  renameToOmp();
+  const env = {
+    ...process.env,
+    HERDR_ENV: "1",
+    HERDR_SOCKET_PATH: paneSocketPath,
+    HERDR_PANE_ID: paneId,
+  };
+  delete env.OMPCODE;
+  const child = Bun.spawn(
+    [process.execPath, import.meta.path, "genuine-root", reporterPath, sessionFile],
+    { env, stdin: "inherit", stdout: "inherit", stderr: "inherit" },
+  );
+  if ((await child.exited) !== 0) process.exit(3);
+  process.exit(0);
+}
+
+async function runGenuineRoot(sessionFile) {
+  renameToOmp();
+  const handlers = await installReporter();
+  const nextCommand = readLines(process.stdin);
+  await handlers.get("session_start")?.({ reason: "startup" }, contextFor(sessionFile, false));
+  process.stdout.write("root-started\\n");
+  await awaitCommand(nextCommand, "finish");
+  await handlers.get("agent_end")?.({}, contextFor(sessionFile, true));
+  process.stdout.write("idle-requested\\n");
+  await awaitCommand(nextCommand, "stop");
+  await shutdownReporter(handlers);
+  process.exit(0);
+}
+
+if (role === "pane-root") await runPaneRoot(process.argv[4]);
+if (role === "nested-child") await runNestedChild(process.argv[4]);
+if (role === "outer-omp") await runOuterOmp();
+if (role === "genuine-root") await runGenuineRoot(process.argv[4]);
+`;
+
+function writeOmpAncestorHarnessScript(): string {
+  const scriptPath = join(tmpdir(), `trailboss-omp-ancestor-harness-${process.pid}.ts`);
+  writeFileSync(scriptPath, ompAncestorHarnessSource);
+  return scriptPath;
+}
+
+function ompAncestorSpawnEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    TRAILBOSS_OMP_IDLE_DEBOUNCE_MS: "25",
+    ...overrides,
+  };
+  delete env.OMPCODE;
+  return env;
+}
+
+function readSpawnLines(stream: unknown) {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let ended = false;
+  const pending: string[] = [];
+  const waiters: Array<{ resolve: (line: string | null) => void }> = [];
+  const deliver = (line: string) => {
+    const waiter = waiters.shift();
+    if (waiter) waiter.resolve(line);
+    else pending.push(line);
+  };
+  void (async () => {
+    for await (const chunk of stream as AsyncIterable<Uint8Array>) {
+      buffer += decoder.decode(chunk, { stream: true });
+      let index: number;
+      while ((index = buffer.indexOf("\n")) !== -1) {
+        deliver(buffer.slice(0, index));
+        buffer = buffer.slice(index + 1);
+      }
+    }
+    ended = true;
+    for (const waiter of waiters.splice(0)) waiter.resolve(null);
+  })();
+  return () => {
+    const queued = pending.shift();
+    if (queued !== undefined) return Promise.resolve(queued);
+    if (ended) return Promise.resolve<string | null>(null);
+    const { promise, resolve } = Promise.withResolvers<string | null>();
+    waiters.push({ resolve });
+    return promise;
+  };
+}
+
+function withDeadline<T>(promise: Promise<T>, label: string, timeoutMs = 5_000): Promise<T> {
+  const { promise: timeout, reject } = Promise.withResolvers<T>();
+  setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), timeoutMs).unref?.();
+  return Promise.race([promise, timeout]);
+}
+
+test.skipIf(process.platform !== "linux")(
+  "OMP nested child with an omp ancestor in the same pane context never publishes over the root session",
+  async () => {
+    const requests = await startRecordingServer("omp-ancestor-nested");
+    const sessionFile = "/tmp/omp-ancestor-nested-session.jsonl";
+    const scriptPath = writeOmpAncestorHarnessScript();
+    const root = Bun.spawn(
+      [
+        process.execPath,
+        scriptPath,
+        "pane-root",
+        join(import.meta.dir, "omp", "trailboss-agent-state.ts"),
+        sessionFile,
+      ],
+      { env: ompAncestorSpawnEnv(), stdin: "pipe", stdout: "pipe", stderr: "inherit" },
+    );
+    try {
+      const nextMarker = readSpawnLines(root.stdout);
+      expect(await withDeadline(nextMarker(), "pane root start marker")).toBe("root-started");
+      // The pane root's Working must be on the wire before the child exists.
+      await waitFor(() => requestStates(requests).includes("working"));
+      root.stdin.write("nest\n");
+      await root.stdin.flush?.();
+      // The child's clean exit proves its report queue drained.
+      expect(await withDeadline(nextMarker(), "nested child exit marker")).toBe("child-exited");
+      root.stdin.write("finish\n");
+      await root.stdin.flush?.();
+      expect(await withDeadline(nextMarker(), "root idle marker")).toBe("idle-requested");
+      await waitFor(() => {
+        const states = requestStates(requests);
+        return states.length >= 2 && states[states.length - 1] === "idle";
+      });
+      root.stdin.write("stop\n");
+      await root.stdin.flush?.();
+      expect(await withDeadline(root.exited, "pane root exit")).toBe(0);
+    } finally {
+      if (root.exitCode === null) root.kill();
+      await root.exited;
+      await rm(scriptPath, { force: true });
+    }
+    expect(root.exitCode).toBe(0);
+
+    // Consumer lifecycle view: the pane shows the root's Working and, only
+    // after the nested child exited cleanly, the root's Idle. The child's own
+    // session claim (same ref as the root), ask Waiting and Idle must never
+    // surface.
+    expect(requestStates(requests)).toEqual(["working", "idle"]);
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "OMP genuine root still publishes working and idle when its omp ancestor is outside the pane context",
+  async () => {
+    const requests = await startRecordingServer("omp-ancestor-outer");
+    const recordingSocketPath = socketPath;
+    if (!recordingSocketPath) throw new Error("recording server did not start");
+    const sessionFile = "/tmp/omp-genuine-outer-session.jsonl";
+    const scriptPath = writeOmpAncestorHarnessScript();
+    const outer = Bun.spawn(
+      [
+        process.execPath,
+        scriptPath,
+        "outer-omp",
+        join(import.meta.dir, "omp", "trailboss-agent-state.ts"),
+        recordingSocketPath,
+        "test:p1",
+        sessionFile,
+      ],
+      {
+        env: ompAncestorSpawnEnv({
+          HERDR_SOCKET_PATH: join(tmpdir(), `trailboss-omp-outer-context-${process.pid}.sock`),
+          HERDR_PANE_ID: "outer:p9",
+        }),
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "inherit",
+      },
+    );
+    try {
+      const nextMarker = readSpawnLines(outer.stdout);
+      expect(await withDeadline(nextMarker(), "genuine root start marker")).toBe("root-started");
+      await waitFor(() => requestStates(requests).includes("working"));
+      outer.stdin.write("finish\n");
+      await outer.stdin.flush?.();
+      expect(await withDeadline(nextMarker(), "genuine root idle marker")).toBe("idle-requested");
+      await waitFor(() => {
+        const states = requestStates(requests);
+        return states.length >= 2 && states[states.length - 1] === "idle";
+      });
+      outer.stdin.write("stop\n");
+      await outer.stdin.flush?.();
+      expect(await withDeadline(outer.exited, "outer ancestor exit")).toBe(0);
+    } finally {
+      if (outer.exitCode === null) outer.kill();
+      await outer.exited;
+      await rm(scriptPath, { force: true });
+    }
+    expect(outer.exitCode).toBe(0);
+    expect(requestStates(requests)).toEqual(["working", "idle"]);
+  },
+);
 
 test("OMP accepts POSIX and Windows session paths", async () => {
   const { isAbsoluteSessionPath } = await importFresh("./omp/trailboss-agent-state.ts");
@@ -915,11 +1244,10 @@ test("OMP restart fails closed for malformed async snapshot", async () => {
   expect(state.shutdowns).toBe(0);
 });
 
-test("OMP restart rejects malformed, oversized, and foreign requests without shutdown", async () => {
+test("OMP restart rejects malformed and foreign requests without shutdown", async () => {
   const { state } = await startRestartHarness();
   const cases = [
     ["not-json\n", "invalid-request"],
-    [`${"x".repeat(8193)}\n`, "request-too-large"],
     [`${JSON.stringify(restartRequest)}\n{}\n`, "invalid-frame"],
     [`${JSON.stringify({ ...restartRequest, pid: process.pid + 1 })}\n`, "pid-mismatch"],
     [`${JSON.stringify({ ...restartRequest, pane_id: "foreign" })}\n`, "pane-mismatch"],

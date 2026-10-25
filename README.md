@@ -138,6 +138,29 @@ Remove the managed helper and source blocks with
 uninstrumented. Process probing can still detect an uninstrumented command
 as busy, but cannot establish its exit result.
 
+## OMP status ownership
+
+Install the reporter on the host running OMP:
+
+```sh
+trailboss integration install omp
+```
+
+On Linux, a nested OMP process does not report pane status when its ancestry
+contains another OMP process with the same pane and socket context. The walk
+stops at the pane boundary, so an OMP process outside that pane does not
+suppress its root reporter. Unreadable ancestry retains the existing behavior;
+the `OMPCODE=1` nested-shell guard still applies on every platform.
+
+Core also rejects conflicting OMP startup identities and their state reports
+before advancing report sequence numbers. The root can return to Idle after
+a rejected child's higher-sequence report. Same-session reloads, explicit
+new/resume/fork transitions and journal moves between directories remain
+supported.
+
+Reporter updates apply when a process next loads the extension. Installing
+an update does not reload or restart an existing OMP process.
+
 ## Thanks
 
 Trailboss stands on [herdr](https://github.com/herdrdev/herdr) and its
