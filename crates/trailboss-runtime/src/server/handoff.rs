@@ -176,14 +176,24 @@ pub(crate) fn accept_and_validate_on(
 }
 
 #[cfg(unix)]
-pub(crate) fn send_fds_and_wait_restored(stream: &mut UnixStream, fds: &[RawFd]) -> io::Result<()> {
+pub(crate) fn send_fds_and_wait_restored(
+    stream: &mut UnixStream,
+    fds: &[RawFd],
+    public_alias_count: usize,
+) -> io::Result<()> {
     send_fds(stream, fds)?;
 
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
     let restored = read_line_unbuffered(&mut *stream)?;
-    if restored.trim_end() != "restored" {
+    if public_alias_count == 0 {
+        if restored.trim_end() != "restored" {
+            return Err(io::Error::other(
+                "handoff import did not report restored runtimes",
+            ));
+        }
+    } else if restored.trim_end() != format!("restored-aliases {public_alias_count}") {
         return Err(io::Error::other(
-            "handoff import did not report restored runtimes",
+            "handoff import did not confirm restored public pane aliases",
         ));
     }
     Ok(())
@@ -273,8 +283,15 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
 }
 
 #[cfg(unix)]
-pub(crate) fn report_restored(stream: &mut UnixStream) -> io::Result<()> {
-    stream.write_all(b"restored\n")?;
+pub(crate) fn report_restored(
+    stream: &mut UnixStream,
+    public_alias_count: usize,
+) -> io::Result<()> {
+    if public_alias_count == 0 {
+        stream.write_all(b"restored\n")?;
+    } else {
+        writeln!(stream, "restored-aliases {public_alias_count}")?;
+    }
     stream.flush()
 }
 

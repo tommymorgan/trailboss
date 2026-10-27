@@ -1088,3 +1088,171 @@ fn same_space_transfers_reorder_with_stable_ids_and_silent_noops() {
         }
     }
 }
+
+#[test]
+fn inherited_pane_context_survives_transfer_and_live_handoff_until_close() {
+    // The imported owner is not Core.child. Stop whichever owner currently
+    // serves this isolated session, including on a failed post-handoff assertion.
+    struct StopOwner<'a>(&'a Core);
+    impl Drop for StopOwner<'_> {
+        fn drop(&mut self) {
+            let socket = self
+                .0
+                .home
+                .join(format!("trailboss/sessions/{}/trailboss.sock", self.0.name));
+            let api = trailboss_runtime::api_client::ApiClient::for_target(
+                trailboss_runtime::api_client::ConnectionTarget::SocketPath(socket.clone()),
+            );
+            let request = serde_json::from_value::<trailboss_runtime::api_schema::Request>(
+                json!({"id":"stop-handoff-owner","method":"server.stop","params":{}}),
+            )
+            .unwrap();
+            let _ = api.request_value_with_timeout(&request, Duration::from_secs(2));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while socket.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+    let core = Core::new();
+    let _stop_owner = StopOwner(&core);
+    let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+    let first = tools["root_pane"]["pane_id"].as_str().unwrap().to_owned();
+    let second = core.request(
+        "pane.split",
+        json!({"target_pane_id":first,"direction":"right","cwd":core.home}),
+    )["pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let original = [first, second];
+    let mut current = original.to_vec();
+    let mut terminals = original
+        .iter()
+        .map(|pane| {
+            core.request("pane.get", json!({"pane_id":pane}))["pane"]["terminal_id"].clone()
+        })
+        .collect::<Vec<_>>();
+    let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+    let mut processes = Vec::new();
+    let mut shell_states = Vec::new();
+    for stage in ["before", "moved", "handoff"] {
+        if stage == "moved" {
+            let transfer = core.request("tab.transfer",json!({"tab_id":tools["tab"]["tab_id"],"workspace_id":main["workspace"]["workspace_id"]}));
+            current = original
+                .iter()
+                .map(|pane| {
+                    transfer["transfer"]["panes"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|mapping| mapping["previous_pane_id"] == *pane)
+                        .unwrap()["pane_id"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect();
+        } else if stage == "handoff" {
+            core.request(
+                "server.live_handoff",
+                json!({"import_exe":support::executable()}),
+            );
+            // Existing handoff allocates fresh logical TerminalIds around the
+            // imported FDs. Aliases must target those current runtimes, while
+            // PID, PTY and shell context must survive unchanged.
+            terminals = current
+                .iter()
+                .map(|pane| {
+                    core.request("pane.get", json!({"pane_id":pane}))["pane"]["terminal_id"].clone()
+                })
+                .collect();
+        }
+        for (index, pane) in current.iter().enumerate() {
+            let initialize = if stage == "before" {
+                format!("transfer_local=local-{index}; ")
+            } else {
+                String::new()
+            };
+            core.request("pane.send_text",json!({"pane_id":pane,"text":format!(
+                "{initialize}printf '%s %s %s\\n' \"$$\" \"$transfer_local\" \"$HERDR_PANE_ID\" > {stage}-{index}.state; '{}' pane current --current > {stage}-{index}.json 2> {stage}-{index}.err; printf '%s\\n' \"$?\" > {stage}-{index}.done\n",
+                support::executable().display()
+            )}));
+            let status = wait_for_file(&core.home.join(format!("{stage}-{index}.done")));
+            assert_eq!(
+                status.trim(),
+                "0",
+                "inherited CLI context failed after {stage}: {}",
+                std::fs::read_to_string(core.home.join(format!("{stage}-{index}.err"))).unwrap()
+            );
+            let state = wait_for_file(&core.home.join(format!("{stage}-{index}.state")));
+            let fields = state.split_whitespace().collect::<Vec<_>>();
+            assert_eq!(fields[1], format!("local-{index}"));
+            assert_eq!(
+                fields[2], original[index],
+                "transfer must not rewrite inherited pane context"
+            );
+            if stage == "before" {
+                processes.push(process_identity(fields[0]));
+                shell_states.push(state.clone());
+            } else {
+                assert_eq!(
+                    state, shell_states[index],
+                    "shell PID/local/context changed after {stage}"
+                );
+                assert_eq!(
+                    process_identity(fields[0]),
+                    processes[index],
+                    "process/PTY changed after {stage}"
+                );
+            }
+            let inherited: Value = serde_json::from_str(
+                &std::fs::read_to_string(core.home.join(format!("{stage}-{index}.json"))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                inherited["result"]["pane"]["pane_id"], *pane,
+                "inherited context retargeted after {stage}"
+            );
+            assert_eq!(inherited["result"]["pane"]["terminal_id"], terminals[index]);
+            let aliased = core.request("pane.get", json!({"pane_id":original[index]}));
+            assert_eq!(aliased["pane"]["pane_id"], *pane);
+            assert_eq!(aliased["pane"]["terminal_id"], terminals[index]);
+        }
+    }
+    core.request("pane.close", json!({"pane_id":original[0]}));
+    let replacement = core.request(
+        "pane.split",
+        json!({"target_pane_id":current[1],"direction":"down","cwd":core.home}),
+    );
+    assert_ne!(replacement["pane"]["terminal_id"], terminals[0]);
+    let mut wire = BufReader::new(
+        UnixStream::connect(
+            core.home
+                .join(format!("trailboss/sessions/{}/trailboss.sock", core.name)),
+        )
+        .unwrap(),
+    );
+    wire.get_mut()
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    serde_json::to_writer(
+        wire.get_mut(),
+        &json!({"id":"closed-transfer-alias","method":"pane.get","params":{"pane_id":original[0]}}),
+    )
+    .unwrap();
+    wire.get_mut().write_all(b"\n").unwrap();
+    let mut line = String::new();
+    wire.read_line(&mut line).unwrap();
+    let closed: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(closed["id"], "closed-transfer-alias");
+    assert_eq!(closed["error"]["code"], "pane_not_found");
+    assert!(
+        closed.get("result").is_none(),
+        "closed alias retargeted a replacement pane"
+    );
+    assert_eq!(
+        core.request("pane.get", json!({"pane_id":original[1]}))["pane"]["terminal_id"],
+        terminals[1]
+    );
+}

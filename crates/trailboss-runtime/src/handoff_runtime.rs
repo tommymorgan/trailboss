@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct HandoffRuntimeState {
     pub pane_id: u32,
+    /// Old public locators owned by this live runtime, not cold persistence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public_pane_aliases: Vec<String>,
     pub child_pid: u32,
     pub rows: u16,
     pub cols: u16,

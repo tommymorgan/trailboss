@@ -67,6 +67,11 @@ and mappings from previous pane locators to their new locators.
 Completed cross-space moves publish `tab.transferred`, followed by the existing
 workspace and pane movement notifications. Subscribed stores refresh the source
 and destination from the completed Core snapshot.
+Old pane locators continue to target the same live panes until those panes
+close, including across a supported live Core handoff. Existing shell and agent
+environment variables are not rewritten. A handoff carrying these aliases
+requires the replacement Core to acknowledge their restoration before taking
+ownership; an alias-unaware replacement is rejected without committing the handoff.
 The existing `tab.move` API remains a reorder within one space.
 This is not a transfer between different Core sessions.
 

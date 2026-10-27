@@ -53,6 +53,14 @@ impl HeadlessServer {
                 }
             }
         }
+        let public_alias_count = self.app.state.public_pane_id_aliases.len();
+        let mut public_aliases_by_pane = HashMap::<u32, Vec<String>>::new();
+        for (alias, pane_id) in &self.app.state.public_pane_id_aliases {
+            public_aliases_by_pane
+                .entry(pane_id.raw())
+                .or_default()
+                .push(alias.clone());
+        }
 
         self.handoff_in_progress = true;
         self.disconnect_all_clients_for_handoff();
@@ -83,6 +91,8 @@ impl HeadlessServer {
                 continue;
             };
             let mut handoff_runtime = runtime.handoff_runtime_state(pane_id);
+            handoff_runtime.public_pane_aliases =
+                public_aliases_by_pane.remove(&pane_id).unwrap_or_default();
             handoff_runtime.agent_state = self
                 .app
                 .state
@@ -105,6 +115,12 @@ impl HeadlessServer {
                 handoff_runtime.initial_history_ansi = runtime.handoff_history_ansi();
             }
             handoff_entries.push((terminal_id.clone(), handoff_runtime));
+        }
+        if !public_aliases_by_pane.is_empty() {
+            self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
+            return Err(io::Error::other(
+                "handoff public pane alias has no live runtime",
+            ));
         }
 
         let panes = handoff_entries
@@ -168,7 +184,11 @@ impl HeadlessServer {
             }
         };
 
-        let send_result = crate::server::handoff::send_fds_and_wait_restored(&mut stream, &fds);
+        let send_result = crate::server::handoff::send_fds_and_wait_restored(
+            &mut stream,
+            &fds,
+            public_alias_count,
+        );
         for fd in fds {
             let _ = unsafe { libc::close(fd) };
         }

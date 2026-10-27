@@ -734,6 +734,14 @@ impl App {
         ) {
             app.plugin_installation_cleanup_allowed = false;
         }
+        let mut public_aliases = std::collections::HashMap::new();
+        for (&old_pane_id, import) in imports.iter_mut() {
+            for alias in std::mem::take(&mut import.state.public_pane_aliases) {
+                if public_aliases.insert(alias, old_pane_id).is_some() {
+                    return Err(io::Error::other("duplicate handoff public pane alias"));
+                }
+            }
+        }
         let (workspaces, terminals, runtimes) = crate::persist::restore_handoff(
             snapshot,
             config.advanced.scrollback_limit_bytes,
@@ -750,6 +758,25 @@ impl App {
         app.state.workspaces = workspaces;
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
+        for (alias, old_pane_id) in public_aliases {
+            let valid = alias.rsplit_once(":p").is_some_and(|(workspace, number)| {
+                !workspace.is_empty()
+                    && !workspace.contains(':')
+                    && crate::workspace::decode_public_number(number).is_some_and(|n| n > 0)
+            });
+            let pane_id = app
+                .state
+                .pane_id_aliases
+                .get(&old_pane_id)
+                .copied()
+                .unwrap_or_else(|| crate::layout::PaneId::from_raw(old_pane_id));
+            if !valid || app.find_pane(pane_id).is_none() || app.parse_pane_id(&alias).is_some() {
+                return Err(io::Error::other(
+                    "invalid or shadowing handoff public pane alias",
+                ));
+            }
+            app.state.public_pane_id_aliases.insert(alias, pane_id);
+        }
         app.state.active = snapshot
             .active
             .filter(|&idx| idx < app.state.workspaces.len());

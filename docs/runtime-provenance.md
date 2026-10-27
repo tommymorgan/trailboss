@@ -442,3 +442,44 @@ and Rustfmt passing. An independent real CLI/native-input witness covered
 all slots, fresh Logs frames, all original public tab/pane IDs and TerminalIds,
 and the nine-kind topology subscription, including 250ms no-op observation
 (3.231439304s operation / 3.246254002s wall).
+
+### T09: Inherited pane context survives live Core handoff
+
+Transferred panes carry their old public locators in private, serde-optional
+per-runtime handoff metadata. Import remaps each old internal pane ID to its
+restored live pane and rejects duplicate, invalid, missing-owner or shadowing
+aliases. A nonempty alias manifest requires an exact `restored-aliases <count>`
+receipt at the existing restored-runtime acknowledgment, before public socket
+removal and ownership commit. Alias-free handoffs retain plain `restored`.
+No cold-persistence format, public API schema or inherited process environment
+changed. T18/T19 compatibility scenarios remain separate evidence gates.
+
+The real-Core regression first failed when an existing shell's actual
+`pane current --current` CLI call lost its inherited locator only after handoff
+(0.962s tests / 1.823045330s total). It now checks both split shells before the
+move, after the move and after supported handoff, retaining PID/start/PTY,
+executable, shell-local state and original `HERDR_PANE_ID`, with alias cleanup
+after close and no retargeting to a replacement pane. The fixture initially
+overconstrained TerminalId survival across handoff: existing restore code imports
+the same FD but allocates a fresh logical TerminalId. The correction compares
+aliases with the current imported terminal while retaining original TerminalId
+checks across the move itself.
+
+An owned mutation replacing the old-to-imported PaneId remap with the old raw
+ID failed after handoff by targeting `w3:p1` instead of `w3:p3`
+(0.724s tests / 27.141114821s total). The restored full target passed 8/8
+(3.727s tests / 30.329029096s total), with strict root/runtime Clippy
+(0.187020307s) and Rustfmt (2.089661171s) passing.
+
+An independent witness ran two genuine OMP 18.13.0 TUI roots in owned PTYs,
+using the actual reporter and a local streaming model fixture without host
+credentials or an external model. The original copied binary preserved the
+OMP/shell processes and completed its fifth model turn but stopped publishing
+fresh Working state after handoff (13.187067436s operation / 13.202048578s wall).
+The fixed candidate completed five actual Working-to-Done turns before/after
+transfer and after handoff in the same moved OMP session
+(8.717692793s operation / 8.736796244s wall). A foreign genuine root's attempted
+session takeover with sequence 1000000 was ignored, and both roots continued
+their own turns. OMP/shell/companion PID/start/PTY/executable identities survived;
+all recorded owned processes were gone after stopping the new Core through its
+API. These are isolated local proofs, not installation or human-session changes.
