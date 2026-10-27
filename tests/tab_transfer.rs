@@ -194,3 +194,63 @@ fn cli_transfers_complete_split_tab_without_restarting_terminals() {
         assert_eq!(process_identity(fields[1]), originals[index].2);
     }
 }
+
+#[test]
+fn cli_transfer_uses_each_destination_insertion_slot() {
+    for (index, expected) in [
+        (0, ["Build", "One", "Two"]),
+        (1, ["One", "Build", "Two"]),
+        (2, ["One", "Two", "Build"]),
+    ] {
+        let core = Core::new();
+        let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+        let source = tools["workspace"]["workspace_id"].as_str().unwrap();
+        let tab = tools["tab"]["tab_id"].as_str().unwrap();
+        core.request("tab.rename", json!({"tab_id":tab,"label":"Build"}));
+        core.request(
+            "tab.create",
+            json!({"workspace_id":source,"label":"Remaining","cwd":core.home}),
+        );
+        let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+        let destination = main["workspace"]["workspace_id"].as_str().unwrap();
+        core.request(
+            "tab.rename",
+            json!({"tab_id":main["tab"]["tab_id"],"label":"One"}),
+        );
+        core.request(
+            "tab.create",
+            json!({"workspace_id":destination,"label":"Two","cwd":core.home}),
+        );
+
+        let output = cli(
+            &core,
+            &[
+                "tab",
+                "move",
+                tab,
+                "--workspace",
+                destination,
+                "--index",
+                &index.to_string(),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "insertion slot {index} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["result"]["transfer"]["index"], index);
+        let tabs = core.request("tab.list", json!({"workspace_id":destination}));
+        let actual = tabs["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tab| tab["label"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "destination insertion slot {index}");
+        let remaining = core.request("tab.list", json!({"workspace_id":source}));
+        assert_eq!(remaining["tabs"].as_array().unwrap().len(), 1);
+        assert_eq!(remaining["tabs"][0]["label"], "Remaining");
+    }
+}

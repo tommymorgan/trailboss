@@ -333,3 +333,15 @@ refresh passed 1/1; workspace/all-target check, strict Clippy and Rustfmt passed
 These are local source proofs, not installation or human-session activation.
 Events/store convergence, remaining transfer cases and handoff compatibility
 are not claimed by this T01 checkpoint.
+
+### T02: Explicit destination insertion slots
+
+The real CLI outline `cli_transfer_uses_each_destination_insertion_slot`
+exercises slots 0, 1 and 2 against fresh isolated Cores and checks exact
+destination order, the reported index and removal from the source. Its initial
+baseline passed: T01 already implemented these slots, so no missing-behavior
+RED or production fix is claimed. Forcing slot zero outside the candidate
+failed the slot-one order assertion (1 failed, 1.119s tests / 28.310275s total).
+The restored related suite passed 2/2 (1.316s tests / 27.193911s total), with
+Rustfmt and strict test-target Clippy/typecheck passing. A standalone real CLI
+`--index 1` continuity witness passed in 0.257908s.
