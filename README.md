@@ -58,6 +58,8 @@ session or its socket. See [runtime provenance](docs/runtime-provenance.md#trail
 Use `trailboss tab move <tab-id> --workspace <space-id>` to move a complete
 running tab to another space in the same Core. The tab is appended by default;
 `--index N` chooses a zero-based insertion slot.
+This command requires a Core that supports `tab.transfer`. An older Core returns
+an error; the CLI does not fall back to reordering the source tab with `tab.move`.
 
 The move retains the split layout, pane labels, zoom, focused pane and live
 terminals. An attached client displaying the moved tab follows it to its new

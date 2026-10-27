@@ -507,3 +507,33 @@ and received fresh native input/output (0.678930588s operation / 0.931078235s
 total). Its initial API-ready/client-socket startup race was a witness correction;
 the permanent harness already waits for the actual Client socket. These remain
 isolated local proofs, not installation or activation in human sessions.
+
+### T11: An older Core rejects transfer without source reordering
+
+An independent witness used the actual pre-feature Core binary (0.9.3, protocol
+22) and a transparent wire observer. The new CLI sent `ping` and exactly one
+`tab.transfer` request, with ID `cli:tab:move`. The older Core returned its
+correlated `invalid_request` for unknown `tab.transfer`; the CLI exited 1 and
+reported that error as JSON on stderr. No fallback `tab.move` was sent. Tools
+remained `[One, Build, Two]`, and Main and the current pane/view were unchanged.
+A separate existing `tab.move` caller against the candidate Core reordered Build
+to `[Build, One, Two]`. The witness passed in 0.360630982s operation /
+0.954637083s total.
+
+Existing permanent bindings cover generic executable CLI error reporting and
+typed request/response correlation (`executable_session_automation_smoke` and
+`existing_session_automation_preserves_typed_wire_contracts`: 2/2,
+2.829s tests / 3.880730908s total), plus the actual legacy reorder handler and
+its event (`api_tab_move_reorders_tabs_in_target_workspace`: 1/1,
+0.019s tests / 16.501357163s total). This was inherited GREEN, with no production
+change or redundant mock test. The old binary stays an owned external witness
+artifact, not a permanent test dependency.
+
+The required owned mutation routed the CLI transfer to legacy `TabMove`.
+The permanent real-CLI transfer test failed because it received `tab_list`
+instead of `tab_transfer` (0.461s tests / 26.668573832s total). The actual
+older-Core witness also failed: the mutated CLI exited 0 instead of nonzero
+(0.661381589s total). After removing the mutation, all nine transfer tests passed
+(3.755s tests / 29.937279188s total), and the older-Core wire witness passed again
+(0.373940688s operation / 0.934879895s total). Strict Clippy (0.171949206s) and
+Rustfmt check (2.023386314s) passed on the restored candidate.
