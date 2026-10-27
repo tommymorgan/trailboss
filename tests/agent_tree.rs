@@ -2327,3 +2327,307 @@ fn executable_pty_unsupported_sidebar_transfer_reports_notice_without_reordering
     assert_eq!(console.child.0.process_id(), native_pid);
     assert!(console.child.0.try_wait().unwrap().is_none());
 }
+
+#[test]
+fn executable_pty_preserves_existing_sidebar_and_splitter_gestures() {
+    use std::{io::BufRead, io::BufReader, os::unix::net::UnixStream};
+
+    fn mouse(console: &mut LiveConsole, button: u8, x: usize, y: usize, end: char) {
+        console
+            .writer
+            .write_all(format!("\x1b[<{button};{};{}{end}", x + 1, y + 1).as_bytes())
+            .unwrap();
+        console.writer.flush().unwrap();
+    }
+    fn full_rows(screen: &ghostty_vt::Terminal) -> Vec<String> {
+        screen
+            .screen_text_rows()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                row.cells
+                    .iter()
+                    .flat_map(|cell| cell.graphemes.iter())
+                    .filter_map(|ch| char::from_u32(*ch))
+                    .collect()
+            })
+            .collect()
+    }
+    fn marker_at(screen: &ghostty_vt::Terminal, column: usize) -> bool {
+        let marker = b"NATIVE-SPLITTER";
+        screen.screen_text_rows().unwrap().iter().any(|row| {
+            row.cells
+                .iter()
+                .skip(column)
+                .flat_map(|cell| cell.graphemes.iter().copied())
+                .take(marker.len())
+                .eq(marker.iter().copied().map(u32::from))
+        })
+    }
+    fn tab_ids(core: &Core, workspace: &str) -> Vec<Value> {
+        core.request("tab.list", json!({"workspace_id":workspace}))["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tab| tab["tab_id"].clone())
+            .collect()
+    }
+
+    for gesture in ["tab-reorder", "space-reorder", "click", "menu", "splitter"] {
+        let core = Core::new();
+        let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+        let source = tools["workspace"]["workspace_id"].as_str().unwrap();
+        let build = tools["tab"]["tab_id"].as_str().unwrap();
+        let first = tools["root_pane"]["pane_id"].as_str().unwrap();
+        core.request("tab.rename", json!({"tab_id":build,"label":"Build"}));
+        let split = core.request(
+            "pane.split",
+            json!({
+                "target_pane_id":first,"direction":"right","ratio":0.37,"cwd":core.home
+            }),
+        );
+        let second = split["pane"]["pane_id"].as_str().unwrap();
+        let remaining = core.request(
+            "tab.create",
+            json!({
+                "workspace_id":source,"label":"Remaining","cwd":core.home
+            }),
+        );
+        let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+        let destination = main["workspace"]["workspace_id"].as_str().unwrap();
+        core.request(
+            "tab.rename",
+            json!({"tab_id":main["tab"]["tab_id"],"label":"Target"}),
+        );
+        if gesture != "click" {
+            core.request("pane.focus", json!({"pane_id":second}));
+        }
+        core.request(
+            "plugin.link",
+            json!({
+                "path":format!("{}/plugins/agent-tree",env!("CARGO_MANIFEST_DIR")),"enabled":true
+            }),
+        );
+        // Complete both sidebar producers before any single-shot native gesture.
+        {
+            let mut observer = core.attach();
+            let menu_name = format!("sidebar.tab-menu:{build}");
+            let ui = trailboss::core::Core::default();
+            let menu_ready = |trees: &sidebar::Declarations| {
+                ui.fragment(trees, &menu_name).is_some_and(|(owner, tree)| {
+                    owner == "tommymorgan.sidebar-menus"
+                        && matches!(tree, Node::Column { children } if !children.is_empty())
+                })
+            };
+            core.request(
+                "plugin.link",
+                json!({
+                    "path":format!("{}/plugins/sidebar-menus",env!("CARGO_MANIFEST_DIR")),
+                    "enabled":true
+                }),
+            );
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if observer.declarations.as_ref().is_some_and(|trees| {
+                    menu_ready(trees) && sidebar::rows(trees).any(|(owner, node)| {
+                        owner == "tommymorgan.agent-tree"
+                            && matches!(node, Node::Row { action: Some(action), menu: Some(menu), context, .. }
+                                if action == "focus-tab"
+                                    && context.workspace_id.as_deref() == Some(source)
+                                    && context.tab_id.as_deref() == Some(build)
+                                    && context.pane_id.is_none()
+                                    && matches!(menu.as_ref(), Node::Use { name } if name == &menu_name))
+                    })
+                }) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "T17 Build named menu/context not published"
+                );
+                observer.receive().unwrap();
+            }
+            drop(observer);
+        }
+        let mut console = LiveConsole::new_for_tab(&core, source, build);
+        let native_pid = console.child.0.process_id();
+        let rows = console.wait_for("T17 real agent-tree startup", |rows, _| {
+            ["Tools", "Build", "Remaining", "Main", "Target"]
+                .iter()
+                .all(|label| rows.iter().any(|row| row.contains(label)))
+        });
+        let row = |label: &str| rows.iter().position(|row| row.contains(label)).unwrap();
+        let before_source = tab_ids(&core, source);
+        let before_destination = tab_ids(&core, destination);
+        let mut expected_workspace_order: Vec<Value> = core.request("session.snapshot", json!({}))
+            ["snapshot"]["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|workspace| workspace["workspace_id"].clone())
+            .collect();
+        let before_layout =
+            core.request("pane.layout", json!({"pane_id":second}))["layout"].clone();
+        let before_terminal =
+            core.request("pane.get", json!({"pane_id":second}))["pane"]["terminal_id"].clone();
+        let mut events = BufReader::new(
+            UnixStream::connect(
+                core.home
+                    .join("trailboss/sessions")
+                    .join(&core.name)
+                    .join("trailboss.sock"),
+            )
+            .unwrap(),
+        );
+        events
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .unwrap();
+        serde_json::to_writer(
+            events.get_mut(),
+            &json!({
+                "id":"existing-gesture-transfers","method":"events.subscribe",
+                "params":{"subscriptions":[{"type":"tab.transferred"}]}
+            }),
+        )
+        .unwrap();
+        events.get_mut().write_all(b"\n").unwrap();
+        let mut line = String::new();
+        events.read_line(&mut line).unwrap();
+        assert!(serde_json::from_str::<Value>(&line)
+            .unwrap()
+            .get("error")
+            .is_none());
+
+        match gesture {
+            "tab-reorder" => {
+                mouse(&mut console, 0, 4, row("Remaining"), 'M');
+                mouse(&mut console, 32, 4, row("Build"), 'M');
+                mouse(&mut console, 0, 4, row("Build"), 'm');
+                console.wait_for("T17 same-space tab order", |rows, _| {
+                    rows.iter().position(|row| row.contains("Remaining"))
+                        < rows.iter().position(|row| row.contains("Build"))
+                });
+                assert_eq!(
+                    tab_ids(&core, source),
+                    vec![
+                        remaining["tab"]["tab_id"].clone(),
+                        tools["tab"]["tab_id"].clone(),
+                    ]
+                );
+            }
+            "space-reorder" => {
+                mouse(&mut console, 0, 4, row("Main"), 'M');
+                mouse(&mut console, 32, 4, row("Tools"), 'M');
+                mouse(&mut console, 0, 4, row("Tools"), 'm');
+                console.wait_for("T17 space header order", |rows, _| {
+                    rows.iter().position(|row| row.contains("Main"))
+                        < rows.iter().position(|row| row.contains("Tools"))
+                });
+                let previous = expected_workspace_order
+                    .iter()
+                    .position(|workspace| workspace == destination)
+                    .unwrap();
+                let moved = expected_workspace_order.remove(previous);
+                let insertion = expected_workspace_order
+                    .iter()
+                    .position(|workspace| workspace == source)
+                    .unwrap();
+                expected_workspace_order.insert(insertion, moved);
+            }
+            "click" => {
+                console.click(row("Build"));
+                console.wait_for("T17 Build click selection", |rows, _| {
+                    rows.iter()
+                        .any(|row| row.starts_with('▏') && row.contains("Build"))
+                });
+                let snapshot = core.request("session.snapshot", json!({}))["snapshot"].clone();
+                assert_eq!(snapshot["focused_workspace_id"], source);
+                assert_eq!(snapshot["focused_tab_id"], build);
+            }
+            "menu" => {
+                mouse(&mut console, 35, 4, row("Build"), 'M');
+                let hovered = console.wait_for("T17 Build menu affordance", |rows, _| {
+                    rows[row("Build")].contains('⋯')
+                });
+                let x = hovered[row("Build")]
+                    .chars()
+                    .position(|ch| ch == '⋯')
+                    .unwrap();
+                mouse(&mut console, 0, x, row("Build"), 'M');
+                mouse(&mut console, 0, x, row("Build"), 'm');
+                console.wait_for("T17 Build context menu", |_, screen| {
+                    full_rows(screen)
+                        .iter()
+                        .any(|row| row.contains("Rename “Build”"))
+                });
+                console.writer.write_all(b"\x1b").unwrap();
+                console.writer.flush().unwrap();
+                console.wait_for("T17 menu dismissal", |_, screen| {
+                    full_rows(screen)
+                        .iter()
+                        .all(|row| !row.contains("Rename “Build”"))
+                });
+            }
+            "splitter" => {
+                core.request(
+                    "pane.send_text",
+                    json!({"pane_id":second,
+                    "text":"printf '\\033[2J\\033[HNATIVE-SPLITTER\\n'\n"}),
+                );
+                console.wait_for("T17 original terminal origin", |_, screen| {
+                    marker_at(screen, 30)
+                });
+                mouse(&mut console, 0, 30, 15, 'M');
+                mouse(&mut console, 32, 42, 15, 'M');
+                mouse(&mut console, 0, 42, 15, 'm');
+                console.wait_for("T17 resized terminal origin", |_, screen| {
+                    marker_at(screen, 42)
+                });
+            }
+            _ => unreachable!(),
+        }
+        let actual_workspace_order: Vec<Value> = core.request("session.snapshot", json!({}))
+            ["snapshot"]["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|workspace| workspace["workspace_id"].clone())
+            .collect();
+        assert_eq!(
+            actual_workspace_order, expected_workspace_order,
+            "{gesture}"
+        );
+        if gesture != "tab-reorder" {
+            assert_eq!(tab_ids(&core, source), before_source, "{gesture}");
+        }
+        assert_eq!(tab_ids(&core, destination), before_destination, "{gesture}");
+        let after_layout = core.request("pane.layout", json!({"pane_id":second}))["layout"].clone();
+        let split_semantics = |layout: &Value| {
+            layout["splits"].as_array().unwrap().iter()
+            .map(|split| json!({"id":split["id"],"direction":split["direction"],"ratio":split["ratio"]}))
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            split_semantics(&after_layout),
+            split_semantics(&before_layout),
+            "{gesture}"
+        );
+        let pane = core.request("pane.get", json!({"pane_id":second}));
+        assert_eq!(pane["pane"]["terminal_id"], before_terminal, "{gesture}");
+        assert_eq!(pane["pane"]["workspace_id"], source, "{gesture}");
+        assert_eq!(console.child.0.process_id(), native_pid, "{gesture}");
+        assert!(console.child.0.try_wait().unwrap().is_none(), "{gesture}");
+        line.clear();
+        let quiet = events
+            .read_line(&mut line)
+            .expect_err("existing gesture issued a transfer");
+        assert!(
+            matches!(
+                quiet.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+            "{gesture}: {quiet}"
+        );
+    }
+}

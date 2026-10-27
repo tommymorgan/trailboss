@@ -3,7 +3,8 @@ mod console;
 mod support;
 use console::Console;
 use std::{
-    io::Write,
+    io::{BufRead, BufReader, Write},
+    os::unix::net::UnixStream,
     time::{Duration, Instant},
 };
 use support::{Core, HOMES};
@@ -58,6 +59,34 @@ fn mouse_drag_highlights_only_pane_text_and_copies_on_release() {
     }
     let pane_id = observer.primary.take().unwrap().pane_id;
     drop(observer);
+    let mut transfers = BufReader::new(
+        UnixStream::connect(
+            core.home
+                .join("trailboss/sessions")
+                .join(&core.name)
+                .join("trailboss.sock"),
+        )
+        .unwrap(),
+    );
+    transfers
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .unwrap();
+    serde_json::to_writer(
+        transfers.get_mut(),
+        &serde_json::json!({
+            "id":"selection-transfers","method":"events.subscribe",
+            "params":{"subscriptions":[{"type":"tab.transferred"}]}
+        }),
+    )
+    .unwrap();
+    transfers.get_mut().write_all(b"\n").unwrap();
+    let mut line = String::new();
+    transfers.read_line(&mut line).unwrap();
+    assert!(serde_json::from_str::<serde_json::Value>(&line)
+        .unwrap()
+        .get("error")
+        .is_none());
     let mut console = client(&core);
     console.wait(|rows| rows.iter().any(|r| r.contains("$")));
     console.text("printf '\\033[2J\\033[H select-%s\\n' me\r");
@@ -128,4 +157,12 @@ fn mouse_drag_highlights_only_pane_text_and_copies_on_release() {
         pane_id,
         "selection changed the focused pane"
     );
+    line.clear();
+    let quiet = transfers
+        .read_line(&mut line)
+        .expect_err("text selection issued a transfer");
+    assert!(matches!(
+        quiet.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ));
 }

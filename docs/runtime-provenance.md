@@ -911,3 +911,64 @@ An independent mutant witness failed at the same post-release notice boundary
 (1/1, 0.993s test / 2.211s total).
 Earlier compile errors while adding the feedback tests preceded these passing
 checks and are not counted as behavioral RED or GREEN.
+
+### T17 existing native gestures remain intact
+
+`executable_pty_preserves_existing_sidebar_and_splitter_gestures` exercises five
+actual native interactions against the real agent-tree: reorder tabs only within
+Tools, reorder space headers while preserving the default space, click Build,
+open Build's existing context menu and resize the sidebar/terminal divider.
+The last case observes the terminal origin moving from cell column 30 to 42;
+the native client changes composition widths, not Core pane split ratios.
+Each case retains the original terminal identity, pane placement, Core split
+semantics and native PID, with no `tab.transferred` event.
+Before native attachment, all five cases explicitly start the existing
+sidebar-menus producer and wait for Build's resolved named menu together with
+the real agent-tree row's exact action/context. A labels-only frame is not a
+menu-provider readiness signal. The fixture sends each gesture once.
+
+The sixth contract reuses
+`mouse_drag_highlights_only_pane_text_and_copies_on_release`: it checks bounded
+terminal highlighting, exact `select-me` bytes in owned OSC52 output, subsequent
+shell input and unchanged pane focus. Its added transfer subscription stays
+quiet. No human desktop clipboard is used.
+
+All six contracts passed without a production change. The final focused run,
+including the existing direct divider regression, passed 3/3 (5.001s test /
+5.923s total). An earlier broader affected native/library/mouse run passed
+37/37 (10.040s test / 10.283s total). Final strict all-target Clippy passed
+(0.364s), and Rustfmt check passed (2.095s).
+The independent actual-native witness passed tab reorder, space reorder, Build
+click with keyboard input and divider resizing in 1.101s total, retaining the
+original pane/terminal identity and client process.
+
+In an owned throwaway copy, changing only `SidebarResize::begin` to leave capture
+false caused the native five-row test to fail exactly at the resized-terminal
+origin, after the other four cases passed (12.554s test / 12.788s total).
+The existing direct divider regression also failed (0.004s test / 0.785s total),
+as did the independent native witness at the 30-to-42 divider change (11.040s).
+After restoring capture, the three focused tests passed (5.005s test / 6.339s
+total), and the independent restored witness passed in 1.104s total.
+
+Earlier fixture failures are not causal production RED: the space assertion
+initially omitted the default workspace, the click assertion incorrectly
+required the transfer-specific second-pane policy, and the divider assertion
+used UTF-8 byte offsets instead of terminal cell columns. The corrected fixture
+compares complete workspace order, preserves the existing tab-click contract
+and reads marker positions from rendered cells. The independent keyboard
+witness also waits for Build's actual visible terminal frame, not merely API
+focus metadata, before typing.
+
+Initial mutation-copy menu failures are not causal proof: that copy lacked the
+sidebar-menus dependency link. Linking its existing dependencies and waiting
+for the actual named menu let the same single mutation reach the divider
+failure. No dependencies were installed. The temporary menu diagnostic was
+removed after retaining its output.
+
+The independent restored helper initially prelinked producers from the candidate
+checkout while running the throwaway checkout's binary. Native startup
+canonicalizes its own producer paths and relinks differing roots
+(`src/main.rs`), so that setup could replace declarations during a capture.
+Using the restored binary's matching producer root and waiting for named-menu
+readiness resolved that witness failure without changing production or retrying
+input. The candidate witness already used matching paths.
