@@ -910,3 +910,330 @@ fn executable_pty_current_store_starts_and_refreshes_against_legacy_core() {
         "native client exited"
     );
 }
+
+#[test]
+fn transferring_a_tab_keeps_its_running_popup_and_client_input() {
+    use std::os::unix::net::UnixStream;
+    use trailboss_runtime::protocol::{
+        self,
+        endpoint::{
+            EndpointClientHello, BLOB_CODEC_V1, ENDPOINT_HELLO_KIND, INPUT_CODEC_V1,
+            SNAPSHOT_CODEC_V1, SURFACE_CODEC_V1,
+        },
+        ClientMessage, ClientPaneInputEvent, ClientSurfaceSize, PaneSurfaceFrame, ServerMessage,
+    };
+    fn surface(
+        stream: &mut UnixStream,
+        stage: &str,
+        ready: impl Fn(&PaneSurfaceFrame) -> bool,
+    ) -> PaneSurfaceFrame {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "{stage}: surface did not arrive");
+            let message: ServerMessage =
+                protocol::read_message(stream, protocol::MAX_GRAPHICS_FRAME_SIZE)
+                    .unwrap_or_else(|error| panic!("{stage}: {error}"));
+            if let ServerMessage::PaneSurface(frame) = message {
+                if ready(&frame) {
+                    return frame;
+                }
+            }
+        }
+    }
+    fn popup_text(frame: &PaneSurfaceFrame) -> String {
+        frame
+            .popup
+            .as_ref()
+            .map(|popup| {
+                popup
+                    .frame
+                    .cells
+                    .iter()
+                    .map(|cell| cell.symbol.as_str())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    fn process(pid: &str) -> (String, std::path::PathBuf) {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        (
+            stat.rsplit_once(") ")
+                .unwrap()
+                .1
+                .split_whitespace()
+                .nth(19)
+                .unwrap()
+                .into(),
+            std::fs::read_link(format!("/proc/{pid}/fd/0")).unwrap(),
+        )
+    }
+
+    let core = Core::new();
+    let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+    let source = tools["workspace"]["workspace_id"].as_str().unwrap();
+    let build = tools["tab"]["tab_id"].as_str().unwrap();
+    core.request("tab.rename", json!({"tab_id":build,"label":"Build"}));
+    core.request(
+        "tab.create",
+        json!({"workspace_id":source,"label":"Remaining","cwd":core.home}),
+    );
+    let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+    core.request("tab.focus", json!({"tab_id":build}));
+
+    let plugin = core.home.join("popup-plugin");
+    std::fs::create_dir_all(&plugin).unwrap();
+    let pid_file = core.home.join("popup.pid");
+    let reply_file = core.home.join("popup.reply");
+    std::fs::write(plugin.join("trailboss-plugin.toml"), format!(r#"
+id = "example.transfer-popup"
+name = "Transfer Popup"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+platforms = ["linux"]
+[[panes]]
+id = "live"
+title = "Running Build Popup"
+placement = "popup"
+command = ["sh", "-c", '''popup_local=popup-state; printf '%s\n' "$$" > '{}'; printf 'POPUP_READY\n'; while IFS= read -r line; do printf '%s %s %s\n' "$$" "$popup_local" "$line" > '{}'; printf 'POPUP_REPLY-%s\n' "$line"; done''']
+"#, pid_file.display(), reply_file.display())).unwrap();
+    core.request("plugin.link", json!({"path":plugin,"enabled":true}));
+
+    let mut client = UnixStream::connect(core.home.join(format!(
+        "trailboss/sessions/{}/trailboss-client.sock",
+        core.name
+    )))
+    .unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let hello = EndpointClientHello {
+        generation: 1,
+        cell_width_px: 0,
+        cell_height_px: 0,
+        surface_size: ClientSurfaceSize { cols: 80, rows: 24 },
+        pixel_mouse: false,
+        direct_graphics: false,
+        endpoint_keybindings: false,
+        mouse_capture: false,
+        surface_active: true,
+        surface_reuse: false,
+        surface_delta: false,
+        surface_scroll: false,
+        snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
+        surface_codecs: vec![SURFACE_CODEC_V1.into()],
+        input_codecs: vec![INPUT_CODEC_V1.into()],
+        blob_codecs: vec![BLOB_CODEC_V1.into()],
+    };
+    protocol::write_message(
+        &mut client,
+        &ClientMessage::EndpointControl {
+            kind: ENDPOINT_HELLO_KIND.into(),
+            data: serde_json::to_string(&hello).unwrap(),
+        },
+    )
+    .unwrap();
+    surface(&mut client, "Build before popup", |frame| {
+        frame
+            .panes
+            .iter()
+            .any(|pane| pane.pane_id == tools["root_pane"]["pane_id"])
+    });
+    core.request(
+        "plugin.pane.open",
+        json!({
+            "plugin_id":"example.transfer-popup","entrypoint":"live","focus":true
+        }),
+    );
+    let opened = surface(&mut client, "running popup before transfer", |frame| {
+        popup_text(frame).contains("POPUP_READY")
+    });
+    let terminal = opened.popup.as_ref().unwrap().terminal_id.clone();
+    let pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let original_process = process(&pid);
+
+    let moved = core.request(
+        "tab.transfer",
+        json!({
+            "tab_id":build,"workspace_id":main["workspace"]["workspace_id"]
+        }),
+    );
+    let new_pane = moved["transfer"]["panes"][0]["pane_id"].as_str().unwrap();
+    let after = surface(&mut client, "Build after transfer", |frame| {
+        frame.panes.iter().any(|pane| pane.pane_id == new_pane)
+    });
+    let popup = after
+        .popup
+        .as_ref()
+        .expect("transferring Build closed its existing running popup");
+    assert_eq!(popup.terminal_id, terminal, "popup runtime was replaced");
+    assert_eq!(
+        process(&pid),
+        original_process,
+        "popup process or PTY changed"
+    );
+
+    protocol::write_message(
+        &mut client,
+        &ClientMessage::ClientShellPopupInput {
+            terminal_id: terminal,
+            events: vec![ClientPaneInputEvent::TextCommit("after-transfer\n".into())],
+        },
+    )
+    .unwrap();
+    surface(
+        &mut client,
+        "same popup accepts input after transfer",
+        |frame| popup_text(frame).contains("POPUP_REPLY-after-transfer"),
+    );
+    assert_eq!(
+        std::fs::read_to_string(reply_file).unwrap(),
+        format!("{pid} popup-state after-transfer\n")
+    );
+    assert_eq!(process(&pid), original_process);
+    core.request("popup.close", json!({}));
+}
+
+#[test]
+fn transferred_overlay_exit_restores_the_moved_tabs_original_zoom_and_focus() {
+    let core = Core::new();
+    let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+    let build = tools["tab"]["tab_id"].as_str().unwrap();
+    let first = tools["root_pane"]["pane_id"].as_str().unwrap();
+    core.request("tab.rename", json!({"tab_id":build,"label":"Build"}));
+    let split = core.request(
+        "pane.split",
+        json!({
+            "target_pane_id":first,"direction":"right","ratio":0.37,"cwd":core.home,"focus":true
+        }),
+    );
+    let second = split["pane"]["pane_id"].as_str().unwrap();
+    let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+    core.request("pane.focus", json!({"pane_id":second}));
+    core.request("pane.zoom", json!({"pane_id":second,"mode":"on"}));
+    let original = core.request("pane.layout", json!({"pane_id":second}))["layout"].clone();
+    assert_eq!(original["focused_pane_id"], second);
+    assert_eq!(original["zoomed"], true);
+
+    let plugin = core.home.join("overlay-plugin");
+    std::fs::create_dir_all(&plugin).unwrap();
+    let ready = core.home.join("overlay.ready");
+    std::fs::write(
+        plugin.join("trailboss-plugin.toml"),
+        format!(
+            r#"
+id = "example.transfer-overlay"
+name = "Transfer Overlay"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+platforms = ["linux"]
+[[panes]]
+id = "live"
+title = "Running Build Overlay"
+placement = "overlay"
+command = ["sh", "-c", '''printf ready > '{}'; IFS= read -r line; test "$line" = leave''']
+"#,
+            ready.display()
+        ),
+    )
+    .unwrap();
+    core.request("plugin.link", json!({"path":plugin,"enabled":true}));
+    let opened = core.request(
+        "plugin.pane.open",
+        json!({
+            "plugin_id":"example.transfer-overlay","entrypoint":"live","focus":true
+        }),
+    );
+    let overlay = opened["plugin_pane"]["pane"]["pane_id"].as_str().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "owned overlay command did not start"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let before_exit = core.request("pane.layout", json!({"pane_id":overlay}))["layout"].clone();
+    assert_eq!(before_exit["focused_pane_id"], overlay);
+    assert_eq!(before_exit["panes"].as_array().unwrap().len(), 3);
+    let mut client = core.attach();
+    while client.focused_pane_id.as_deref() != Some(overlay) {
+        client.receive().unwrap();
+    }
+
+    let moved = core.request(
+        "tab.transfer",
+        json!({
+            "tab_id":build,"workspace_id":main["workspace"]["workspace_id"]
+        }),
+    );
+    assert_eq!(
+        moved["transfer"]["closed_workspace_id"],
+        tools["workspace"]["workspace_id"]
+    );
+    let mapped = |old: &str| {
+        moved["transfer"]["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|pane| pane["previous_pane_id"] == old)
+            .unwrap()["pane_id"]
+            .as_str()
+            .unwrap()
+    };
+    let moved_second = mapped(second);
+    let moved_overlay = mapped(overlay);
+    core.request(
+        "pane.send_text",
+        json!({"pane_id":moved_overlay,"text":"leave\n"}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let restored = loop {
+        let layout = core.request("pane.layout", json!({"pane_id":moved_second}))["layout"].clone();
+        if layout["panes"].as_array().unwrap().len() == 2 {
+            break layout;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "real overlay command did not exit"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        restored["zoomed"], true,
+        "moved overlay exit lost Build's pre-existing zoom"
+    );
+    assert_eq!(
+        restored["focused_pane_id"], moved_second,
+        "moved overlay exit did not restore Build's original focused pane"
+    );
+    let before_splits = original["splits"].as_array().unwrap();
+    let after_splits = restored["splits"].as_array().unwrap();
+    assert_eq!(after_splits.len(), before_splits.len());
+    for (before, after) in before_splits.iter().zip(after_splits) {
+        for field in ["id", "direction", "ratio"] {
+            assert_eq!(
+                after[field], before[field],
+                "restored split changed {field}"
+            );
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.focused_pane_id.as_deref() != Some(moved_second) {
+        assert!(
+            Instant::now() < deadline,
+            "attached client did not see restored Build focus"
+        );
+        client.receive().unwrap();
+    }
+    let untouched = core.request(
+        "pane.layout",
+        json!({"pane_id":main["root_pane"]["pane_id"]}),
+    );
+    assert_eq!(
+        untouched["layout"]["zoomed"], false,
+        "overlay exit changed Main's unrelated tab"
+    );
+}

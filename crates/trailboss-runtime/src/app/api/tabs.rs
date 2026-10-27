@@ -307,6 +307,21 @@ impl App {
         };
         let destination_ws_idx = self.parse_workspace_id(&destination_id).unwrap();
         self.state.workspaces[destination_ws_idx].insert_transferred_tab(tab, index);
+        for (pane_id, overlay) in &mut self.overlay_panes {
+            if let Some((ws_idx, tab_idx)) =
+                self.state
+                    .workspaces
+                    .iter()
+                    .enumerate()
+                    .find_map(|(ws_idx, ws)| {
+                        ws.find_tab_index_for_pane(*pane_id)
+                            .map(|tab_idx| (ws_idx, tab_idx))
+                    })
+            {
+                overlay.ws_idx = ws_idx;
+                overlay.tab_idx = tab_idx;
+            }
+        }
         if follows_view {
             self.state.switch_workspace_tab(destination_ws_idx, index);
         }

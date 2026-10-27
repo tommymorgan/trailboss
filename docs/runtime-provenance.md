@@ -695,3 +695,63 @@ explicit actual-legacy-binary regressions passed separately (2/2, 0.921s tests /
 1.198s total). These source-identical Core-only proofs precede this documentation
 update; final-content verification and atomic unit acceptance remain the build
 driver's gates.
+
+### Delivery-review popup ownership regression
+
+The actual-Core regression
+`transferring_a_tab_keeps_its_running_popup_and_client_input` opens a real plugin
+popup over Build through the public API and attaches a modern endpoint client.
+Before transfer it records the running popup's terminal identity, process ID,
+process start time and PTY. After transferring Build to Main, the same client
+must receive the existing popup and send fresh input to its original shell,
+retaining shell-local state.
+
+The parent-run causal RED compiled successfully and failed at the explicit
+`transferring Build closed its existing running popup` assertion (0.515s tests /
+66.382777887s total; `delivery-popup-owner-red.json`). The transfer had remapped
+the tab and its viewers but left the popup's owning public tab identity stale;
+normal location reconciliation therefore closed the live popup.
+
+Successful transfers now remap that identity only when the popup belongs to the
+transferred tab, before reconciliation. The unchanged regression passed 1/1
+(0.750s tests / 6.612891124s total; `delivery-popup-owner-green.json`), retaining
+the same terminal, process, start time, PTY and shell-local state while accepting
+post-transfer client input. This focused result does not claim final-prefix
+verification, review completion or human-session activation.
+
+### Delivery-review overlay restoration regression
+
+The actual-Core regression
+`transferred_overlay_exit_restores_the_moved_tabs_original_zoom_and_focus` opens a
+real plugin overlay over an already zoomed two-pane Build tab. It transfers the
+whole tab into Main, closing the now-empty Tools space, then sends input to the
+same overlay command so it exits normally. The moved tab must restore its
+original focused pane, zoom, split identity, direction and ratio; the attached
+client must observe the restored focus, and Main's unrelated tab must remain
+unchanged.
+
+The parent-run causal RED failed on lost pre-existing zoom, `false` versus `true`
+(0.694s tests / 1.581103625s total; `delivery-overlay-restore-red.json`). Cached
+overlay workspace/tab indices still described the old topology. Cross-space
+transfer now resolves every live overlay's stable internal pane identity against
+the completed topology, updating those indices before focus and publication.
+This also covers index shifts affecting overlays outside the moved tab.
+
+The first GREEN attempt passed the zoom and focus assertions but compared
+incidental layout rectangles from different viewport sizes: 120×40 before client
+attachment versus 80×24 afterward (0.455s tests / 11.021496173s total;
+`delivery-overlay-restore-green.json`). Only the test changed: it now compares
+the semantic split fields rather than viewport-dependent rectangles.
+
+The final parent-run popup/overlay pair passed 2/2 (0.969s tests /
+1.819139956s total; `delivery-overlay-popup-green.json`), with the overlay test
+passing in 0.471s and the popup test in 0.498s. These are focused regression
+results, not final-prefix or completed-review evidence.
+
+After parent-run Rustfmt remediation (2.082599915s), formatting checks passed
+(2.088980232s) and strict workspace/all-targets Clippy passed with `-D warnings`
+(30.756756647s). An independent actual-Core/modern-endpoint popup witness passed
+in 0.522669909s, preserving terminal identity, process, start time, PTY and
+shell-local state while accepting post-transfer public `ClientShellPopupInput`
+(`delivery-popup-endpoint-independent-green.json` and `popup-endpoint-green.json`).
+Full-prefix verification and the scoped review remain separate gates.

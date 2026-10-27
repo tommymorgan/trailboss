@@ -837,6 +837,9 @@ impl HeadlessServer {
     ) {
         if let Some(api::schema::ResponseResult::TabTransfer { transfer }) = result {
             if transfer.changed {
+                if self.popup_owner_tab_id.as_deref() == Some(transfer.previous_tab_id.as_str()) {
+                    self.popup_owner_tab_id = Some(transfer.tab.tab_id.clone());
+                }
                 for client_id in viewers.unwrap_or_default() {
                     self.focus_shell_client_on_tab(client_id, &transfer.tab.tab_id);
                 }
