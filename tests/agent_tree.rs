@@ -1652,3 +1652,103 @@ fn executable_pty_sidebar_transfer_preserves_viewed_and_background_panes() {
         );
     }
 }
+
+#[test]
+fn executable_pty_transfer_uses_the_stationary_pointers_release_time_row() {
+    let core = Core::new();
+    let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+    let source = tools["workspace"]["workspace_id"].as_str().unwrap();
+    let build = tools["tab"]["tab_id"].as_str().unwrap();
+    core.request("tab.rename", json!({"tab_id":build,"label":"Build"}));
+    core.request(
+        "tab.create",
+        json!({"workspace_id":source,"label":"Remaining","cwd":core.home}),
+    );
+    let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+    let destination = main["workspace"]["workspace_id"].as_str().unwrap();
+    core.request(
+        "tab.rename",
+        json!({"tab_id":main["tab"]["tab_id"],"label":"One"}),
+    );
+    core.request(
+        "tab.create",
+        json!({"workspace_id":destination,"label":"Two","cwd":core.home}),
+    );
+    core.request(
+        "plugin.link",
+        json!({"path":format!("{}/plugins/agent-tree",env!("CARGO_MANIFEST_DIR")),"enabled":true}),
+    );
+    let mut console = LiveConsole::new_for_tab(&core, source, build);
+    let rows = console.wait(|rows, _| {
+        ["Build", "One", "Two"]
+            .iter()
+            .all(|label| rows.iter().any(|row| row.contains(label)))
+    });
+    let build_row = rows.iter().position(|row| row.contains("Build")).unwrap();
+    let pointer_row = rows.iter().position(|row| row.contains("One")).unwrap();
+    assert!(rows[pointer_row + 1].contains("Two"));
+    console
+        .writer
+        .write_all(
+            format!(
+                "\x1b[<0;5;{}M\x1b[<32;5;{}M",
+                build_row + 1,
+                pointer_row + 1
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    console.writer.flush().unwrap();
+    console.wait(|rows, _| rows[pointer_row].contains("────────────────────"));
+    let zero = core.request(
+        "tab.create",
+        json!({"workspace_id":destination,"label":"Zero","cwd":core.home}),
+    );
+    core.request(
+        "tab.move",
+        json!({"tab_id":zero["tab"]["tab_id"],"insert_index":0}),
+    );
+    // No mouse motion follows the external update: the insertion line masks Zero
+    // at the stationary pointer, while One and Two must shift down in the live UI.
+    console.wait(|rows, _| {
+        rows[pointer_row].contains("────────────────────")
+            && rows[pointer_row + 1].contains("One")
+            && rows[pointer_row + 2].contains("Two")
+    });
+    let labels = |workspace: &str| {
+        core.request("tab.list", json!({"workspace_id":workspace}))["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tab| tab["label"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(labels(destination), ["Zero", "One", "Two"]);
+    assert_eq!(labels(source), ["Build", "Remaining"]);
+    console
+        .writer
+        .write_all(format!("\x1b[<0;5;{}m", pointer_row + 1).as_bytes())
+        .unwrap();
+    console.writer.flush().unwrap();
+    let rows = console.wait(|rows, _| {
+        let Some(header) = rows
+            .iter()
+            .position(|row| row.trim_start().starts_with("Main"))
+        else {
+            return false;
+        };
+        rows[header + 1].contains("Build")
+            && rows[header + 2].contains("Zero")
+            && rows[header + 3].contains("One")
+            && rows[header + 4].contains("Two")
+    });
+    let header = rows
+        .iter()
+        .position(|row| row.trim_start().starts_with("Main"))
+        .unwrap();
+    assert!(rows[header + 1..header + 5]
+        .iter()
+        .all(|row| !row.trim_start().starts_with("────────────────────")));
+    assert_eq!(labels(destination), ["Build", "Zero", "One", "Two"]);
+    assert_eq!(labels(source), ["Remaining"]);
+}

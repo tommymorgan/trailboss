@@ -799,3 +799,29 @@ Clippy passing. An independent owned native witness passed both focus branches
 (1.716s operation / 1.735s total), retained all three original shell PIDs/start
 times, PTYs and TerminalIDs, and asserted cleanup; its mutated counterpart
 failed to render the post-transfer marker in the intended view.
+
+### T14 release-time insertion under a stationary pointer
+
+`executable_pty_transfer_uses_the_stationary_pointers_release_time_row` presses
+Build and moves onto the boundary before Main's One row. With the pointer held
+still, actual Core commands create Zero and reorder it before One. The native
+frame must retain its insertion line at the same cell while One and Two shift
+down one row. Source and destination lists remain unchanged by the drag until
+release. Releasing at that same cell produces Build, Zero, One, Two in the
+current native frame and Core order, not Zero, Build, One, Two.
+
+Existing production behavior passed at `132a49f4` (1/1, 0.858s tests / 1.687s
+total); no production fix was needed. Two earlier fixture failures assumed
+unchanged absolute rows after removing the source row or confused normal header
+leaders with the insertion line. Post-release assertions now locate Main's
+current header and inspect its children.
+
+The parent's owned throwaway mutation captured the destination and before-tab
+at mouse motion and reused that cached target at release, while still refreshing
+the live insertion line. The permanent test failed with the causal wrong order
+Zero, Build, One, Two (8.795s tests / 10.203s total); an independent real-mouse
+witness also observed that wrong order. After restoring the cache edits, the
+test passed (0.908s tests / 2.345s total) and the independent witness passed
+(1.031s total), observing One shift from row 10 to row 11 without another motion.
+Candidate native agent-tree and reorder suites passed 24/24 (5.036s tests /
+5.277s total), with Rustfmt and strict Clippy passing.
