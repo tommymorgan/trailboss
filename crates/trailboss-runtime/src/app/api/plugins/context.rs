@@ -106,6 +106,9 @@ impl App {
                     context
                 }),
             EventData::TabCreated { tab } => self.plugin_context_for_tab_info(tab, correlation_id),
+            EventData::TabTransferred { transfer } => {
+                self.plugin_context_for_tab_info(&transfer.tab, correlation_id)
+            }
             EventData::TabClosed {
                 tab_id,
                 workspace_id,

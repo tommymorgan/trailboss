@@ -2,6 +2,8 @@ mod support;
 
 use serde_json::{json, Value};
 use std::{
+    io::{BufRead, BufReader, Write},
+    os::unix::net::UnixStream,
     path::PathBuf,
     process::Command,
     time::{Duration, Instant},
@@ -253,4 +255,189 @@ fn cli_transfer_uses_each_destination_insertion_slot() {
         assert_eq!(remaining["tabs"].as_array().unwrap().len(), 1);
         assert_eq!(remaining["tabs"][0]["label"], "Remaining");
     }
+}
+
+#[test]
+fn plugin_transfer_publishes_completed_topology_to_events_and_live_store() {
+    let core = Core::new();
+    let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+    let source = tools["workspace"]["workspace_id"].as_str().unwrap();
+    let tab = tools["tab"]["tab_id"].as_str().unwrap();
+    let first = tools["root_pane"]["pane_id"].as_str().unwrap();
+    core.request("tab.rename", json!({"tab_id":tab,"label":"Build"}));
+    let split = core.request(
+        "pane.split",
+        json!({"target_pane_id":first,"direction":"right","cwd":core.home}),
+    );
+    let second = split["pane"]["pane_id"].as_str().unwrap();
+    for (index, pane) in [first, second].iter().enumerate() {
+        core.request(
+            "pane.rename",
+            json!({"pane_id":pane,"label":format!("Build pane {index}")}),
+        );
+    }
+    core.request(
+        "tab.create",
+        json!({"workspace_id":source,"label":"Remaining","cwd":core.home}),
+    );
+    let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+    let destination = main["workspace"]["workspace_id"].as_str().unwrap();
+    let before = core.request("session.snapshot", json!({}));
+
+    let stream = UnixStream::connect(
+        core.home
+            .join(format!("trailboss/sessions/{}/trailboss.sock", core.name)),
+    )
+    .unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut events = BufReader::new(stream);
+    let subscription = json!({"id":"transfer-events","method":"events.subscribe","params":{"subscriptions":[
+        {"type":"tab.transferred"},{"type":"workspace.updated"},{"type":"pane.moved"},
+        {"type":"tab.created"},{"type":"tab.closed"},{"type":"pane.created"},{"type":"pane.closed"},{"type":"pane.exited"}
+    ]}});
+    serde_json::to_writer(events.get_mut(), &subscription).unwrap();
+    events.get_mut().write_all(b"\n").unwrap();
+    let mut line = String::new();
+    events.read_line(&mut line).unwrap();
+    let started: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        started["result"]["type"], "subscription_started",
+        "{started}"
+    );
+
+    let plugin = core.home.join("transfer-plugin");
+    std::fs::create_dir_all(&plugin).unwrap();
+    let receipt_path = plugin.join("receipt.json");
+    let command = json!([
+        "bun",
+        format!(
+            "{}/tests/support/tab_transfer_plugin.ts",
+            env!("CARGO_MANIFEST_DIR")
+        ),
+        tab,
+        destination,
+        receipt_path
+    ]);
+    std::fs::write(plugin.join("trailboss-plugin.toml"),format!(
+        "id = \"fixture.tab-transfer\"\nname = \"Transfer contract\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"transfer\"\ntitle = \"Transfer\"\ncommand = {command}\n"
+    )).unwrap();
+    core.request("plugin.link", json!({"path":plugin,"enabled":true}));
+    core.request(
+        "plugin.action.invoke",
+        json!({"plugin_id":"fixture.tab-transfer","action_id":"transfer"}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let receipt: Value = loop {
+        if let Ok(bytes) = std::fs::read(&receipt_path) {
+            if let Ok(value) = serde_json::from_slice(&bytes) {
+                break value;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "plugin did not finish its subscribed transfer"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(receipt.get("error").is_none(), "{receipt}");
+    let transfer = &receipt["response"]["transfer"];
+    assert_eq!(transfer["previous_tab_id"], tab);
+    assert_eq!(transfer["previous_workspace_id"], source);
+    assert_eq!(transfer["tab"]["workspace_id"], destination);
+    let mappings = transfer["panes"].as_array().unwrap();
+    assert_eq!(mappings.len(), 2);
+    let rows_before = receipt["before"].as_array().unwrap();
+    let rows_after = receipt["after"].as_array().unwrap();
+    for old in [first, second] {
+        assert!(rows_before
+            .iter()
+            .any(|row| row["paneId"] == old && row["workspaceId"] == source));
+        assert!(!rows_after.iter().any(|row| row["paneId"] == old));
+        let mapping = mappings
+            .iter()
+            .find(|mapping| mapping["previous_pane_id"] == old)
+            .unwrap();
+        assert!(rows_after
+            .iter()
+            .any(|row| row["paneId"] == mapping["pane_id"] && row["workspaceId"] == destination));
+        assert!(receipt["tree"]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["context"]["pane_id"] == mapping["pane_id"]
+                && row["context"]["workspace_id"] == destination));
+    }
+    assert!(receipt["events"].as_u64().unwrap() > 0);
+    let mut observed = Vec::new();
+    while observed
+        .iter()
+        .filter(|event: &&Value| event["event"] == "pane_moved")
+        .count()
+        < 2
+        || !observed
+            .iter()
+            .any(|event: &Value| event["event"] == "tab_transferred")
+        || observed
+            .iter()
+            .filter(|event: &&Value| event["event"] == "workspace_updated")
+            .count()
+            < 2
+    {
+        line.clear();
+        events.read_line(&mut line).unwrap();
+        observed.push(serde_json::from_str::<Value>(&line).unwrap());
+    }
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|event| event["event"] == "tab_transferred")
+            .count(),
+        1
+    );
+    assert_eq!(
+        observed
+            .iter()
+            .find(|event| event["event"] == "tab_transferred")
+            .unwrap()["data"]["transfer"],
+        *transfer
+    );
+    assert!(
+        observed.iter().all(|event| matches!(
+            event["event"].as_str(),
+            Some("tab_transferred" | "workspace_updated" | "pane_moved")
+        )),
+        "{observed:?}"
+    );
+    for mapping in mappings {
+        let moved = observed
+            .iter()
+            .find(|event| {
+                event["event"] == "pane_moved"
+                    && event["data"]["previous_pane_id"] == mapping["previous_pane_id"]
+            })
+            .unwrap();
+        assert_eq!(moved["data"]["pane"]["pane_id"], mapping["pane_id"]);
+        assert_eq!(moved["data"]["pane"]["workspace_id"], destination);
+    }
+    let after = core.request("session.snapshot", json!({}));
+    let mut original_terminals = before["snapshot"]["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pane| pane["terminal_id"].clone())
+        .collect::<Vec<_>>();
+    let mut current_terminals = after["snapshot"]["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pane| pane["terminal_id"].clone())
+        .collect::<Vec<_>>();
+    original_terminals.sort_by_key(Value::to_string);
+    current_terminals.sort_by_key(Value::to_string);
+    assert_eq!(
+        current_terminals, original_terminals,
+        "plugin transfer recreated or closed a terminal"
+    );
 }

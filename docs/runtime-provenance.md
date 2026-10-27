@@ -345,3 +345,29 @@ failed the slot-one order assertion (1 failed, 1.119s tests / 28.310275s total).
 The restored related suite passed 2/2 (1.316s tests / 27.193911s total), with
 Rustfmt and strict test-target Clippy/typecheck passing. A standalone real CLI
 `--index 1` continuity witness passed in 0.257908s.
+
+### T03: Shared plugin API, events and live-store convergence
+
+Registered plugin actions can transfer through the existing store's generic
+request API. A completed cross-space operation emits one `tab.transferred`
+summary carrying the authoritative transfer result, source/destination
+`workspace.updated` (or source `workspace.closed`) and existing `pane.moved`
+notifications. No terminal creation or exit is implied. The event catalog,
+subscription dispatch, plugin context/invalidation, store subscriptions,
+generated schema and existing endpoint method advertisement include the new
+contract; same-space `tab.moved` retains its separate semantics.
+
+The production-boundary plugin/store/subscriber regression first failed on
+the unknown `tab.transferred` subscription. After implementation it passed;
+an owned plugin manifest missing its required minimum version was a fixture
+setup error, not a second behavioral RED. The restored transfer suite passed
+3/3 (1.810s tests / 28.773927s total). Strict Rust Clippy, Rustfmt, store/plugin
+and fixture TypeScript checks, strict scoped Biome CI, all 27 existing Bun
+package tests and generated-schema refresh passed.
+
+An independent owned runtime proved the registered action, automatic store
+refresh, production sidebar projection and exact five public notifications
+with unchanged TerminalIds (0.300325s operation). Suppressing only the completed
+summary outside the candidate let the store assertions pass but failed the
+required summary observation at the subscriber timeout (6.261s tests /
+32.862194s total). The mutation was restored before final candidate gates.

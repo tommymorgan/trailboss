@@ -434,6 +434,22 @@
             },
             {
               "properties": {
+                "transfer": {
+                  "$ref": "#/schemas/event/$defs/TabTransferResult"
+                },
+                "type": {
+                  "const": "tab_transferred",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "transfer"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "tab_id": {
                   "type": "string"
                 },
@@ -752,6 +768,7 @@
             "tab_closed",
             "tab_renamed",
             "tab_moved",
+            "tab_transferred",
             "tab_focused",
             "pane_created",
             "pane_closed",
@@ -1080,6 +1097,63 @@
             "focused",
             "pane_count",
             "agent_status"
+          ],
+          "type": "object"
+        },
+        "TabTransferPane": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "previous_pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "previous_pane_id",
+            "pane_id"
+          ],
+          "type": "object"
+        },
+        "TabTransferResult": {
+          "properties": {
+            "changed": {
+              "type": "boolean"
+            },
+            "closed_workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "index": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "panes": {
+              "items": {
+                "$ref": "#/schemas/event/$defs/TabTransferPane"
+              },
+              "type": "array"
+            },
+            "previous_tab_id": {
+              "type": "string"
+            },
+            "previous_workspace_id": {
+              "type": "string"
+            },
+            "tab": {
+              "$ref": "#/schemas/event/$defs/TabInfo"
+            }
+          },
+          "required": [
+            "changed",
+            "previous_tab_id",
+            "previous_workspace_id",
+            "tab",
+            "index",
+            "panes"
           ],
           "type": "object"
         },
@@ -4192,6 +4266,18 @@
               "properties": {
                 "type": {
                   "const": "tab.moved",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "tab.transferred",
                   "type": "string"
                 }
               },
@@ -7463,6 +7549,22 @@
             },
             {
               "properties": {
+                "transfer": {
+                  "$ref": "#/schemas/success_response/$defs/TabTransferResult"
+                },
+                "type": {
+                  "const": "tab_transferred",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "transfer"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "tab_id": {
                   "type": "string"
                 },
@@ -7796,6 +7898,7 @@
             "tab_closed",
             "tab_renamed",
             "tab_moved",
+            "tab_transferred",
             "tab_focused",
             "pane_created",
             "pane_closed",

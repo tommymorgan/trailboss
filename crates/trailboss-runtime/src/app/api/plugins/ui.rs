@@ -806,6 +806,7 @@ pub(crate) fn event_touches_plugin_ui(event: &crate::api::schema::EventKind) -> 
             | E::TabClosed
             | E::TabRenamed
             | E::TabMoved
+            | E::TabTransferred
             | E::TabFocused
             | E::PaneAgentDetected
             | E::PaneAgentStatusChanged

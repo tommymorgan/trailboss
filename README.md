@@ -64,6 +64,9 @@ terminals. An attached client displaying the moved tab follows it to its new
 space. The public API is `tab.transfer` with `tab_id`, `workspace_id` and an
 optional `insert_index`; its `transfer` response includes the destination tab
 and mappings from previous pane locators to their new locators.
+Completed cross-space moves publish `tab.transferred`, followed by the existing
+workspace and pane movement notifications. Subscribed stores refresh the source
+and destination from the completed Core snapshot.
 The existing `tab.move` API remains a reorder within one space.
 This is not a transfer between different Core sessions.
 

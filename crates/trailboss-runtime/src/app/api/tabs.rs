@@ -310,28 +310,70 @@ impl App {
             self.state.switch_workspace_tab(destination_ws_idx, index);
         }
         let panes = previous_panes
-            .into_iter()
+            .iter()
             .map(|(pane_id, previous_pane_id)| TabTransferPane {
-                previous_pane_id,
-                pane_id: self.public_pane_id(destination_ws_idx, pane_id).unwrap(),
+                previous_pane_id: previous_pane_id.clone(),
+                pane_id: self.public_pane_id(destination_ws_idx, *pane_id).unwrap(),
             })
             .collect();
         self.state.mark_session_dirty();
         self.schedule_session_save();
-        encode_success(
-            id,
-            ResponseResult::TabTransfer {
-                transfer: TabTransferResult {
-                    changed: true,
-                    previous_tab_id,
-                    previous_workspace_id,
-                    tab: self.tab_info(destination_ws_idx, index).unwrap(),
-                    index,
-                    panes,
-                    closed_workspace_id,
-                },
+        let transfer = TabTransferResult {
+            changed: true,
+            previous_tab_id,
+            previous_workspace_id,
+            tab: self.tab_info(destination_ws_idx, index).unwrap(),
+            index,
+            panes,
+            closed_workspace_id,
+        };
+        self.emit_event(EventEnvelope {
+            event: EventKind::TabTransferred,
+            data: EventData::TabTransferred {
+                transfer: transfer.clone(),
             },
-        )
+        });
+        if let Some(workspace_id) = &transfer.closed_workspace_id {
+            self.emit_event(EventEnvelope {
+                event: EventKind::WorkspaceClosed,
+                data: EventData::WorkspaceClosed {
+                    workspace_id: workspace_id.clone(),
+                    workspace: None,
+                },
+            });
+        } else {
+            let source_ws_idx = self
+                .parse_workspace_id(&transfer.previous_workspace_id)
+                .unwrap();
+            self.emit_event(EventEnvelope {
+                event: EventKind::WorkspaceUpdated,
+                data: EventData::WorkspaceUpdated {
+                    workspace: self.workspace_info(source_ws_idx),
+                },
+            });
+        }
+        self.emit_event(EventEnvelope {
+            event: EventKind::WorkspaceUpdated,
+            data: EventData::WorkspaceUpdated {
+                workspace: self.workspace_info(destination_ws_idx),
+            },
+        });
+        for (pane_id, previous_pane_id) in previous_panes {
+            self.emit_event(EventEnvelope {
+                event: EventKind::PaneMoved,
+                data: EventData::PaneMoved {
+                    previous_pane_id,
+                    previous_workspace_id: transfer.previous_workspace_id.clone(),
+                    previous_tab_id: transfer.previous_tab_id.clone(),
+                    pane: Box::new(self.pane_info(destination_ws_idx, pane_id).unwrap()),
+                    created_workspace: None,
+                    created_tab: None,
+                    closed_workspace_id: transfer.closed_workspace_id.clone(),
+                    closed_tab_id: None,
+                },
+            });
+        }
+        encode_success(id, ResponseResult::TabTransfer { transfer })
     }
 
     pub(super) fn handle_tab_close(&mut self, id: String, target: TabTarget) -> String {

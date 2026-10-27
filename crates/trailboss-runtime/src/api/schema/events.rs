@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::common::{AgentStatus, ReadSource};
 use super::panes::{PaneInfo, PaneReadResult, PaneScrollInfo};
-use super::tabs::TabInfo;
+use super::tabs::{TabInfo, TabTransferResult};
 use super::workspaces::WorkspaceInfo;
 use super::worktrees::WorktreeInfo;
 
@@ -48,6 +48,8 @@ pub enum Subscription {
     TabRenamed {},
     #[serde(rename = "tab.moved")]
     TabMoved {},
+    #[serde(rename = "tab.transferred")]
+    TabTransferred {},
     #[serde(rename = "pane.created")]
     PaneCreated {},
     #[serde(rename = "pane.closed")]
@@ -207,6 +209,7 @@ pub enum EventKind {
     TabClosed,
     TabRenamed,
     TabMoved,
+    TabTransferred,
     TabFocused,
     PaneCreated,
     PaneClosed,
@@ -238,6 +241,7 @@ impl EventKind {
             EventKind::TabClosed => "tab.closed",
             EventKind::TabRenamed => "tab.renamed",
             EventKind::TabMoved => "tab.moved",
+            EventKind::TabTransferred => "tab.transferred",
             EventKind::TabFocused => "tab.focused",
             EventKind::PaneCreated => "pane.created",
             EventKind::PaneClosed => "pane.closed",
@@ -270,6 +274,7 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::TabClosed,
     EventKind::TabRenamed,
     EventKind::TabMoved,
+    EventKind::TabTransferred,
     EventKind::TabFocused,
     EventKind::PaneCreated,
     EventKind::PaneClosed,
@@ -298,6 +303,7 @@ pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
     EventKind::TabClosed,
     EventKind::TabRenamed,
     EventKind::TabMoved,
+    EventKind::TabTransferred,
     EventKind::TabFocused,
     EventKind::PaneCreated,
     EventKind::PaneClosed,
@@ -485,6 +491,9 @@ pub enum EventData {
         workspace_id: String,
         insert_index: usize,
         tabs: Vec<TabInfo>,
+    },
+    TabTransferred {
+        transfer: TabTransferResult,
     },
     TabFocused {
         tab_id: String,
