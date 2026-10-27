@@ -308,7 +308,9 @@ fn restore_with_imports_and_failures(
             workspaces.push(workspace);
         }
     }
-    crate::workspace::reserve_workspace_ids(&workspaces);
+    crate::workspace::reserve_workspace_ids(
+        workspaces.iter().map(|workspace| workspace.id.as_str()),
+    );
     ((workspaces, terminals, terminal_runtimes), failed_imports)
 }
 

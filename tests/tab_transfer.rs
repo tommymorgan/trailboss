@@ -1,3 +1,5 @@
+#[path = "support/restart.rs"]
+mod restart;
 mod support;
 
 use serde_json::{json, Value};
@@ -27,31 +29,6 @@ fn cli(core: &Core, args: &[&str]) -> std::process::Output {
         .current_dir(&core.home)
         .output()
         .unwrap()
-}
-
-fn restart(core: &mut Core) -> Vec<u8> {
-    let old_pid = core.child.id();
-    core.request("server.stop", json!({}));
-    let deadline = Instant::now() + Duration::from_secs(8);
-    loop {
-        if let Some(status) = core.child.try_wait().unwrap() {
-            assert!(status.success(), "Core stop failed: {status}");
-            break;
-        }
-        assert!(Instant::now() < deadline, "normal Core stop hung");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let saved = std::fs::read(
-        core.home
-            .join(format!("trailboss/sessions/{}/session.json", core.name)),
-    )
-    .expect("Core stop did not retain its actual persistence");
-    let replacement = Core::launch(core.home.clone(), core.name.clone());
-    assert_ne!(replacement.child.id(), old_pid);
-    // The exited owner must not remove the root now owned by its replacement.
-    core.home = PathBuf::new();
-    *core = replacement;
-    saved
 }
 
 // The imported owner is not Core.child. Stop whichever owner currently serves
@@ -240,6 +217,256 @@ fn cli_transfers_complete_split_tab_without_restarting_terminals() {
         assert_eq!(process_identity(fields[0]), originals[index].1);
         assert_eq!(process_identity(fields[1]), originals[index].2);
     }
+}
+
+#[test]
+fn positional_transfer_locators_preserve_each_attached_clients_view() {
+    for locator in ["w2:1", "t_2_1"] {
+        let core = Core::new();
+        let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+        let first = tools["root_pane"]["pane_id"].as_str().unwrap();
+        let split = core.request(
+            "pane.split",
+            json!({"target_pane_id":first,"direction":"right","cwd":core.home}),
+        );
+        let viewed = split["pane"]["pane_id"].as_str().unwrap();
+        core.request("pane.send_text", json!({"pane_id":viewed,"text":"view_local=original-pane; printf 'ready\\n' > positional-ready\n"}));
+        wait_for_file(&core.home.join("positional-ready"));
+        core.request("tab.create", json!({"workspace_id":tools["workspace"]["workspace_id"],"label":"Remaining","cwd":core.home}));
+        let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+        let logs = core.request("workspace.create", json!({"label":"Logs","cwd":core.home}));
+        core.request("pane.focus", json!({"pane_id":viewed}));
+        let mut followers = [core.attach(), core.attach()];
+        for client in &mut followers {
+            while client.focused_pane_id.as_deref() != Some(viewed) {
+                client.receive().unwrap();
+            }
+        }
+        let mut background = core.attach();
+        while background.boot_id.is_empty() {
+            background.receive().unwrap();
+        }
+        background
+            .input()
+            .unwrap()
+            .request(
+                &background.boot_id,
+                "tab.focus",
+                json!({"tab_id":logs["tab"]["tab_id"]}),
+            )
+            .unwrap();
+        let logs_pane = logs["root_pane"]["pane_id"].as_str().unwrap();
+        while background.focused_pane_id.as_deref() != Some(logs_pane) {
+            background.receive().unwrap();
+        }
+        let moved = cli(
+            &core,
+            &[
+                "tab",
+                "move",
+                locator,
+                "--workspace",
+                main["workspace"]["workspace_id"].as_str().unwrap(),
+            ],
+        );
+        assert!(
+            moved.status.success(),
+            "{locator}: {}",
+            String::from_utf8_lossy(&moved.stderr)
+        );
+        let moved: Value = serde_json::from_slice(&moved.stdout).unwrap();
+        let transfer = &moved["result"]["transfer"];
+        let moved_tab = transfer["tab"]["tab_id"].as_str().unwrap();
+        let moved_pane = transfer["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mapping| mapping["previous_pane_id"] == viewed)
+            .unwrap()["pane_id"]
+            .as_str()
+            .unwrap();
+        for (index, client) in followers.iter_mut().enumerate() {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while client.focused_pane_id.as_deref() != Some(moved_pane) {
+                assert!(
+                    Instant::now() < deadline,
+                    "{locator}: follower {index} lost its viewed pane"
+                );
+                client
+                    .receive()
+                    .expect("positional transfer did not move the attached client view");
+            }
+            assert_eq!(client.focused_tab_id.as_deref(), Some(moved_tab));
+            let marker = format!("POSITIONAL-FOLLOW-{index}");
+            let mut input = client.input().unwrap();
+            input.focus_pane_target(client.focused_pane_id.as_deref().unwrap());
+            input.type_text(&format!("printf '%s\\n' \"$view_local\" > positional-{index}.state; printf '%s%s\\n' 'POSITIONAL-FOLLOW-' '{index}'\n")).unwrap();
+            assert_eq!(
+                wait_for_file(&core.home.join(format!("positional-{index}.state"))).trim(),
+                "original-pane"
+            );
+            while client
+                .primary
+                .as_ref()
+                .is_none_or(|surface| !surface.text().contains(&marker))
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "{locator}: follower {index} stopped rendering"
+                );
+                client.receive().unwrap();
+            }
+            assert_eq!(client.focused_pane_id.as_deref(), Some(moved_pane));
+        }
+        let mut input = background.input().unwrap();
+        input.focus_pane_target(background.focused_pane_id.as_deref().unwrap());
+        input
+            .type_text("printf '%s%s\\n' 'POSITIONAL-' 'BACKGROUND'\n")
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while background
+            .primary
+            .as_ref()
+            .is_none_or(|surface| !surface.text().contains("POSITIONAL-BACKGROUND"))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "{locator}: background stopped rendering"
+            );
+            background.receive().unwrap();
+        }
+        assert_eq!(background.focused_pane_id.as_deref(), Some(logs_pane));
+        assert_eq!(
+            background.focused_tab_id.as_deref(),
+            logs["tab"]["tab_id"].as_str()
+        );
+        assert_eq!(
+            core.request(
+                "tab.list",
+                json!({"workspace_id":tools["workspace"]["workspace_id"]})
+            )["tabs"][0]["label"],
+            "Remaining"
+        );
+    }
+}
+
+#[test]
+fn client_endpoint_transfer_follows_every_viewer_without_moving_background_clients() {
+    let core = Core::new();
+    let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+    let first = tools["root_pane"]["pane_id"].as_str().unwrap();
+    let split = core.request(
+        "pane.split",
+        json!({"target_pane_id":first,"direction":"right","cwd":core.home}),
+    );
+    let viewed = split["pane"]["pane_id"].as_str().unwrap();
+    core.request("pane.send_text", json!({"pane_id":viewed,"text":"endpoint_local=original-pane; printf 'ready\\n' > endpoint-ready\n"}));
+    wait_for_file(&core.home.join("endpoint-ready"));
+    core.request("tab.create", json!({"workspace_id":tools["workspace"]["workspace_id"],"label":"Remaining","cwd":core.home}));
+    let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+    let destination = main["workspace"]["workspace_id"].as_str().unwrap();
+    let logs = core.request("workspace.create", json!({"label":"Logs","cwd":core.home}));
+    core.request("pane.focus", json!({"pane_id":viewed}));
+    let mut followers = [core.attach(), core.attach()];
+    for client in &mut followers {
+        while client.focused_pane_id.as_deref() != Some(viewed) {
+            client.receive().unwrap();
+        }
+    }
+    let mut background = core.attach();
+    while background.boot_id.is_empty() {
+        background.receive().unwrap();
+    }
+    background
+        .input()
+        .unwrap()
+        .request(
+            &background.boot_id,
+            "tab.focus",
+            json!({"tab_id":logs["tab"]["tab_id"]}),
+        )
+        .unwrap();
+    let logs_pane = logs["root_pane"]["pane_id"].as_str().unwrap();
+    while background.focused_pane_id.as_deref() != Some(logs_pane) {
+        background.receive().unwrap();
+    }
+    followers[0]
+        .input()
+        .unwrap()
+        .request(
+            &followers[0].boot_id,
+            "tab.transfer",
+            json!({"tab_id":tools["tab"]["tab_id"],"workspace_id":destination}),
+        )
+        .unwrap();
+    while followers[0].workspace_id.as_deref() != Some(destination) {
+        followers[0].receive().unwrap();
+    }
+    let moved = core.request("pane.get", json!({"pane_id":viewed}));
+    let moved_pane = moved["pane"]["pane_id"].as_str().unwrap();
+    let moved_tab = moved["pane"]["tab_id"].as_str().unwrap();
+    for (index, client) in followers.iter_mut().enumerate() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while client.focused_pane_id.as_deref() != Some(moved_pane) {
+            assert!(
+                Instant::now() < deadline,
+                "endpoint follower {index} lost its viewed pane"
+            );
+            client
+                .receive()
+                .expect("client endpoint transfer did not move every attached viewer");
+        }
+        assert_eq!(client.focused_tab_id.as_deref(), Some(moved_tab));
+        let marker = format!("ENDPOINT-FOLLOW-{index}");
+        let mut input = client.input().unwrap();
+        input.focus_pane_target(client.focused_pane_id.as_deref().unwrap());
+        input.type_text(&format!("printf '%s\\n' \"$endpoint_local\" > endpoint-{index}.state; printf '%s%s\\n' 'ENDPOINT-FOLLOW-' '{index}'\n")).unwrap();
+        assert_eq!(
+            wait_for_file(&core.home.join(format!("endpoint-{index}.state"))).trim(),
+            "original-pane"
+        );
+        while client
+            .primary
+            .as_ref()
+            .is_none_or(|surface| !surface.text().contains(&marker))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "endpoint follower {index} stopped rendering"
+            );
+            client.receive().unwrap();
+        }
+        assert_eq!(client.focused_pane_id.as_deref(), Some(moved_pane));
+    }
+    let mut input = background.input().unwrap();
+    input.focus_pane_target(background.focused_pane_id.as_deref().unwrap());
+    input
+        .type_text("printf '%s%s\\n' 'ENDPOINT-' 'BACKGROUND'\n")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while background
+        .primary
+        .as_ref()
+        .is_none_or(|surface| !surface.text().contains("ENDPOINT-BACKGROUND"))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "endpoint background stopped rendering"
+        );
+        background.receive().unwrap();
+    }
+    assert_eq!(background.focused_pane_id.as_deref(), Some(logs_pane));
+    assert_eq!(
+        background.focused_tab_id.as_deref(),
+        logs["tab"]["tab_id"].as_str()
+    );
+    assert_eq!(
+        core.request(
+            "tab.list",
+            json!({"workspace_id":tools["workspace"]["workspace_id"]})
+        )["tabs"][0]["label"],
+        "Remaining"
+    );
 }
 
 #[test]
@@ -787,7 +1014,15 @@ fn final_tab_transfer_removes_only_empty_source_before_or_after_destination() {
 
 #[test]
 fn invalid_transfers_preserve_topology_view_pane_targeting_and_processes() {
-    for invalid in ["source", "destination", "index", "negative", "old-tab"] {
+    for invalid in [
+        "source",
+        "destination",
+        "w_999999",
+        "999999",
+        "index",
+        "negative",
+        "old-tab",
+    ] {
         let core = Core::new();
         let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
         let source = tools["workspace"]["workspace_id"].as_str().unwrap();
@@ -827,6 +1062,10 @@ fn invalid_transfers_preserve_topology_view_pane_targeting_and_processes() {
                 params["workspace_id"] = doomed["workspace"]["workspace_id"].clone();
                 "workspace_not_found"
             }
+            "w_999999" | "999999" => {
+                params["workspace_id"] = json!(invalid);
+                "workspace_not_found"
+            }
             "index" => {
                 params["insert_index"] = json!(3);
                 "tab_transfer_failed"
@@ -843,7 +1082,9 @@ fn invalid_transfers_preserve_topology_view_pane_targeting_and_processes() {
         };
         let invalid_token = match invalid {
             "source" | "old-tab" => params["tab_id"].as_str().unwrap().to_owned(),
-            "destination" => params["workspace_id"].as_str().unwrap().to_owned(),
+            "destination" | "w_999999" | "999999" => {
+                params["workspace_id"].as_str().unwrap().to_owned()
+            }
             "index" | "negative" => params["insert_index"].to_string(),
             _ => unreachable!(),
         };
@@ -1283,6 +1524,194 @@ fn inherited_pane_context_survives_transfer_and_live_handoff_until_close() {
 }
 
 #[test]
+fn handoff_reserves_removed_workspace_ids_carried_by_live_pane_aliases() {
+    let core = Core::new();
+    let _stop_owner = StopOwner(
+        core.home
+            .join(format!("trailboss/sessions/{}/trailboss.sock", core.name)),
+    );
+    let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+    let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+    let inherited = tools["root_pane"]["pane_id"].as_str().unwrap();
+    core.request("pane.send_text",json!({"pane_id":inherited,"text":"alias_local=transferred; printf '%s %s %s\\n' \"$$\" \"$alias_local\" \"$HERDR_PANE_ID\" > alias-before.state\n"}));
+    let before = wait_for_file(&core.home.join("alias-before.state"));
+    let before_pid = before.split_whitespace().next().unwrap();
+    let identity = process_identity(before_pid);
+    let moved = cli(
+        &core,
+        &[
+            "tab",
+            "move",
+            tools["tab"]["tab_id"].as_str().unwrap(),
+            "--workspace",
+            main["workspace"]["workspace_id"].as_str().unwrap(),
+        ],
+    );
+    assert!(
+        moved.status.success(),
+        "CLI transfer failed: {}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+    let moved: Value = serde_json::from_slice(&moved.stdout).unwrap();
+    assert_eq!(
+        moved["result"]["transfer"]["closed_workspace_id"],
+        tools["workspace"]["workspace_id"]
+    );
+    let current = moved["result"]["transfer"]["panes"][0]["pane_id"]
+        .as_str()
+        .unwrap();
+    core.request(
+        "server.live_handoff",
+        json!({"import_exe":support::executable()}),
+    );
+    let fresh = core.request("workspace.create", json!({"label":"Fresh","cwd":core.home}));
+    let fresh_pane = fresh["root_pane"]["pane_id"].as_str().unwrap();
+    for (pane, stage) in [(inherited, "old"), (fresh_pane, "fresh")] {
+        core.request("pane.send_text",json!({"pane_id":pane,"text":format!(
+            "printf '%s %s %s\\n' \"$$\" \"${{alias_local:-fresh}}\" \"$HERDR_PANE_ID\" > alias-{stage}.state; '{}' pane current --current > alias-{stage}.json 2> alias-{stage}.err; printf '%s\\n' \"$?\" > alias-{stage}.done\n",
+            support::executable().display()
+        )}));
+        assert_eq!(
+            wait_for_file(&core.home.join(format!("alias-{stage}.done"))).trim(),
+            "0",
+            "inherited CLI targeting failed for {stage}: {}",
+            std::fs::read_to_string(core.home.join(format!("alias-{stage}.err"))).unwrap()
+        );
+    }
+    assert_eq!(wait_for_file(&core.home.join("alias-old.state")), before);
+    assert_eq!(process_identity(before_pid), identity);
+    let old_context: Value =
+        serde_json::from_str(&std::fs::read_to_string(core.home.join("alias-old.json")).unwrap())
+            .unwrap();
+    assert_eq!(old_context["result"]["pane"]["pane_id"], current);
+    let fresh_state = wait_for_file(&core.home.join("alias-fresh.state"));
+    let fields = fresh_state.split_whitespace().collect::<Vec<_>>();
+    assert_eq!(
+        fields[1], "fresh",
+        "new workspace input reached the transferred shell through a reused alias"
+    );
+    assert_ne!(fields[0], before_pid, "new root reused the old shell");
+    assert_eq!(fields[2], fresh_pane);
+    let fresh_context: Value =
+        serde_json::from_str(&std::fs::read_to_string(core.home.join("alias-fresh.json")).unwrap())
+            .unwrap();
+    assert_eq!(fresh_context["result"]["pane"]["pane_id"], fresh_pane);
+    assert_eq!(
+        fresh_context["result"]["pane"]["terminal_id"],
+        fresh["root_pane"]["terminal_id"]
+    );
+    assert_ne!(
+        fresh["workspace"]["workspace_id"], tools["workspace"]["workspace_id"],
+        "new workspace reused a public identity retained by a live alias"
+    );
+}
+
+#[test]
+fn explicit_closes_remove_transferred_aliases_before_the_next_live_handoff() {
+    for close_method in ["pane.close", "tab.close", "workspace.close"] {
+        let core = Core::new();
+        let socket = core
+            .home
+            .join(format!("trailboss/sessions/{}/trailboss.sock", core.name));
+        let _stop_owner = StopOwner(socket.clone());
+        let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+        let original = tools["root_pane"]["pane_id"].as_str().unwrap();
+        let split = core.request(
+            "pane.split",
+            json!({"target_pane_id":original,"direction":"right","cwd":core.home}),
+        );
+        let second = split["pane"]["pane_id"].as_str().unwrap();
+        let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+        let survivor = core.request(
+            "workspace.create",
+            json!({"label":"Survivor","cwd":core.home}),
+        );
+        let survivor_pane = survivor["root_pane"]["pane_id"].as_str().unwrap();
+        core.request("pane.send_text", json!({"pane_id":survivor_pane,"text":"close_local=surviving; printf '%s %s\\n' \"$$\" \"$close_local\" > close-before.state\n"}));
+        let before = wait_for_file(&core.home.join("close-before.state"));
+        let pid = before.split_whitespace().next().unwrap();
+        let identity = process_identity(pid);
+        let moved = cli(
+            &core,
+            &[
+                "tab",
+                "move",
+                tools["tab"]["tab_id"].as_str().unwrap(),
+                "--workspace",
+                main["workspace"]["workspace_id"].as_str().unwrap(),
+            ],
+        );
+        assert!(
+            moved.status.success(),
+            "{close_method}: {}",
+            String::from_utf8_lossy(&moved.stderr)
+        );
+        let moved: Value = serde_json::from_slice(&moved.stdout).unwrap();
+        core.request(
+            "server.live_handoff",
+            json!({"import_exe":support::executable()}),
+        );
+        let target = match close_method {
+            "pane.close" => json!({"pane_id":original}),
+            "tab.close" => json!({"tab_id":moved["result"]["transfer"]["tab"]["tab_id"]}),
+            "workspace.close" => json!({"workspace_id":main["workspace"]["workspace_id"]}),
+            _ => unreachable!(),
+        };
+        core.request(close_method, target);
+        let removed = if close_method == "pane.close" {
+            vec![original]
+        } else {
+            vec![original, second]
+        };
+        for alias in removed {
+            let mut wire = BufReader::new(UnixStream::connect(&socket).unwrap());
+            wire.get_mut()
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            serde_json::to_writer(
+                wire.get_mut(),
+                &json!({"id":"closed-alias","method":"pane.get","params":{"pane_id":alias}}),
+            )
+            .unwrap();
+            wire.get_mut().write_all(b"\n").unwrap();
+            let mut line = String::new();
+            wire.read_line(&mut line).unwrap();
+            let closed: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(closed["id"], "closed-alias");
+            assert_eq!(
+                closed["error"]["code"], "pane_not_found",
+                "{close_method}: {closed}"
+            );
+            assert!(closed.get("result").is_none());
+        }
+        // A failed lookup alone does not prove stale entries were removed:
+        // the next exporter must still accept every retained live alias.
+        core.request(
+            "server.live_handoff",
+            json!({"import_exe":support::executable()}),
+        );
+        core.request("pane.send_text", json!({"pane_id":survivor_pane,"text":"printf '%s %s\\n' \"$$\" \"$close_local\" > close-after.state\n"}));
+        assert_eq!(
+            wait_for_file(&core.home.join("close-after.state")),
+            before,
+            "{close_method} changed the surviving shell"
+        );
+        assert_eq!(
+            process_identity(pid),
+            identity,
+            "{close_method} replaced the surviving process/PTY"
+        );
+        if close_method == "pane.close" {
+            core.request("pane.send_text", json!({"pane_id":second,"text":"printf 'retained-alias\\n' > close-retained.state\n"}));
+            assert_eq!(
+                wait_for_file(&core.home.join("close-retained.state")),
+                "retained-alias\n"
+            );
+        }
+    }
+}
+
+#[test]
 fn ordinary_restart_restores_transferred_tab_placement_layout_labels_and_focus() {
     let mut core = Core::new();
     let directories = [core.home.join("build left"), core.home.join("build right")];
@@ -1380,7 +1809,7 @@ fn ordinary_restart_restores_transferred_tab_placement_layout_labels_and_focus()
         })
         .collect::<Vec<_>>();
     drop(client);
-    let saved = restart(&mut core);
+    let saved = core.restart();
     let persisted: Value = serde_json::from_slice(&saved).unwrap();
     assert!(
         !persisted["workspaces"]

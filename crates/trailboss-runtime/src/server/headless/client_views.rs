@@ -809,6 +809,41 @@ impl HeadlessServer {
         self.apply_shell_tab_geometry_to_target(client_id, target, true)
     }
 
+    fn tab_transfer_viewers(&self, method: &api::schema::Method) -> Option<Vec<u64>> {
+        let api::schema::Method::TabTransfer(params) = method else {
+            return None;
+        };
+        let (workspace, tab) = self.app.parse_tab_id(&params.tab_id)?;
+        let tab_id = self.app.public_tab_id(workspace, tab)?;
+        Some(
+            self.clients
+                .iter()
+                .filter_map(|(id, client)| {
+                    (client
+                        .shell_location
+                        .as_ref()
+                        .and_then(|location| location.focused_tab_id())
+                        == Some(tab_id.as_str()))
+                    .then_some(*id)
+                })
+                .collect(),
+        )
+    }
+
+    fn follow_transferred_tab(
+        &mut self,
+        viewers: Option<Vec<u64>>,
+        result: &Option<api::schema::ResponseResult>,
+    ) {
+        if let Some(api::schema::ResponseResult::TabTransfer { transfer }) = result {
+            if transfer.changed {
+                for client_id in viewers.unwrap_or_default() {
+                    self.focus_shell_client_on_tab(client_id, &transfer.tab.tab_id);
+                }
+            }
+        }
+    }
+
     /// Applies a public socket request, including its session-wide focus projection.
     pub(super) fn handle_api_request_with_shutdown_check(
         &mut self,
@@ -857,22 +892,7 @@ impl HeadlessServer {
             api::schema::Method::TabCreate(params) => params.focus,
             _ => false,
         };
-        let transferred_client_ids = match &msg.request.method {
-            api::schema::Method::TabTransfer(params) => Some(
-                self.clients
-                    .iter()
-                    .filter_map(|(id, client)| {
-                        (client
-                            .shell_location
-                            .as_ref()
-                            .and_then(|location| location.focused_tab_id())
-                            == Some(params.tab_id.as_str()))
-                        .then_some(*id)
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-            _ => None,
-        };
+        let transferred_client_ids = self.tab_transfer_viewers(&msg.request.method);
         let inspect_pane_move = matches!(
             &msg.request.method,
             api::schema::Method::PaneMove(params) if params.focus
@@ -887,13 +907,7 @@ impl HeadlessServer {
         let reconcile = Self::shell_locations_may_need_reconcile(&msg.request.method);
         let changed = self.handle_api_request_with_shutdown_check_inner(msg, false, false);
         let proxied_result = forward_proxied_api_response(response_proxy);
-        if let Some(api::schema::ResponseResult::TabTransfer { transfer }) = &proxied_result {
-            if transfer.changed {
-                for client_id in transferred_client_ids.unwrap_or_default() {
-                    self.focus_shell_client_on_tab(client_id, &transfer.tab.tab_id);
-                }
-            }
-        }
+        self.follow_transferred_tab(transferred_client_ids, &proxied_result);
         let proxied_request_succeeded = proxied_result.is_some();
         // Same-tab and zoomed moves succeed without moving or requesting focus.
         let pane_move_focus_succeeded = inspect_pane_move
@@ -938,19 +952,27 @@ impl HeadlessServer {
     pub(super) fn handle_client_shell_api_request(
         &mut self,
         client_id: u64,
-        msg: api::ApiRequestMessage,
+        mut msg: api::ApiRequestMessage,
     ) -> bool {
         let focus_before = self.shell_focus_target(client_id);
         let focused_tabs_before = self.focused_shell_tabs();
         let method_claims_geometry = Self::shell_endpoint_claims_geometry(&msg.request.method);
         let reconcile = Self::shell_locations_may_need_reconcile(&msg.request.method);
         let all_focus_before = reconcile.then(|| self.shell_focus_targets());
+        let transferred_client_ids = self.tab_transfer_viewers(&msg.request.method);
+        let response_proxy = transferred_client_ids.as_ref().map(|_| {
+            let (proxy_tx, proxy_rx) = std::sync::mpsc::channel();
+            let original = std::mem::replace(&mut msg.respond_to, proxy_tx);
+            (original, proxy_rx)
+        });
         let navigation_changed =
             self.apply_shell_navigation_request(client_id, &msg.request.method);
         self.set_default_shell_target_from_client(client_id);
         let popup_before = self.app.state.popup_pane.is_some();
         let popup_owner = self.shell_tab_id_for_client(client_id);
         let changed = self.handle_api_request_with_shutdown_check_inner(msg, false, true);
+        let proxied_result = forward_proxied_api_response(response_proxy);
+        self.follow_transferred_tab(transferred_client_ids, &proxied_result);
         self.focus_shell_client_on_default_target(client_id);
         if !popup_before && self.app.state.popup_pane.is_some() {
             self.popup_owner_tab_id = popup_owner;

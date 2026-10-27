@@ -777,6 +777,14 @@ impl App {
             }
             app.state.public_pane_id_aliases.insert(alias, pane_id);
         }
+        // Aliases retain public workspace identities even after their source
+        // workspace was emptied and removed by a tab transfer.
+        crate::workspace::reserve_workspace_ids(
+            app.state
+                .public_pane_id_aliases
+                .keys()
+                .filter_map(|alias| alias.rsplit_once(":p").map(|(workspace, _)| workspace)),
+        );
         app.state.active = snapshot
             .active
             .filter(|&idx| idx < app.state.workspaces.len());

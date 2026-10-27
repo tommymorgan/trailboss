@@ -1,3 +1,5 @@
+#[path = "support/restart.rs"]
+mod restart;
 mod support;
 
 use serde_json::{json, Value};

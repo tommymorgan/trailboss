@@ -221,10 +221,11 @@ impl App {
         let Some(destination_ws_idx) = self.parse_workspace_id(&params.workspace_id) else {
             return workspace_not_found(id, &params.workspace_id);
         };
-        let index = params
-            .insert_index
-            .unwrap_or(self.state.workspaces[destination_ws_idx].tabs.len());
-        if index > self.state.workspaces[destination_ws_idx].tabs.len() {
+        let Some(destination) = self.state.workspaces.get(destination_ws_idx) else {
+            return workspace_not_found(id, &params.workspace_id);
+        };
+        let index = params.insert_index.unwrap_or(destination.tabs.len());
+        if index > destination.tabs.len() {
             return encode_error(
                 id,
                 "tab_transfer_failed",
@@ -412,7 +413,7 @@ impl App {
             let workspace = self.workspace_info(ws_idx);
             self.state.selected = ws_idx;
             self.state.close_selected_workspace();
-            self.state.remove_plugin_pane_records(pane_ids);
+            self.state.remove_pane_records(pane_ids);
             self.shutdown_detached_terminal_runtimes();
             self.emit_event(EventEnvelope {
                 event: EventKind::TabClosed,
@@ -441,7 +442,7 @@ impl App {
                 format!("tab {} could not be closed", target.tab_id),
             );
         }
-        self.state.remove_plugin_pane_records(pane_ids);
+        self.state.remove_pane_records(pane_ids);
         self.state.remove_unattached_terminal_ids(terminal_ids);
         self.shutdown_detached_terminal_runtimes();
         self.schedule_session_save();

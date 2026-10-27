@@ -601,3 +601,77 @@ genuine OMP Working-to-Done turns, including fresh turns after import
 (9.035638217s total), preserving the original shell/OMP processes, PTYs and
 session and cleaning up all owned processes. The plain receipt remains necessary
 for an alias-free legacy manifest; no production change beyond T09 was needed.
+
+### Task 1 bounded basic-review corrections
+
+The bounded review of the Core-only unit identified five lifecycle and client-view
+failures. Each correction received a causal behavioral RED before its minimal
+implementation and a passing parent-run regression afterward:
+
+- Invalid positional destinations `w_999999` and `999999` now return
+  `workspace_not_found` before indexing the workspace array. The existing invalid
+  transfer regression covers both spellings while retaining its full topology,
+  view, targeting, process and shell-state assertions (GREEN 1/1, 4.493s tests /
+  10.307s total). An independent actual-Core witness reproduced the original panic.
+- Handoff reserves workspace identities retained by live public pane aliases, even
+  when transfer removed their original workspace. The new
+  `handoff_reserves_removed_workspace_ids_carried_by_live_pane_aliases` regression
+  first proved that a newly created root's input reached the transferred shell,
+  then passed after reserving borrowed alias workspace IDs (1/1, 0.674s tests /
+  10.605s total). Its real CLI/handoff/new-workspace witness reproduced the same
+  incorrect input targeting while the original process and PTY remained alive.
+- Explicit pane, tab and workspace removal now share raw/public alias cleanup
+  with pane-exit cleanup; the exporter still rejects orphan aliases. The new
+  `explicit_closes_remove_transferred_aliases_before_the_next_live_handoff`
+  regression checks all three close paths, rejected old-alias lookups, a second
+  successful handoff and usable surviving shells (1/1, 2.916s tests / 11.695s total).
+  An independent all-three-path close/handoff witness passed in 2.686s.
+- Client followers are selected using the resolved canonical source tab identity,
+  not the caller's positional spelling. The new
+  `positional_transfer_locators_preserve_each_attached_clients_view` regression
+  covers actual CLI moves using `w2:1` and `t_2_1`, with two attached followers and
+  an unrelated background viewer (1/1, 1.139s tests / 9.608s total). An independent
+  two-row, three-client witness passed in 1.390s, retaining process/start/PTY and
+  shell-local identity, fresh native-input frames and the background view.
+- Public socket and client-shell endpoint transfers share canonical follower
+  capture and successful-result remapping. The new
+  `client_endpoint_transfer_follows_every_viewer_without_moving_background_clients`
+  regression dispatches an actual `ClientShellEndpointRequest`, not a forwarding
+  mock. Both followers retain the same viewed split and accept native input;
+  the unrelated viewer remains unchanged. This regression and the positional
+  regression passed together (2/2, 1.185s tests / 8.908s total). An independent
+  three-client endpoint witness passed in 0.595s with original process/start/PTY,
+  shell-local state and fresh native frames.
+
+This batch adds four permanent regressions and extends the existing invalid-input
+regression: `tab_transfer` now contains 15 tests, comprising 13 normal tests and
+the two explicitly supplied legacy-binary regressions. The same basic reviewer
+rechecked only these five corrections from `2fcb2b24` to formatted source head
+`a2bcb882164d55b1865cca94611d97f9e2114255` and reported no remaining issues.
+Parent-run Rustfmt passed (2.060s), as did scoped strict Clippy with `-D warnings`
+(9.104s). Core-only boundary witnesses passed for topology, insertion, working
+directories, the production store and native input (1.375s), ordinary restart
+(0.982s), and five genuine OMP turns across supported live handoff (8.802s).
+No installation, publication or human-session activation is implied.
+
+The first full-workspace integration attempt failed at compilation (35.684s):
+`session_restore` and `command_discovery` still called the shared `Core::restart`
+method that T10 had replaced with a test-local helper. The existing restart
+implementation now lives in optional `tests/support/restart.rs`, included only by
+those two consumers and `tab_transfer`. It still stops normally, retains the
+actual persistence bytes, starts a new Core in the same isolated home and prevents
+the exited owner's cleanup from deleting the replacement's root. Shared startup
+readiness also uses `Core::request("session.snapshot", ...)` after the client
+socket appears, instead of a separate hand-built request path. No lint suppression
+or production behavior was added.
+
+At repair head `94ca3023f7df98fc7b5496ed18ba0f0113745850`, all three actual
+restart consumers passed (3/3, 1.141s tests / 3.243s total), including compilation
+of five integration binaries without unused-method warnings. Strict Clippy passed
+(0.919s); the same basic reviewer rechecked only the fixture repair and found no
+issues. Full-workspace nextest passed 3987/3987 tests across 34 binaries, with
+27 skipped (63.520s tests / 65.775s total), without compiler warnings. The two
+explicit actual-legacy-binary regressions passed separately (2/2, 0.921s tests /
+1.198s total). These source-identical Core-only proofs precede this documentation
+update; final-content verification and atomic unit acceptance remain the build
+driver's gates.

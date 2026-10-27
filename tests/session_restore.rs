@@ -1,5 +1,7 @@
 #[path = "support/console.rs"]
 mod console;
+#[path = "support/restart.rs"]
+mod restart;
 mod support;
 use console::Console;
 use serde_json::{json, Value};

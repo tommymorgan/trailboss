@@ -111,10 +111,6 @@ impl Core {
             api,
         };
         let deadline = Instant::now() + Duration::from_secs(10);
-        let ready: Request = serde_json::from_value(
-            json!({"id":"startup-ready", "method":"session.snapshot", "params":{}}),
-        )
-        .unwrap();
         while !core
             .home
             .join(format!(
@@ -122,10 +118,6 @@ impl Core {
                 core.name
             ))
             .exists()
-            || core
-                .api
-                .request_value_with_timeout(&ready, Duration::from_millis(200))
-                .is_err()
         {
             assert!(
                 Instant::now() < deadline && core.child.try_wait().unwrap().is_none(),
@@ -133,6 +125,7 @@ impl Core {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+        core.request("session.snapshot", json!({}));
         core
     }
     pub fn request(&self, method: &str, params: Value) -> Value {
