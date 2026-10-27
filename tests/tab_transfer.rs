@@ -924,3 +924,167 @@ fn invalid_transfers_preserve_topology_view_pane_targeting_and_processes() {
         );
     }
 }
+
+#[test]
+fn same_space_transfers_reorder_with_stable_ids_and_silent_noops() {
+    for (slot, order, changed) in [
+        (0, ["Build", "One", "Two"], true),
+        (1, ["One", "Build", "Two"], false),
+        (2, ["One", "Build", "Two"], false),
+        (3, ["One", "Two", "Build"], true),
+    ] {
+        let core = Core::new();
+        let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+        let workspace = tools["workspace"]["workspace_id"].as_str().unwrap();
+        core.request(
+            "tab.rename",
+            json!({"tab_id":tools["tab"]["tab_id"],"label":"One"}),
+        );
+        let build = core.request(
+            "tab.create",
+            json!({"workspace_id":workspace,"label":"Build","cwd":core.home}),
+        );
+        let tab = build["tab"]["tab_id"].as_str().unwrap();
+        core.request("pane.split",json!({"target_pane_id":build["root_pane"]["pane_id"],"direction":"right","cwd":core.home}));
+        core.request(
+            "tab.create",
+            json!({"workspace_id":workspace,"label":"Two","cwd":core.home}),
+        );
+        let logs = core.request("workspace.create", json!({"label":"Logs","cwd":core.home}));
+        let diagnostics = logs["root_pane"]["pane_id"].as_str().unwrap();
+        core.request(
+            "tab.rename",
+            json!({"tab_id":logs["tab"]["tab_id"],"label":"Diagnostics"}),
+        );
+        core.request("pane.focus", json!({"pane_id":diagnostics}));
+        let mut client = core.attach();
+        while client.focused_pane_id.as_deref() != Some(diagnostics) {
+            client.receive().unwrap();
+        }
+        let before = core.request("session.snapshot", json!({}));
+        let identities = |snapshot: &Value| {
+            let mut tabs = snapshot["tabs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tab| tab["tab_id"].to_string())
+                .collect::<Vec<_>>();
+            let mut panes = snapshot["panes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|pane| {
+                    json!([
+                        pane["pane_id"],
+                        pane["terminal_id"],
+                        pane["tab_id"],
+                        pane["workspace_id"]
+                    ])
+                    .to_string()
+                })
+                .collect::<Vec<_>>();
+            tabs.sort();
+            panes.sort();
+            (tabs, panes)
+        };
+        let mut subscriber = BufReader::new(
+            UnixStream::connect(
+                core.home
+                    .join(format!("trailboss/sessions/{}/trailboss.sock", core.name)),
+            )
+            .unwrap(),
+        );
+        subscriber
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        serde_json::to_writer(subscriber.get_mut(),&json!({
+            "id":"same-space-events","method":"events.subscribe","params":{"subscriptions":[
+                {"type":"tab.moved"},{"type":"tab.transferred"},{"type":"workspace.updated"},{"type":"workspace.closed"},
+                {"type":"pane.moved"},{"type":"tab.created"},{"type":"tab.closed"},{"type":"pane.created"},{"type":"pane.closed"}
+            ]}
+        })).unwrap();
+        subscriber.get_mut().write_all(b"\n").unwrap();
+        let mut line = String::new();
+        subscriber.read_line(&mut line).unwrap();
+        let started: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(started["result"]["type"], "subscription_started");
+        let moved = core.request(
+            "tab.transfer",
+            json!({"tab_id":tab,"workspace_id":workspace,"insert_index":slot}),
+        );
+        assert_eq!(moved["transfer"]["changed"], changed);
+        assert_eq!(moved["transfer"]["tab"]["tab_id"], tab);
+        assert_eq!(moved["transfer"]["closed_workspace_id"], Value::Null);
+        for mapping in moved["transfer"]["panes"].as_array().unwrap() {
+            assert_eq!(mapping["previous_pane_id"], mapping["pane_id"]);
+        }
+        let after = core.request("session.snapshot", json!({}));
+        assert_eq!(
+            identities(&after["snapshot"]),
+            identities(&before["snapshot"]),
+            "slot {slot} reallocated public identities or terminals"
+        );
+        let tabs = core.request("tab.list", json!({"workspace_id":workspace}));
+        assert_eq!(
+            tabs["tabs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tab| tab["label"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            order,
+            "slot {slot}"
+        );
+        assert_eq!(after["snapshot"]["focused_pane_id"], diagnostics);
+        core.request("pane.send_text",json!({"pane_id":diagnostics,"text":format!("printf '%s%s\\n' 'SAME-SPACE-DIAGNOSTICS-' '{slot}'\n")}));
+        let marker = format!("SAME-SPACE-DIAGNOSTICS-{slot}");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while client
+            .primary
+            .as_ref()
+            .is_none_or(|surface| !surface.text().contains(&marker))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "slot {slot} changed displayed Diagnostics"
+            );
+            client.receive().unwrap();
+        }
+        assert_eq!(client.focused_pane_id.as_deref(), Some(diagnostics));
+        assert_eq!(
+            client.focused_tab_id,
+            logs["tab"]["tab_id"].as_str().map(str::to_owned)
+        );
+        subscriber
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let mut notifications = Vec::new();
+        loop {
+            line.clear();
+            match subscriber.read_line(&mut line) {
+                Ok(0) => panic!("topology subscription closed for slot {slot}"),
+                Ok(_) => notifications.push(serde_json::from_str::<Value>(&line).unwrap()),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break
+                }
+                Err(error) => panic!("topology subscription failed for slot {slot}: {error}"),
+            }
+        }
+        if changed {
+            assert_eq!(notifications.len(), 1, "slot {slot}: {notifications:?}");
+            assert_eq!(notifications[0]["event"], "tab_moved");
+        } else {
+            assert!(
+                notifications.is_empty(),
+                "no-op slot {slot} emitted topology notifications: {notifications:?}"
+            );
+        }
+    }
+}

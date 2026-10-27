@@ -423,3 +423,22 @@ with strict targeted Clippy/typecheck and Rustfmt passing. An independent
 five-row API/native-input witness retained fresh Diagnostics frames, layouts,
 TerminalIds, original PID/start/PTY/executable identities and local/CWD state
 (3.284154192s operation / 3.303525253s wall).
+
+### T08: Same-space transfers retain identities and silent no-ops
+
+One four-row outline moves Build within `[One, Build, Two]` through insertion
+slots 0–3. It checks exact order, stable tab and pane locators, TerminalIds,
+response mappings, and a fresh production Client Diagnostics frame in Logs.
+Actual public topology subscriptions receive one `tab_moved` for slots 0/3
+and no notifications for no-op slots 1/2. The inherited baseline passed all
+four rows without a production change (3.704s tests / 4.547331711s total).
+
+An owned mutation removing only the same-space event's `changed` guard failed
+at slot 1: the response still reported no change and identities/view remained
+correct, but an illegal `tab_moved` notification arrived
+(1.853s tests / 27.776036755s total). The restored full target passed 7/7
+(3.829s tests / 29.931240421s total), with strict targeted Clippy/typecheck
+and Rustfmt passing. An independent real CLI/native-input witness covered
+all slots, fresh Logs frames, all original public tab/pane IDs and TerminalIds,
+and the nine-kind topology subscription, including 250ms no-op observation
+(3.231439304s operation / 3.246254002s wall).
