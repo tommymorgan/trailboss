@@ -788,6 +788,38 @@ fixture precondition fixes this startup race without sleeps, gesture retries or
 production input changes; the earlier untraced T12 failure has no direct causal
 trace and is not claimed as a separate proven instance.
 
+Formal delivery review found that the five placement cases jumped directly
+between rows and missed ordinary continuous pointer motion. A tab capture was
+canceled on a non-droppable split-pane child or spacer inside the sidebar,
+preventing it from reaching Main. The permanent outline now adds Tools containing
+only the two-pane Build tab, plus a second case with an expanded two-pane
+Transit space between Tools and Main. Both send a real drag event for every
+intervening terminal row before releasing on Main's header.
+
+The contextual actual-native RED completed all five original placement and
+process/PTY/layout proofs, then failed `walk-source-panes` after traversing
+Build at row 6, SourceLeft/SourceRight at rows 7/8 and Main at row 10: release
+produced no transfer (10.656s test / 11.815s total). An independent actual-native
+witness reproduced that same missing transfer (10.819s); an earlier overlong
+session name failed setup and is not causal evidence.
+
+Tab captures now distinguish an inside-sidebar hover from a valid drop slot.
+Crossing a non-droppable row keeps capture without showing an insertion line;
+releasing there still emits neither a transfer nor a click. Leaving the sidebar
+or viewport, stale source/destination identity, modal and declaration changes
+retain their existing cancellation rules. Space-header dragging is unchanged.
+Target classification reuses the same computed terminal geometry and borrowed
+slot result without allocating.
+
+All seven placement/path cases and the affected native/reorder/divider/copy
+regressions passed (35/35, 9.944s test / 11.662s total). The independent native
+witness passed both complete row walks, 6-to-10 and 6-to-15, with one transfer
+and original shell, PTY, state and layout retained (1.810s total).
+Strict warning-denying Clippy passed (1.197s).
+The parent-owned format remediation passed its final check (2.140s). Temporary
+case-progress diagnostics were removed after retaining the causal output;
+case-specific failure context remains in the permanent test.
+
 ### T13 viewed and background native focus
 
 `executable_pty_sidebar_transfer_preserves_viewed_and_background_panes` covers

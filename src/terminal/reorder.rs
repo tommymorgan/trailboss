@@ -26,6 +26,11 @@ pub struct Release {
     pub movement: Option<MoveRequest>,
     pub click: Option<Action>,
 }
+#[derive(Default)]
+struct Target<'a> {
+    inside_sidebar: bool,
+    slot: Option<(&'a str, Option<&'a str>, Rect)>,
+}
 struct Press {
     action: Action,
     boot: String,
@@ -223,7 +228,7 @@ impl Drag {
         }
         let previous = self.indicator;
         if press.dragging {
-            self.indicator = target(
+            let target = target(
                 core,
                 declarations,
                 viewport,
@@ -232,12 +237,14 @@ impl Drag {
                 &press.action.context,
                 press.pointer.0,
                 press.pointer.1,
-            )
-            .map(|(destination, _, rect)| {
+            );
+            self.indicator = target.slot.map(|(destination, _, rect)| {
                 press.retain_destination(destination);
                 rect
             });
-            if self.indicator.is_none() {
+            if self.indicator.is_none()
+                && (press.action.context.tab_id.is_none() || !target.inside_sidebar)
+            {
                 return self.cancel();
             }
         }
@@ -262,8 +269,9 @@ impl Drag {
             press.dragging = true;
         }
         let previous = self.indicator;
+        let mut inside_sidebar = false;
         self.indicator = if press.dragging {
-            target(
+            let target = target(
                 core,
                 declarations,
                 viewport,
@@ -272,15 +280,19 @@ impl Drag {
                 &press.action.context,
                 x,
                 y,
-            )
-            .map(|(destination, _, rect)| {
+            );
+            inside_sidebar = target.inside_sidebar;
+            target.slot.map(|(destination, _, rect)| {
                 press.retain_destination(destination);
                 rect
             })
         } else {
             None
         };
-        if press.dragging && self.indicator.is_none() {
+        if press.dragging
+            && self.indicator.is_none()
+            && (press.action.context.tab_id.is_none() || !inside_sidebar)
+        {
             return self.cancel();
         }
         previous != self.indicator || cancelled
@@ -321,6 +333,7 @@ impl Drag {
             x,
             y,
         )
+        .slot
         .and_then(|(destination, before, _)| {
             if Some(destination) == press.action.context.workspace_id.as_deref() {
                 move_request(snapshot, &press.action.context, before)
@@ -441,15 +454,44 @@ fn target<'a>(
     source: &Context,
     x: u16,
     y: u16,
-) -> Option<(&'a str, Option<&'a str>, Rect)> {
-    let pane = super::surface_rect(core, declarations, viewport)?;
+) -> Target<'a> {
+    let Some(pane) = super::surface_rect(core, declarations, viewport) else {
+        return Target::default();
+    };
     if x < viewport.x
         || x >= pane.x
         || y < viewport.y
         || y >= viewport.y.saturating_add(viewport.height)
     {
-        return None;
+        return Target::default();
     }
+    Target {
+        inside_sidebar: true,
+        slot: slot(
+            core,
+            declarations,
+            viewport,
+            pane,
+            list_offset,
+            snapshot,
+            source,
+            x,
+            y,
+        ),
+    }
+}
+
+fn slot<'a>(
+    core: &Core,
+    declarations: &Declarations,
+    viewport: Rect,
+    pane: Rect,
+    list_offset: u16,
+    snapshot: &'a ClientShellSnapshot,
+    source: &Context,
+    x: u16,
+    y: u16,
+) -> Option<(&'a str, Option<&'a str>, Rect)> {
     let space = workspace(snapshot, source.workspace_id.as_deref()?)?
         .workspace_id
         .as_str();

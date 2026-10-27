@@ -1324,6 +1324,8 @@ fn executable_pty_transfers_split_tab_to_each_cross_space_drop_slot() {
         ("after", ["One", "Two", "Build"]),
         ("expanded-header", ["One", "Two", "Build"]),
         ("collapsed-header", ["One", "Two", "Build"]),
+        ("walk-source-panes", ["One", "Two", "Build"]),
+        ("walk-intervening-panes", ["One", "Two", "Build"]),
     ] {
         let core = Core::new();
         let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
@@ -1336,10 +1338,44 @@ fn executable_pty_transfers_split_tab_to_each_cross_space_drop_slot() {
             json!({"target_pane_id":first,"direction":"right","ratio":0.37,"cwd":core.home}),
         );
         let second = split["pane"]["pane_id"].as_str().unwrap();
-        core.request(
-            "tab.create",
-            json!({"workspace_id":source,"label":"Remaining","cwd":core.home}),
-        );
+        let row_walk = target.starts_with("walk-");
+        if row_walk {
+            for (pane, label) in [(first, "SourceLeft"), (second, "SourceRight")] {
+                core.request("pane.rename", json!({"pane_id":pane,"label":label}));
+            }
+        } else {
+            core.request(
+                "tab.create",
+                json!({"workspace_id":source,"label":"Remaining","cwd":core.home}),
+            );
+        }
+        if target == "walk-intervening-panes" {
+            let transit = core.request(
+                "workspace.create",
+                json!({
+                    "label":"Transit","cwd":core.home
+                }),
+            );
+            core.request(
+                "tab.rename",
+                json!({
+                    "tab_id":transit["tab"]["tab_id"],"label":"Inspect"
+                }),
+            );
+            let transit_split = core.request(
+                "pane.split",
+                json!({
+                    "target_pane_id":transit["root_pane"]["pane_id"],
+                    "direction":"right","cwd":core.home
+                }),
+            );
+            for (pane, label) in [
+                (&transit["root_pane"]["pane_id"], "TransitLeft"),
+                (&transit_split["pane"]["pane_id"], "TransitRight"),
+            ] {
+                core.request("pane.rename", json!({"pane_id":pane,"label":label}));
+            }
+        }
         let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
         let destination = main["workspace"]["workspace_id"].as_str().unwrap();
         core.request(
@@ -1375,9 +1411,20 @@ fn executable_pty_transfers_split_tab_to_each_cross_space_drop_slot() {
         core.request("plugin.link", json!({"path":format!("{}/plugins/agent-tree",env!("CARGO_MANIFEST_DIR")),"enabled":true}));
         let mut console = LiveConsole::new_for_tab(&core, source, build);
         let mut rows = console.wait(|rows, _| {
-            ["Build", "Remaining", "One", "Two"]
+            ["Build", "One", "Two"]
                 .iter()
                 .all(|label| rows.iter().any(|row| row.contains(label)))
+                && if row_walk {
+                    ["SourceLeft", "SourceRight"]
+                        .iter()
+                        .all(|label| rows.iter().any(|row| row.contains(label)))
+                } else {
+                    rows.iter().any(|row| row.contains("Remaining"))
+                }
+                && (target != "walk-intervening-panes"
+                    || ["TransitLeft", "TransitRight"]
+                        .iter()
+                        .all(|label| rows.iter().any(|row| row.contains(label))))
         });
         let layout = core.request("pane.layout", json!({"pane_id":second}))["layout"].clone();
         let header = rows
@@ -1415,26 +1462,35 @@ fn executable_pty_transfers_split_tab_to_each_cross_space_drop_slot() {
         assert!(subscribed.get("error").is_none(), "{subscribed}");
         console
             .writer
-            .write_all(
-                format!(
-                    "\x1b[<0;5;{}M\x1b[<32;5;{}M",
-                    source_row + 1,
-                    target_row + 1
-                )
-                .as_bytes(),
-            )
+            .write_all(format!("\x1b[<0;5;{}M", source_row + 1).as_bytes())
             .unwrap();
+        if row_walk {
+            for row in source_row + 1..=target_row {
+                console
+                    .writer
+                    .write_all(format!("\x1b[<32;5;{}M", row + 1).as_bytes())
+                    .unwrap();
+            }
+        } else {
+            console
+                .writer
+                .write_all(format!("\x1b[<32;5;{}M", target_row + 1).as_bytes())
+                .unwrap();
+        }
         console.writer.flush().unwrap();
-        console.wait(|rows, _| {
-            rows.iter().enumerate().any(|(index, row)| {
-                row.contains("────────────────────")
-                    && if target.ends_with("header") {
-                        index >= header
-                    } else {
-                        index == target_row
-                    }
-            })
-        });
+        console.wait_for(
+            &format!("{target}: Main insertion after pointer motion"),
+            |rows, _| {
+                rows.iter().enumerate().any(|(index, row)| {
+                    row.contains("────────────────────")
+                        && if target.ends_with("header") || row_walk {
+                            index >= header
+                        } else {
+                            index == target_row
+                        }
+                })
+            },
+        );
         assert_eq!(
             core.request("tab.list", json!({"workspace_id":source})),
             before_source,
@@ -1451,7 +1507,14 @@ fn executable_pty_transfers_split_tab_to_each_cross_space_drop_slot() {
             .unwrap();
         console.writer.flush().unwrap();
         line.clear();
-        events.read_line(&mut line).unwrap();
+        events.read_line(&mut line).unwrap_or_else(|error| {
+            let last: Vec<String> = console.screen.screen_text_rows().unwrap().iter()
+                .map(|row| row.cells.iter().take(30)
+                    .flat_map(|cell| cell.graphemes.iter())
+                    .filter_map(|ch| char::from_u32(*ch)).collect())
+                .collect();
+            panic!("{target}: post-release tab.transferred read failed: {error}; initial sidebar={rows:?}; last rendered sidebar={last:?}");
+        });
         let event: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(event["event"], "tab_transferred", "{target}: {event}");
         let tabs = core.request("tab.list", json!({"workspace_id":destination}));
@@ -1465,13 +1528,23 @@ fn executable_pty_transfers_split_tab_to_each_cross_space_drop_slot() {
             expected,
             "{target}"
         );
-        assert_eq!(
-            core.request("tab.list", json!({"workspace_id":source}))["tabs"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
+        if row_walk {
+            assert!(
+                core.request("session.snapshot", json!({}))["snapshot"]["workspaces"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|workspace| workspace["workspace_id"] != source)
+            );
+        } else {
+            assert_eq!(
+                core.request("tab.list", json!({"workspace_id":source}))["tabs"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
         for (index, pane) in panes.iter().enumerate() {
             let state = shell_state(&core, pane, index, "after");
             assert_eq!(state, originals[index].0, "{target}: shell state changed");
