@@ -371,3 +371,18 @@ with unchanged TerminalIds (0.300325s operation). Suppressing only the completed
 summary outside the candidate let the store assertions pass but failed the
 required summary observation at the subscriber timeout (6.261s tests /
 32.862194s total). The mutation was restored before final candidate gates.
+
+### T05: Background moves preserve viewed and remembered focus
+
+One production Client outline covers Diagnostics viewed in Tools, Main and
+Logs, including Tools' remembered active Build while another space is viewed.
+Fresh post-transfer output frames, client/global pane focus, each unaffected
+tab's focused split and non-source workspaces' active tabs remain unchanged.
+The initial baseline passed all three rows; no production fix was needed.
+Removing only the global active-space guard outside the candidate passed the
+Tools row but failed Main's exact global focused-pane assertion (1.118s tests /
+27.970657s total). The restored full transfer target passed 4/4 (1.661s tests /
+27.527539s total), with strict targeted Clippy/typecheck and Rustfmt passing.
+An independent three-row production Client witness also retained native-input
+targeting, original PIDs, shell-local state, TerminalIds and remembered focus
+(2.201213s operation / 2.215180s wall).

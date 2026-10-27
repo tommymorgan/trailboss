@@ -441,3 +441,133 @@ fn plugin_transfer_publishes_completed_topology_to_events_and_live_store() {
         "plugin transfer recreated or closed a terminal"
     );
 }
+
+#[test]
+fn background_transfer_preserves_each_current_view_and_unaffected_tab_focus() {
+    for viewed_space in ["Tools", "Main", "Logs"] {
+        let core = Core::new();
+        let tools = core.request(
+            "workspace.create",
+            json!({"label":"Tools","cwd":core.home,"focus":true}),
+        );
+        let source = tools["workspace"]["workspace_id"].as_str().unwrap();
+        let build = tools["tab"]["tab_id"].as_str().unwrap();
+        core.request("tab.rename", json!({"tab_id":build,"label":"Build"}));
+        let tools_diagnostics = core.request(
+            "tab.create",
+            json!({"workspace_id":source,"label":"Diagnostics","cwd":core.home}),
+        );
+        let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+        let destination = main["workspace"]["workspace_id"].as_str().unwrap();
+        let logs = core.request("workspace.create", json!({"label":"Logs","cwd":core.home}));
+        let mut diagnostics = Vec::new();
+        for (space, created) in [
+            ("Tools", &tools_diagnostics),
+            ("Main", &main),
+            ("Logs", &logs),
+        ] {
+            let tab = created["tab"]["tab_id"].as_str().unwrap();
+            let root = created["root_pane"]["pane_id"].as_str().unwrap();
+            core.request("tab.rename", json!({"tab_id":tab,"label":"Diagnostics"}));
+            let split = core.request(
+                "pane.split",
+                json!({"target_pane_id":root,"direction":"right","cwd":core.home,"focus":true}),
+            );
+            let second = split["pane"]["pane_id"].as_str().unwrap().to_owned();
+            core.request("pane.focus", json!({"pane_id":second}));
+            diagnostics.push((space, tab.to_owned(), second));
+        }
+        // Tools' active tab is deliberately Build when another space is viewed.
+        if viewed_space != "Tools" {
+            core.request("tab.focus", json!({"tab_id":build}));
+        }
+        let (_, viewed_tab, viewed_pane) = diagnostics
+            .iter()
+            .find(|(space, _, _)| *space == viewed_space)
+            .unwrap();
+        core.request("pane.focus", json!({"pane_id":viewed_pane}));
+        let remembered = diagnostics
+            .iter()
+            .map(|(_, _, pane)| {
+                core.request("pane.layout", json!({"pane_id":pane}))["layout"]["focused_pane_id"]
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        let before = core.request("session.snapshot", json!({}));
+        let remembered_tabs = before["snapshot"]["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|workspace| workspace["workspace_id"] != source)
+            .map(|workspace| {
+                (
+                    workspace["workspace_id"].clone(),
+                    workspace["active_tab_id"].clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut client = core.attach();
+        while client.focused_pane_id.as_deref() != Some(viewed_pane.as_str()) {
+            client.receive().unwrap();
+        }
+
+        core.request(
+            "tab.transfer",
+            json!({"tab_id":build,"workspace_id":destination}),
+        );
+        // A fresh output frame prevents an unchanged, stale Client value from passing.
+        core.request("pane.send_text",json!({"pane_id":viewed_pane,"text":format!("printf '%s%s\\n' 'BG-DIAGNOSTICS-' '{viewed_space}'\n")}));
+        let marker = format!("BG-DIAGNOSTICS-{viewed_space}");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while client
+            .primary
+            .as_ref()
+            .is_none_or(|surface| !surface.text().contains(&marker))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "Diagnostics stopped displaying in {viewed_space}"
+            );
+            client.receive().unwrap();
+        }
+        assert_eq!(
+            client.focused_tab_id.as_deref(),
+            Some(viewed_tab.as_str()),
+            "background move changed {viewed_space} client tab"
+        );
+        assert_eq!(
+            client.focused_pane_id.as_deref(),
+            Some(viewed_pane.as_str()),
+            "background move changed {viewed_space} client pane"
+        );
+        let snapshot = core.request("session.snapshot", json!({}));
+        assert_eq!(
+            snapshot["snapshot"]["panes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|pane| pane["focused"] == true)
+                .unwrap()["pane_id"],
+            *viewed_pane
+        );
+        for (workspace_id, active_tab) in remembered_tabs {
+            let workspace = snapshot["snapshot"]["workspaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|workspace| workspace["workspace_id"] == workspace_id)
+                .unwrap();
+            assert_eq!(
+                workspace["active_tab_id"], active_tab,
+                "remembered active tab changed while viewing {viewed_space}"
+            );
+        }
+        for ((space, _, pane), expected) in diagnostics.iter().zip(remembered) {
+            assert_eq!(
+                core.request("pane.layout", json!({"pane_id":pane}))["layout"]["focused_pane_id"],
+                expected,
+                "remembered focus changed in {space}, viewing {viewed_space}"
+            );
+        }
+    }
+}
