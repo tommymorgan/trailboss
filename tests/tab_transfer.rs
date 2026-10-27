@@ -1666,3 +1666,124 @@ fn alias_blind_importer_is_rejected_before_public_socket_or_owner_changes() {
     assert_eq!(client.boot_id, boot);
     assert_eq!(client.focused_pane_id.as_deref(), Some(current));
 }
+
+#[test]
+#[ignore = "requires an explicitly supplied alias-free legacy Core executable"]
+fn alias_free_legacy_source_hands_off_through_plain_restored_handshake() {
+    let legacy = PathBuf::from(
+        std::env::var_os("TRAILBOSS_TEST_LEGACY_CORE")
+            .expect("set TRAILBOSS_TEST_LEGACY_CORE to an alias-free legacy Core executable"),
+    );
+    assert!(
+        legacy.is_absolute(),
+        "legacy executable must be an explicit absolute path"
+    );
+    let name = format!(
+        "legacy-{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let home = std::env::temp_dir().join(&name);
+    std::fs::create_dir_all(&home).unwrap();
+    let mut core = Core::launch_with_executable(home, name, legacy);
+    let socket = core
+        .home
+        .join(format!("trailboss/sessions/{}/trailboss.sock", core.name));
+    let _stop_owner = StopOwner(socket.clone());
+    // No tab transfer occurs: this actual legacy source exports its original,
+    // alias-free runtime manifest and accepts only the plain restored receipt.
+    let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+    let pane = tools["root_pane"]["pane_id"].as_str().unwrap().to_owned();
+    core.request("pane.focus", json!({"pane_id":pane}));
+    core.request("pane.send_text", json!({"pane_id":pane,"text":"legacy_local=retained; printf '%s %s %s\\n' \"$$\" \"$legacy_local\" \"$HERDR_PANE_ID\" > legacy-before.state\n"}));
+    let initial_state = wait_for_file(&core.home.join("legacy-before.state"));
+    let shell = initial_state.split_whitespace().next().unwrap();
+    let identity = process_identity(shell);
+    let mut client = core.attach();
+    while client.focused_pane_id.as_deref() != Some(pane.as_str()) {
+        client.receive().unwrap();
+    }
+    let old_boot = client.boot_id.clone();
+    let mut wire = BufReader::new(UnixStream::connect(&socket).unwrap());
+    wire.get_mut()
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    serde_json::to_writer(wire.get_mut(), &json!({"id":"alias-free-legacy-import","method":"server.live_handoff","params":{"import_exe":support::executable()}})).unwrap();
+    wire.get_mut().write_all(b"\n").unwrap();
+    let mut line = String::new();
+    wire.read_line(&mut line).unwrap();
+    let imported: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(imported["id"], "alias-free-legacy-import");
+    assert!(
+        imported.get("error").is_none() && imported.get("result").is_some(),
+        "alias-free legacy handoff failed: {imported}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if let Some(status) = core.child.try_wait().unwrap() {
+            assert!(
+                status.success(),
+                "legacy source exited unsuccessfully: {status}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "legacy source did not relinquish ownership"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(client);
+    let mut client = core.attach();
+    while client.focused_pane_id.as_deref() != Some(pane.as_str()) {
+        client.receive().unwrap();
+    }
+    assert_ne!(
+        client.boot_id, old_boot,
+        "client reattached to the legacy boot"
+    );
+    let snapshot = core.request("session.snapshot", json!({}))["snapshot"].clone();
+    assert_eq!(snapshot["focused_pane_id"], pane);
+    let current = core.request("pane.get", json!({"pane_id":pane}))["pane"].clone();
+    let terminal = current["terminal_id"].clone();
+    assert!(
+        terminal.as_str().is_some_and(|id| !id.is_empty()),
+        "imported pane has no current terminal: {current}"
+    );
+    assert_eq!(process_identity(shell), identity);
+    core.request("pane.send_text",json!({"pane_id":pane,"text":format!(
+        "printf '%s %s %s\\n' \"$$\" \"$legacy_local\" \"$HERDR_PANE_ID\" > legacy-after.state; '{}' pane current --current > legacy-current.json 2> legacy-current.err; printf '%s\\n' \"$?\" > legacy-current.done; printf '%s%s\\n' 'LEGACY-' 'IMPORT-USABLE'\n",
+        support::executable().display()
+    )}));
+    assert_eq!(
+        wait_for_file(&core.home.join("legacy-after.state")),
+        initial_state,
+        "legacy shell PID/local/inherited context changed"
+    );
+    assert_eq!(
+        wait_for_file(&core.home.join("legacy-current.done")).trim(),
+        "0",
+        "inherited CLI failed after legacy import: {}",
+        std::fs::read_to_string(core.home.join("legacy-current.err")).unwrap()
+    );
+    let inherited: Value =
+        serde_json::from_str(&wait_for_file(&core.home.join("legacy-current.json"))).unwrap();
+    assert_eq!(inherited["result"]["pane"]["pane_id"], pane);
+    assert_eq!(inherited["result"]["pane"]["terminal_id"], terminal);
+    assert_eq!(process_identity(shell), identity);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client
+        .primary
+        .as_ref()
+        .is_none_or(|surface| !surface.text().contains("LEGACY-IMPORT-USABLE"))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "imported terminal reader is not usable"
+        );
+        client.receive().unwrap();
+    }
+    assert_eq!(client.focused_pane_id.as_deref(), Some(pane.as_str()));
+}

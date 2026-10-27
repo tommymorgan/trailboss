@@ -571,3 +571,33 @@ Working-to-Done turns, including fresh turns after rejection (8.840292440s total
 All owned processes were cleaned up. The restored acknowledgment remains before
 public socket removal and ownership commit; no production change beyond T09 was
 needed. These are isolated proofs, not changes to human sessions or installations.
+
+### T19: Keep alias-free legacy handoff compatible
+
+One opt-in regression launches the explicitly supplied actual legacy Core with
+an unmoved running tab and no carried public aliases. Its existing manifest and
+plain restored acknowledgment complete a real handoff to the candidate. The
+correlated request succeeds and the legacy Core exits successfully; a fresh
+native Client observes the candidate's new boot and the same focused pane.
+The original shell PID/start/PTY/executable, shell-local state and inherited
+locator survive. Actual inherited CLI targeting resolves to the imported
+runtime's current TerminalId, and fresh native output proves that runtime is
+usable. Existing handoff may allocate a new logical TerminalId and disconnect
+old Client connections; neither is treated as OS process loss.
+
+The baseline passed without production edits (1/1 explicitly requested ignored
+test, 0.898s tests / 1.935782887s total). The required owned mutation changed
+only the importer's zero-alias receipt from `restored` to `restored-aliases 0`.
+The permanent regression failed with the old source's `handoff_failed`, because
+the importer did not report restored runtimes in its expected format
+(0.557s tests / 26.520184370s total). The genuine legacy-source OMP witness failed
+for the same reason (7.371979041s total), and all owned processes were cleaned up.
+
+After removing the mutation, all eleven transfer tests passed, including both
+explicitly requested ignored mixed-version regressions (3.179s tests /
+29.152138580s total). Strict Clippy (0.322770987s) and Rustfmt check (2.096111877s)
+passed. The independent actual legacy-to-candidate witness completed all five
+genuine OMP Working-to-Done turns, including fresh turns after import
+(9.035638217s total), preserving the original shell/OMP processes, PTYs and
+session and cleaning up all owned processes. The plain receipt remains necessary
+for an alias-free legacy manifest; no production change beyond T09 was needed.
