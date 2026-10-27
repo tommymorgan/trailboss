@@ -386,3 +386,20 @@ Tools row but failed Main's exact global focused-pane assertion (1.118s tests /
 An independent three-row production Client witness also retained native-input
 targeting, original PIDs, shell-local state, TerminalIds and remembered focus
 (2.201213s operation / 2.215180s wall).
+
+### T06: Removing the final source tab preserves destination identity
+
+One outline covers Tools before and after Main, with only Build in Tools
+and Diagnostics displayed in Logs. It reuses the registered plugin's production
+store fixture and compares API/store topology, original TerminalIds, shell PIDs,
+start times, PTYs, executable identities and shell-local state. Both rows passed
+the initial baseline; no production fix was needed.
+
+An owned mutation emulating a cached destination index after source removal
+put Build under Logs rather than the original Main and failed subscribed-store
+convergence (5.857s tests / 31.730225508s total). The restored full transfer target
+passed 5/5 (1.669s tests / 27.777293092s total); strict targeted Clippy/typecheck
+and Rustfmt passed. An independent production-store and Client witness covered
+both orders, fresh Logs frames/native input, both Build shells' process/PTY,
+local/CWD continuity and all five original TerminalIds without extra terminals
+(1.504641327s operation / 1.546076902s wall).

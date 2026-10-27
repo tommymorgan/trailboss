@@ -571,3 +571,171 @@ fn background_transfer_preserves_each_current_view_and_unaffected_tab_focus() {
         }
     }
 }
+
+#[test]
+fn final_tab_transfer_removes_only_empty_source_before_or_after_destination() {
+    for tools_first in [true, false] {
+        let core = Core::new();
+        let mut created = Vec::new();
+        for label in if tools_first {
+            ["Tools", "Main"]
+        } else {
+            ["Main", "Tools"]
+        } {
+            created.push(core.request("workspace.create", json!({"label":label,"cwd":core.home})));
+        }
+        let tools = &created[usize::from(!tools_first)];
+        let main = &created[usize::from(tools_first)];
+        let source = tools["workspace"]["workspace_id"].as_str().unwrap();
+        let destination = main["workspace"]["workspace_id"].as_str().unwrap();
+        let tab = tools["tab"]["tab_id"].as_str().unwrap();
+        let first = tools["root_pane"]["pane_id"].as_str().unwrap();
+        core.request("tab.rename", json!({"tab_id":tab,"label":"Build"}));
+        let split = core.request(
+            "pane.split",
+            json!({"target_pane_id":first,"direction":"right","cwd":core.home}),
+        );
+        for (index, pane) in [first, split["pane"]["pane_id"].as_str().unwrap()]
+            .iter()
+            .enumerate()
+        {
+            core.request(
+                "pane.rename",
+                json!({"pane_id":pane,"label":format!("Build pane {index}")}),
+            );
+        }
+        let logs = core.request("workspace.create", json!({"label":"Logs","cwd":core.home}));
+        let diagnostics = logs["root_pane"]["pane_id"].as_str().unwrap();
+        core.request(
+            "tab.rename",
+            json!({"tab_id":logs["tab"]["tab_id"],"label":"Diagnostics"}),
+        );
+        core.request("pane.focus", json!({"pane_id":diagnostics}));
+        let before = core.request("session.snapshot", json!({}));
+        let mut originals = Vec::new();
+        for (index, pane) in before["snapshot"]["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            core.request("pane.send_text",json!({"pane_id":pane["pane_id"],"text":format!("transfer_local=source-last-{index}; printf '%s %s\\n' \"$$\" \"$transfer_local\" > last-before-{index}\n")}));
+            let state = wait_for_file(&core.home.join(format!("last-before-{index}")));
+            originals.push((
+                pane["terminal_id"].clone(),
+                state.clone(),
+                process_identity(state.split_whitespace().next().unwrap()),
+            ));
+        }
+        let mut client = core.attach();
+        while client.focused_pane_id.as_deref() != Some(diagnostics) {
+            client.receive().unwrap();
+        }
+        // Reuse the registered plugin's production store and shared command seam.
+        let plugin = core.home.join("transfer-plugin");
+        std::fs::create_dir_all(&plugin).unwrap();
+        let receipt_path = plugin.join("receipt.json");
+        let command = json!([
+            "bun",
+            format!(
+                "{}/tests/support/tab_transfer_plugin.ts",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+            tab,
+            destination,
+            receipt_path
+        ]);
+        std::fs::write(plugin.join("trailboss-plugin.toml"),format!(
+            "id = \"fixture.tab-transfer\"\nname = \"Transfer contract\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"transfer\"\ntitle = \"Transfer\"\ncommand = {command}\n"
+        )).unwrap();
+        core.request("plugin.link", json!({"path":plugin,"enabled":true}));
+        core.request(
+            "plugin.action.invoke",
+            json!({"plugin_id":"fixture.tab-transfer","action_id":"transfer"}),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let receipt: Value = loop {
+            if let Ok(bytes) = std::fs::read(&receipt_path) {
+                if let Ok(value) = serde_json::from_slice(&bytes) {
+                    break value;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "source-last store transfer did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(receipt.get("error").is_none(), "{receipt}");
+        let transfer = &receipt["response"]["transfer"];
+        assert_eq!(transfer["closed_workspace_id"], source);
+        assert_eq!(
+            transfer["tab"]["workspace_id"], destination,
+            "transfer changed destination after source removal"
+        );
+        let after = core.request("session.snapshot", json!({}));
+        let workspaces = after["snapshot"]["workspaces"].as_array().unwrap();
+        assert_eq!(
+            workspaces.len(),
+            before["snapshot"]["workspaces"].as_array().unwrap().len() - 1
+        );
+        assert!(!workspaces
+            .iter()
+            .any(|workspace| workspace["workspace_id"] == source));
+        assert!(workspaces
+            .iter()
+            .any(|workspace| workspace["workspace_id"] == destination
+                && workspace["label"] == "Main"));
+        assert!(workspaces
+            .iter()
+            .any(|workspace| workspace["workspace_id"] == logs["workspace"]["workspace_id"]));
+        let rows = receipt["after"].as_array().unwrap();
+        assert!(!rows.iter().any(|row| row["workspaceId"] == source));
+        assert!(rows
+            .iter()
+            .any(|row| row["kind"] == "workspace" && row["workspaceId"] == destination));
+        assert!(rows.iter().any(|row| row["kind"] == "workspace"
+            && row["workspaceId"] == logs["workspace"]["workspace_id"]));
+        let panes = after["snapshot"]["panes"].as_array().unwrap();
+        assert_eq!(
+            panes.len(),
+            originals.len(),
+            "source removal launched a replacement shell"
+        );
+        for (index, (terminal, state, identity)) in originals.iter().enumerate() {
+            let pane = panes
+                .iter()
+                .find(|pane| pane["terminal_id"] == *terminal)
+                .expect("source removal replaced an original terminal");
+            core.request("pane.send_text",json!({"pane_id":pane["pane_id"],"text":format!("printf '%s %s\\n' \"$$\" \"$transfer_local\" > last-after-{index}\n")}));
+            let current = wait_for_file(&core.home.join(format!("last-after-{index}")));
+            assert_eq!(&current, state, "shell-local state or PID changed");
+            assert_eq!(
+                &process_identity(current.split_whitespace().next().unwrap()),
+                identity
+            );
+        }
+        core.request(
+            "pane.send_text",
+            json!({"pane_id":diagnostics,"text":"printf '%s%s\\n' 'LAST-' 'DIAGNOSTICS'\n"}),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while client
+            .primary
+            .as_ref()
+            .is_none_or(|surface| !surface.text().contains("LAST-DIAGNOSTICS"))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "Logs stopped displaying after final-tab movement"
+            );
+            client.receive().unwrap();
+        }
+        assert_eq!(client.focused_pane_id.as_deref(), Some(diagnostics));
+        assert_eq!(
+            client.focused_tab_id,
+            logs["tab"]["tab_id"].as_str().map(str::to_owned)
+        );
+        assert_eq!(after["snapshot"]["focused_pane_id"], diagnostics);
+    }
+}
