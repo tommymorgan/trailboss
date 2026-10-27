@@ -403,3 +403,23 @@ and Rustfmt passed. An independent production-store and Client witness covered
 both orders, fresh Logs frames/native input, both Build shells' process/PTY,
 local/CWD continuity and all five original TerminalIds without extra terminals
 (1.504641327s operation / 1.546076902s wall).
+
+### T07: Invalid transfers leave topology, view and live targets unchanged
+
+One five-row public-wire outline rejects closed source and destination locators,
+index 3 into two tabs, a malformed negative index and an old tab locator after
+a valid transfer. Each rejection identifies its offending token and retains
+semantic topology, selection, pane layouts, original pane targets, processes,
+PTYs and shell-local state. A fresh production Client frame confirms Diagnostics
+remains displayed. Attaching the Client before layout capture corrected an
+initial fixture-only resize mismatch; the corrected baseline passed without a
+production change.
+
+An owned silent-index-clamping mutation passed the first closed-locator rows
+but failed the index row by successfully moving Build instead of rejecting it
+(1.843s tests / 27.860924395s total). The restored full target passed 6/6
+(3.120s tests / 29.45445884s total), including semantic error-token assertions,
+with strict targeted Clippy/typecheck and Rustfmt passing. An independent
+five-row API/native-input witness retained fresh Diagnostics frames, layouts,
+TerminalIds, original PID/start/PTY/executable identities and local/CWD state
+(3.284154192s operation / 3.303525253s wall).

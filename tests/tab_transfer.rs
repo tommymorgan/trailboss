@@ -739,3 +739,188 @@ fn final_tab_transfer_removes_only_empty_source_before_or_after_destination() {
         assert_eq!(after["snapshot"]["focused_pane_id"], diagnostics);
     }
 }
+
+#[test]
+fn invalid_transfers_preserve_topology_view_pane_targeting_and_processes() {
+    for invalid in ["source", "destination", "index", "negative", "old-tab"] {
+        let core = Core::new();
+        let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+        let source = tools["workspace"]["workspace_id"].as_str().unwrap();
+        let tab = tools["tab"]["tab_id"].as_str().unwrap();
+        core.request("tab.rename", json!({"tab_id":tab,"label":"Build"}));
+        core.request("pane.split",json!({"target_pane_id":tools["root_pane"]["pane_id"],"direction":"right","cwd":core.home}));
+        let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+        let destination = main["workspace"]["workspace_id"].as_str().unwrap();
+        core.request(
+            "tab.rename",
+            json!({"tab_id":main["tab"]["tab_id"],"label":"One"}),
+        );
+        core.request(
+            "tab.create",
+            json!({"workspace_id":destination,"label":"Two","cwd":core.home}),
+        );
+        let mut params = json!({"tab_id":tab,"workspace_id":destination});
+        let expected_code = match invalid {
+            "source" => {
+                let doomed = core.request(
+                    "tab.create",
+                    json!({"workspace_id":source,"label":"Closed","cwd":core.home}),
+                );
+                core.request("tab.close", json!({"tab_id":doomed["tab"]["tab_id"]}));
+                params["tab_id"] = doomed["tab"]["tab_id"].clone();
+                "tab_not_found"
+            }
+            "destination" => {
+                let doomed = core.request(
+                    "workspace.create",
+                    json!({"label":"Closed","cwd":core.home}),
+                );
+                core.request(
+                    "workspace.close",
+                    json!({"workspace_id":doomed["workspace"]["workspace_id"]}),
+                );
+                params["workspace_id"] = doomed["workspace"]["workspace_id"].clone();
+                "workspace_not_found"
+            }
+            "index" => {
+                params["insert_index"] = json!(3);
+                "tab_transfer_failed"
+            }
+            "negative" => {
+                params["insert_index"] = json!(-1);
+                "invalid_request"
+            }
+            "old-tab" => {
+                core.request("tab.transfer", params.clone());
+                "tab_not_found"
+            }
+            _ => unreachable!(),
+        };
+        let invalid_token = match invalid {
+            "source" | "old-tab" => params["tab_id"].as_str().unwrap().to_owned(),
+            "destination" => params["workspace_id"].as_str().unwrap().to_owned(),
+            "index" | "negative" => params["insert_index"].to_string(),
+            _ => unreachable!(),
+        };
+        let logs = core.request("workspace.create", json!({"label":"Logs","cwd":core.home}));
+        let diagnostics = logs["root_pane"]["pane_id"].as_str().unwrap();
+        core.request(
+            "tab.rename",
+            json!({"tab_id":logs["tab"]["tab_id"],"label":"Diagnostics"}),
+        );
+        core.request("pane.focus", json!({"pane_id":diagnostics}));
+        let semantic_topology = |snapshot: &Value| {
+            json!({
+                "focused_pane_id":snapshot["focused_pane_id"],
+                "workspaces":snapshot["workspaces"].as_array().unwrap().iter().map(|workspace|
+                    json!([workspace["workspace_id"],workspace["label"],workspace["active_tab_id"],workspace["tab_count"]])
+                ).collect::<Vec<_>>(),
+                "tabs":snapshot["tabs"].as_array().unwrap().iter().map(|tab|
+                    json!([tab["tab_id"],tab["workspace_id"],tab["number"],tab["label"],tab["focused"],tab["pane_count"]])
+                ).collect::<Vec<_>>(),
+                "panes":snapshot["panes"].as_array().unwrap().iter().map(|pane|
+                    json!([pane["pane_id"],pane["terminal_id"],pane["workspace_id"],pane["tab_id"],pane["focused"],pane["label"]])
+                ).collect::<Vec<_>>()
+            })
+        };
+        let mut client = core.attach();
+        while client.focused_pane_id.as_deref() != Some(diagnostics) {
+            client.receive().unwrap();
+        }
+        let before = core.request("session.snapshot", json!({}));
+        let mut originals = Vec::new();
+        for (index, pane) in before["snapshot"]["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let pane_id = pane["pane_id"].as_str().unwrap();
+            core.request("pane.send_text",json!({"pane_id":pane_id,"text":format!("transfer_local=invalid-{index}; printf '%s %s\\n' \"$$\" \"$transfer_local\" > invalid-before-{index}\n")}));
+            let state = wait_for_file(&core.home.join(format!("invalid-before-{index}")));
+            let identity = process_identity(state.split_whitespace().next().unwrap());
+            let layout = core.request("pane.layout", json!({"pane_id":pane_id}))["layout"].clone();
+            originals.push((pane_id.to_owned(), state, identity, layout));
+        }
+        // Send the malformed negative index over the actual wire, not typed serde.
+        let mut stream = BufReader::new(
+            UnixStream::connect(
+                core.home
+                    .join(format!("trailboss/sessions/{}/trailboss.sock", core.name)),
+            )
+            .unwrap(),
+        );
+        stream
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let request_id = format!("invalid-transfer-{invalid}");
+        serde_json::to_writer(
+            stream.get_mut(),
+            &json!({"id":request_id,"method":"tab.transfer","params":params}),
+        )
+        .unwrap();
+        stream.get_mut().write_all(b"\n").unwrap();
+        let mut line = String::new();
+        stream.read_line(&mut line).unwrap();
+        let rejected: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            rejected["id"], request_id,
+            "uncorrelated {invalid} rejection: {rejected}"
+        );
+        assert_eq!(
+            rejected["error"]["code"], expected_code,
+            "{invalid}: {rejected}"
+        );
+        assert!(
+            rejected["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(&invalid_token),
+            "{invalid} rejection did not identify {invalid_token}: {rejected}"
+        );
+        assert!(rejected.get("result").is_none(), "{invalid}: {rejected}");
+        let after = core.request("session.snapshot", json!({}));
+        assert_eq!(
+            semantic_topology(&after["snapshot"]),
+            semantic_topology(&before["snapshot"]),
+            "{invalid} partially changed topology or view"
+        );
+        for (index, (pane, state, identity, layout)) in originals.iter().enumerate() {
+            assert_eq!(
+                &core.request("pane.layout", json!({"pane_id":pane}))["layout"],
+                layout,
+                "{invalid} changed pane layout/target"
+            );
+            core.request("pane.send_text",json!({"pane_id":pane,"text":format!("printf '%s %s\\n' \"$$\" \"$transfer_local\" > invalid-after-{index}\n")}));
+            let current = wait_for_file(&core.home.join(format!("invalid-after-{index}")));
+            assert_eq!(
+                &current, state,
+                "{invalid} changed pane targeting, shell locals or PID"
+            );
+            assert_eq!(
+                &process_identity(current.split_whitespace().next().unwrap()),
+                identity
+            );
+        }
+        core.request("pane.send_text",json!({"pane_id":diagnostics,"text":format!("printf '%s%s\\n' 'INVALID-DIAGNOSTICS-' '{invalid}'\n")}));
+        let marker = format!("INVALID-DIAGNOSTICS-{invalid}");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while client
+            .primary
+            .as_ref()
+            .is_none_or(|surface| !surface.text().contains(&marker))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "{invalid} changed displayed Diagnostics"
+            );
+            client.receive().unwrap();
+        }
+        assert_eq!(client.focused_pane_id.as_deref(), Some(diagnostics));
+        assert_eq!(
+            client.focused_tab_id,
+            logs["tab"]["tab_id"].as_str().map(str::to_owned)
+        );
+    }
+}
