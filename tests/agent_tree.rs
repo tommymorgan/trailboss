@@ -546,6 +546,13 @@ impl LiveConsole {
         &mut self,
         predicate: impl Fn(&[String], &ghostty_vt::Terminal) -> bool,
     ) -> Vec<String> {
+        self.wait_for("live PTY tree", predicate)
+    }
+    fn wait_for(
+        &mut self,
+        stage: &str,
+        predicate: impl Fn(&[String], &ghostty_vt::Terminal) -> bool,
+    ) -> Vec<String> {
         let deadline = Instant::now() + Duration::from_secs(8);
         loop {
             let rows: Vec<String> = self
@@ -567,12 +574,12 @@ impl LiveConsole {
             }
             assert!(
                 self.child.0.try_wait().unwrap().is_none(),
-                "client restarted/exited"
+                "{stage}: client restarted/exited"
             );
             let bytes = self
                 .rx
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .unwrap_or_else(|error| panic!("live PTY tree did not update: {error}; {rows:?}"));
+                .unwrap_or_else(|error| panic!("{stage} did not update: {error}; {rows:?}"));
             self.screen.write(&bytes);
         }
     }
@@ -2142,4 +2149,181 @@ fn executable_pty_sidebar_transfer_cancels_every_interrupted_capture() {
             "{case}: native client exited"
         );
     }
+}
+
+#[test]
+#[ignore = "requires an explicitly supplied pre-transfer legacy Core executable"]
+fn executable_pty_unsupported_sidebar_transfer_reports_notice_without_reordering() {
+    use std::{
+        io::{BufRead, BufReader},
+        os::unix::net::UnixStream,
+    };
+    let legacy = std::path::PathBuf::from(
+        std::env::var_os("TRAILBOSS_TEST_LEGACY_CORE")
+            .expect("set TRAILBOSS_TEST_LEGACY_CORE to a pre-transfer Core executable"),
+    );
+    assert!(
+        legacy.is_absolute(),
+        "legacy executable must be an explicit absolute path"
+    );
+    let name = format!(
+        "old-drag-{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let home = std::env::temp_dir().join(&name);
+    std::fs::create_dir_all(&home).unwrap();
+    let core = Core::launch_with_executable(home, name, legacy);
+    let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+    let source = tools["workspace"]["workspace_id"].as_str().unwrap();
+    core.request(
+        "tab.rename",
+        json!({"tab_id":tools["tab"]["tab_id"],"label":"One"}),
+    );
+    let build = core.request(
+        "tab.create",
+        json!({"workspace_id":source,"label":"Build","cwd":core.home}),
+    );
+    let tab = build["tab"]["tab_id"].as_str().unwrap();
+    core.request(
+        "tab.create",
+        json!({"workspace_id":source,"label":"Two","cwd":core.home}),
+    );
+    let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+    let destination = main["workspace"]["workspace_id"].as_str().unwrap();
+    core.request(
+        "tab.rename",
+        json!({"tab_id":main["tab"]["tab_id"],"label":"Target"}),
+    );
+    let logs = core.request("workspace.create", json!({"label":"Logs","cwd":core.home}));
+    let diagnostics = logs["root_pane"]["pane_id"].as_str().unwrap();
+    core.request(
+        "tab.rename",
+        json!({"tab_id":logs["tab"]["tab_id"],"label":"Diagnostics"}),
+    );
+    core.request("pane.focus", json!({"pane_id":diagnostics}));
+    core.request(
+        "plugin.link",
+        json!({
+            "path":format!("{}/plugins/agent-tree",env!("CARGO_MANIFEST_DIR")),"enabled":true
+        }),
+    );
+    let mut console = LiveConsole::new_for_tab(&core, source, tab);
+    let native_pid = console.child.0.process_id();
+    let rows = console.wait_for("T16 actual agent-tree sidebar startup", |rows, _| {
+        ["One", "Build", "Two", "Target", "Diagnostics"]
+            .iter()
+            .all(|label| rows.iter().any(|row| row.contains(label)))
+    });
+    let source_row = rows.iter().position(|row| row.contains("Build")).unwrap();
+    let target_row = rows.iter().position(|row| row.contains("Target")).unwrap();
+    let before_source = core.request("tab.list", json!({"workspace_id":source}));
+    let before_destination = core.request("tab.list", json!({"workspace_id":destination}));
+    let before_build =
+        core.request("pane.get", json!({"pane_id":build["root_pane"]["pane_id"]}))["pane"].clone();
+    let socket = core
+        .home
+        .join("trailboss/sessions")
+        .join(&core.name)
+        .join("trailboss.sock");
+    let mut events = BufReader::new(UnixStream::connect(socket).unwrap());
+    events
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .unwrap();
+    serde_json::to_writer(
+        events.get_mut(),
+        &json!({
+            "id":"unsupported-native-events","method":"events.subscribe","params":{"subscriptions":[
+                {"type":"tab.moved"},{"type":"pane.moved"},{"type":"tab.focused"},
+                {"type":"pane.focused"},{"type":"workspace.focused"}
+            ]}
+        }),
+    )
+    .unwrap();
+    events.get_mut().write_all(b"\n").unwrap();
+    let mut line = String::new();
+    events.read_line(&mut line).unwrap();
+    assert!(serde_json::from_str::<Value>(&line)
+        .unwrap()
+        .get("error")
+        .is_none());
+    console
+        .writer
+        .write_all(
+            format!(
+                "\x1b[<0;5;{}M\x1b[<32;5;{}M",
+                source_row + 1,
+                target_row + 1
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    console.writer.flush().unwrap();
+    console.wait_for(
+        "T16 cross-space insertion indicator before release",
+        |rows, _| {
+            rows[target_row]
+                .trim_start()
+                .starts_with("────────────────────")
+        },
+    );
+    assert_eq!(
+        core.request("tab.list", json!({"workspace_id":source})),
+        before_source
+    );
+    assert_eq!(
+        core.request("tab.list", json!({"workspace_id":destination})),
+        before_destination
+    );
+    console
+        .writer
+        .write_all(format!("\x1b[<0;5;{}m", target_row + 1).as_bytes())
+        .unwrap();
+    console.writer.flush().unwrap();
+    console.wait_for(
+        "T16 visible unsupported tab.transfer endpoint notice after release",
+        |_, screen| {
+            let text: String = screen
+                .screen_text_rows()
+                .unwrap()
+                .iter()
+                .flat_map(|row| row.cells.iter())
+                .flat_map(|cell| cell.graphemes.iter())
+                .filter_map(|ch| char::from_u32(*ch))
+                .collect();
+            text.contains("Action unavailable") && text.contains("tab.transfer")
+        },
+    );
+    line.clear();
+    let quiet = events
+        .read_line(&mut line)
+        .expect_err("unsupported drop emitted movement or focus");
+    assert!(matches!(
+        quiet.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ));
+    assert_eq!(
+        core.request("tab.list", json!({"workspace_id":source})),
+        before_source
+    );
+    assert_eq!(
+        core.request("tab.list", json!({"workspace_id":destination})),
+        before_destination
+    );
+    assert_eq!(
+        core.request("pane.get", json!({"pane_id":build["root_pane"]["pane_id"]}))["pane"],
+        before_build
+    );
+    let snapshot = core.request("session.snapshot", json!({}))["snapshot"].clone();
+    assert_eq!(
+        snapshot["focused_workspace_id"],
+        logs["workspace"]["workspace_id"]
+    );
+    assert_eq!(snapshot["focused_tab_id"], logs["tab"]["tab_id"]);
+    assert_eq!(snapshot["focused_pane_id"], diagnostics);
+    assert_eq!(console.child.0.process_id(), native_pid);
+    assert!(console.child.0.try_wait().unwrap().is_none());
 }

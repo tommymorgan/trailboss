@@ -481,7 +481,7 @@ struct Chrome {
 pub struct FrameRenderer {
     pub controls: menus::Controls,
     pub copy_feedback_position: ToastClipboardPosition,
-    copy_feedback_rect: Option<Rect>,
+    feedback_rect: Option<Rect>,
     navigation_hint_rect: Option<Rect>,
     menu_rects: Vec<Rect>,
     scrollbar_rect: Option<Rect>,
@@ -531,7 +531,7 @@ impl FrameRenderer {
                 for area in [
                     self.overlay_rect,
                     self.reorder_rect,
-                    self.copy_feedback_rect,
+                    self.feedback_rect,
                     self.navigation_hint_rect,
                 ]
                 .into_iter()
@@ -619,7 +619,7 @@ impl FrameRenderer {
         // Feedback is painted last. Redraw any retained chrome it previously covered,
         // including menus; pane cells under it are invalidated after painting below.
         for retained in &mut self.chrome {
-            if menus::intersect(retained.rect, self.copy_feedback_rect)
+            if menus::intersect(retained.rect, self.feedback_rect)
                 || menus::intersect(retained.rect, self.navigation_hint_rect)
                 || self
                     .menu_rects
@@ -978,11 +978,31 @@ impl FrameRenderer {
             }
         }
         self.reorder_rect = indicator;
-        self.copy_feedback_rect = core
-            .copy_feedback()
-            .and_then(|message| copy_feedback_rect(rect, message, self.copy_feedback_position));
-        if let Some(area) = self.copy_feedback_rect {
-            draw_copy_feedback(out, area, core.copy_feedback().expect("visible feedback"))?;
+        let notice = core.endpoint_notice();
+        let feedback = notice.or_else(|| core.copy_feedback());
+        let feedback_position = if notice.is_some() {
+            ToastClipboardPosition::TopRight
+        } else {
+            self.copy_feedback_position
+        };
+        self.feedback_rect =
+            feedback.and_then(|message| feedback_rect(rect, message, feedback_position));
+        if let Some(area) = self.feedback_rect {
+            let message = feedback.expect("visible feedback");
+            if notice.is_some() {
+                draw_feedback(
+                    out,
+                    area,
+                    message,
+                    Color::Rgb {
+                        r: 243,
+                        g: 139,
+                        b: 168,
+                    },
+                )?;
+            } else {
+                draw_copy_feedback(out, area, message)?;
+            }
             for y in area.y..area.y + area.height {
                 for x in area.x..area.x + area.width {
                     self.cells[usize::from(y - rect.y) * usize::from(rect.width)
@@ -991,16 +1011,16 @@ impl FrameRenderer {
                 }
             }
         }
-        let hint_viewport = self.copy_feedback_rect.map_or(rect, |copy| {
+        let hint_viewport = self.feedback_rect.map_or(rect, |card| {
             let top = matches!(
-                self.copy_feedback_position,
+                feedback_position,
                 ToastClipboardPosition::TopLeft
                     | ToastClipboardPosition::TopCenter
                     | ToastClipboardPosition::TopRight
             );
             Rect {
-                y: rect.y + if top { copy.height } else { 0 },
-                height: rect.height.saturating_sub(copy.height),
+                y: rect.y + if top { card.height } else { 0 },
+                height: rect.height.saturating_sub(card.height),
                 ..rect
             }
         });
@@ -1009,9 +1029,8 @@ impl FrameRenderer {
         } else {
             core.tab_cycle_hint()
         };
-        self.navigation_hint_rect = navigation_hint.and_then(|message| {
-            copy_feedback_rect(hint_viewport, message, self.copy_feedback_position)
-        });
+        self.navigation_hint_rect = navigation_hint
+            .and_then(|message| feedback_rect(hint_viewport, message, self.copy_feedback_position));
         if let Some(area) = self.navigation_hint_rect {
             draw_copy_feedback(out, area, navigation_hint.expect("visible navigation hint"))?;
             for y in area.y..area.y + area.height {
@@ -1025,9 +1044,7 @@ impl FrameRenderer {
         if let Some((x, y)) = pane_cursor.filter(|&(x, y)| {
             !self.controls.modal()
                 && dialog.is_none()
-                && !self
-                    .copy_feedback_rect
-                    .is_some_and(|area| area.contains(x, y))
+                && !self.feedback_rect.is_some_and(|area| area.contains(x, y))
                 && !self
                     .navigation_hint_rect
                     .is_some_and(|area| area.contains(x, y))
@@ -1045,17 +1062,14 @@ impl FrameRenderer {
         Ok(())
     }
 }
-fn copy_feedback_rect(
-    viewport: Rect,
-    message: &str,
-    position: ToastClipboardPosition,
-) -> Option<Rect> {
+fn feedback_rect(viewport: Rect, message: &str, position: ToastClipboardPosition) -> Option<Rect> {
     if viewport.width == 0 || viewport.height == 0 {
         return None;
     }
-    let width = (message.width() as u16)
+    let width = message
+        .width()
         .saturating_add(4)
-        .min(viewport.width);
+        .min(usize::from(viewport.width)) as u16;
     let height = 3.min(viewport.height);
     let x = viewport.x
         + match position {
@@ -1084,12 +1098,18 @@ fn copy_feedback_rect(
     })
 }
 fn draw_copy_feedback(out: &mut impl Write, area: Rect, message: &str) -> io::Result<()> {
-    // Original Herdr clipboard card: green border/dot, panel background, bold text.
-    let green = Color::Rgb {
-        r: 166,
-        g: 227,
-        b: 161,
-    };
+    draw_feedback(
+        out,
+        area,
+        message,
+        Color::Rgb {
+            r: 166,
+            g: 227,
+            b: 161,
+        },
+    )
+}
+fn draw_feedback(out: &mut impl Write, area: Rect, message: &str, accent: Color) -> io::Result<()> {
     queue!(
         out,
         SetAttribute(Attribute::Reset),
@@ -1098,7 +1118,7 @@ fn draw_copy_feedback(out: &mut impl Write, area: Rect, message: &str) -> io::Re
             g: 24,
             b: 37
         }),
-        SetForegroundColor(green)
+        SetForegroundColor(accent)
     )?;
     for y in 0..area.height {
         queue!(out, cursor::MoveTo(area.x, area.y + y))?;

@@ -388,7 +388,7 @@ fn run_client_inner(
                 || client.declarations.is_some()
                 || focus_update.is_some()
                 || client.snapshot.is_some()
-                || client.tab_cycle_response.is_some()
+                || client.endpoint_response.is_some()
                 || !client.graphics_messages.is_empty()
             {
                 let update = (
@@ -399,7 +399,7 @@ fn run_client_inner(
                     client.snapshot.take(),
                     std::mem::take(&mut client.graphics_messages),
                     std::mem::take(&mut client.surface_changed),
-                    client.tab_cycle_response.take(),
+                    client.endpoint_response.take(),
                 );
                 trailboss_runtime::render_prof::trace(
                     "client.update.send_start",
@@ -461,6 +461,7 @@ fn run_client_inner(
     loop {
         let now = Instant::now();
         dirty |= core.tick_copy_feedback(now);
+        dirty |= core.tick_endpoint_notice(now);
         if core.detach_requested {
             *phase = "detach";
             tracing::info!(
@@ -492,10 +493,11 @@ fn run_client_inner(
                 next_snapshot,
                 next_graphics,
                 surface_changed,
-                tab_cycle_response,
+                endpoint_response,
             ) = update?;
             if boot_id != next_boot {
                 core.clear_tab_history();
+                core.clear_tab_transfer();
                 core.prefix_active = false;
             }
             graphics_messages.extend(next_graphics);
@@ -527,6 +529,9 @@ fn run_client_inner(
                 core.reconcile_tab_history(&next);
                 snapshot = Some(next);
             }
+            if let Some(response) = endpoint_response.as_ref() {
+                core.tab_transfer_response(response, &next_boot, Instant::now());
+            }
             if let Some(
                 trailboss_runtime::protocol::ServerMessage::ClientShellEndpointResponseChunk {
                     boot_id: response_boot,
@@ -534,7 +539,7 @@ fn run_client_inner(
                     final_chunk,
                     data,
                 },
-            ) = tab_cycle_response
+            ) = endpoint_response
             {
                 if response_boot == next_boot {
                     if let Some(trailboss::core::Effect::Request { params, .. }) =
@@ -1022,7 +1027,12 @@ fn run_client_inner(
                             mouse.row,
                         );
                         if let Some(movement) = released.movement {
-                            input.request(&boot_id, movement.method, movement.params)?;
+                            if movement.method == "tab.transfer" {
+                                let id = input.request_tab_transfer(&boot_id, movement.params)?;
+                                core.begin_tab_transfer(id);
+                            } else {
+                                input.request(&boot_id, movement.method, movement.params)?;
+                            }
                         }
                         if let Some(action) = released.click {
                             input.dispatch(

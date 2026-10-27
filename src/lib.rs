@@ -51,7 +51,7 @@ pub struct Client {
     last_message_kind: &'static str,
     raw: Option<protocol::PaneSurfaceFrame>,
     pub graphics_messages: Vec<ServerMessage>,
-    pub tab_cycle_response: Option<ServerMessage>,
+    pub endpoint_response: Option<ServerMessage>,
     pub surface_changed: bool,
     pub workspace_id: Option<String>,
     pub focused_pane_id: Option<String>,
@@ -148,7 +148,7 @@ impl Client {
             last_message_kind: "none",
             raw: None,
             graphics_messages: Vec::new(),
-            tab_cycle_response: None,
+            endpoint_response: None,
             surface_changed: false,
             workspace_id: None,
             focused_pane_id: None,
@@ -339,9 +339,9 @@ impl Client {
             }
             message @ ServerMessage::ClientShellEndpointResponseChunk { .. }
                 if matches!(&message, ServerMessage::ClientShellEndpointResponseChunk { request_id, .. }
-                    if request_id.starts_with("tab-cycle-")) =>
+                    if request_id.starts_with("tab-cycle-") || request_id.starts_with("tab-transfer-")) =>
             {
-                self.tab_cycle_response = Some(message);
+                self.endpoint_response = Some(message);
             }
             ServerMessage::Welcome { error: Some(e), .. }
             | ServerMessage::ClientShellError { message: e } => return Err(error(e)),
@@ -593,6 +593,24 @@ impl Input {
             },
         )
         .map_err(error)
+    }
+    pub fn request_tab_transfer(
+        &mut self,
+        boot_id: &str,
+        params: serde_json::Value,
+    ) -> io::Result<u64> {
+        self.next_action_id += 1;
+        let id = self.next_action_id;
+        let request = serde_json::json!({
+            "id": format!("tab-transfer-{id}"),
+            "method": "tab.transfer",
+            "params": params,
+        });
+        self.send(&ClientMessage::ClientShellEndpointRequest {
+            boot_id: boot_id.to_owned(),
+            request: request.to_string(),
+        })?;
+        Ok(id)
     }
     pub fn request_tab_cycle(
         &mut self,
@@ -899,7 +917,7 @@ mod tests {
                 last_message_kind: "none",
                 raw: None,
                 graphics_messages: Vec::new(),
-                tab_cycle_response: None,
+                endpoint_response: None,
                 surface_changed: false,
                 workspace_id: None,
                 focused_pane_id: None,

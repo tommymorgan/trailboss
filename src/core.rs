@@ -25,6 +25,16 @@ struct TabFocusRequest {
     tab: String,
     cancelled: bool,
 }
+#[derive(Debug)]
+struct TabTransferRequest {
+    id: u64,
+    response: Vec<u8>,
+}
+#[derive(Debug)]
+struct EndpointNotice {
+    message: String,
+    deadline: Instant,
+}
 #[derive(Default, Debug)]
 pub struct Core {
     interaction: Interaction,
@@ -44,6 +54,8 @@ pub struct Core {
     completed_tab_focus: Option<String>,
     tab_cycle_deadline: Option<Instant>,
     copy_feedback_deadline: Option<Instant>,
+    tab_transfer_request: Option<TabTransferRequest>,
+    endpoint_notice: Option<EndpointNotice>,
     require_name: bool,
 }
 pub enum Effect {
@@ -72,6 +84,85 @@ impl Core {
     }
     pub fn clear_copy_feedback(&mut self) {
         self.copy_feedback_deadline = None;
+    }
+    pub fn begin_tab_transfer(&mut self, id: u64) {
+        self.clear_tab_transfer();
+        self.tab_transfer_request = Some(TabTransferRequest {
+            id,
+            response: Vec::new(),
+        });
+    }
+    pub fn tab_transfer_response(
+        &mut self,
+        message: &trailboss_runtime::protocol::ServerMessage,
+        current_boot: &str,
+        now: Instant,
+    ) {
+        use trailboss_runtime::protocol::ServerMessage;
+        let ServerMessage::ClientShellEndpointResponseChunk {
+            boot_id,
+            request_id,
+            final_chunk,
+            data,
+        } = message
+        else {
+            return;
+        };
+        if boot_id != current_boot {
+            return;
+        }
+        let Some(pending) = self.tab_transfer_request.as_mut() else {
+            return;
+        };
+        if request_id
+            .strip_prefix("tab-transfer-")
+            .and_then(|id| id.parse().ok())
+            != Some(pending.id)
+        {
+            return;
+        }
+        pending.response.extend_from_slice(data);
+        if !*final_chunk {
+            return;
+        }
+        let completed = self.tab_transfer_request.take().unwrap();
+        // Ignore the successful transfer payload rather than allocating its topology.
+        if let Ok(rejection) = serde_json::from_slice::<trailboss_runtime::api_schema::ErrorResponse>(
+            &completed.response,
+        ) {
+            if rejection.id != *request_id {
+                return;
+            }
+            let mut rejection = rejection.error;
+            rejection.message.retain(|ch| !ch.is_control());
+            rejection
+                .message
+                .insert_str(0, "Action unavailable: tab.transfer — ");
+            self.endpoint_notice = Some(EndpointNotice {
+                message: rejection.message,
+                deadline: now + Duration::from_secs(8),
+            });
+        }
+    }
+    pub fn endpoint_notice(&self) -> Option<&str> {
+        self.endpoint_notice
+            .as_ref()
+            .map(|notice| notice.message.as_str())
+    }
+    pub fn tick_endpoint_notice(&mut self, now: Instant) -> bool {
+        if self
+            .endpoint_notice
+            .as_ref()
+            .is_some_and(|notice| now >= notice.deadline)
+        {
+            self.endpoint_notice = None;
+            return true;
+        }
+        false
+    }
+    pub fn clear_tab_transfer(&mut self) {
+        self.tab_transfer_request = None;
+        self.endpoint_notice = None;
     }
     /// Public fragment precedence is priority, then plugin ID; no provider is privileged.
     pub fn fragment<'a>(
@@ -746,5 +837,122 @@ mod tests {
                 Effect::Plugin
             ));
         }
+    }
+    #[test]
+    fn transfer_notice_requires_the_pending_request_boot_and_complete_reply() {
+        use trailboss_runtime::protocol::ServerMessage;
+        let chunk = |boot: &str, request: &str, final_chunk, data: &[u8]| {
+            ServerMessage::ClientShellEndpointResponseChunk {
+                boot_id: boot.into(),
+                request_id: request.into(),
+                final_chunk,
+                data: data.to_vec(),
+            }
+        };
+        let now = Instant::now();
+        let mut core = Core::default();
+        core.copy_dispatched(now);
+        core.begin_tab_transfer(7);
+        let rejected = br#"{"id":"tab-transfer-7","error":{"code":"invalid_request","message":"unknown tab.transfer"}}"#;
+        for (boot, request) in [
+            ("old", "tab-transfer-7"),
+            ("live", "tab-transfer-8"),
+            ("live", "tab-cycle-7"),
+        ] {
+            core.tab_transfer_response(&chunk(boot, request, true, rejected), "live", now);
+            assert!(
+                core.endpoint_notice().is_none(),
+                "uncorrelated {boot}/{request}"
+            );
+        }
+        core.tab_transfer_response(
+            &chunk(
+                "live",
+                "tab-transfer-7",
+                false,
+                br#"{"id":"tab-transfer-7","error":"#,
+            ),
+            "live",
+            now,
+        );
+        assert!(
+            core.endpoint_notice().is_none(),
+            "partial reply raised a notice"
+        );
+        core.tab_transfer_response(
+            &chunk(
+                "live",
+                "tab-transfer-7",
+                true,
+                br#"{"code":"invalid_request","message":"unknown tab.transfer"}}"#,
+            ),
+            "live",
+            now,
+        );
+        assert_eq!(
+            core.endpoint_notice(),
+            Some("Action unavailable: tab.transfer — unknown tab.transfer")
+        );
+        assert_eq!(
+            core.copy_feedback(),
+            Some("copied to clipboard"),
+            "rejection changed clipboard feedback"
+        );
+        assert!(!core.tick_endpoint_notice(now + Duration::from_secs(7)));
+        assert!(core.tick_endpoint_notice(now + Duration::from_secs(8)));
+        assert!(core.endpoint_notice().is_none());
+    }
+    #[test]
+    fn transfer_success_supersession_and_endpoint_reset_clear_rejection_state() {
+        use trailboss_runtime::protocol::ServerMessage;
+        let response = |id, data: &[u8]| {
+            let mut reply: Value = serde_json::from_slice(data).unwrap();
+            reply["id"] = json!(format!("tab-transfer-{id}"));
+            ServerMessage::ClientShellEndpointResponseChunk {
+                boot_id: "live".into(),
+                request_id: format!("tab-transfer-{id}"),
+                final_chunk: true,
+                data: serde_json::to_vec(&reply).unwrap(),
+            }
+        };
+        let now = Instant::now();
+        let mut core = Core::default();
+        let rejected = br#"{"error":{"code":"invalid_request","message":"rejected"}}"#;
+        core.begin_tab_transfer(1);
+        core.tab_transfer_response(&response(1, rejected), "live", now);
+        assert!(core.endpoint_notice().is_some());
+        core.begin_tab_transfer(2);
+        assert!(
+            core.endpoint_notice().is_none(),
+            "superseding request retained the old error"
+        );
+        core.tab_transfer_response(&response(1, rejected), "live", now);
+        assert!(
+            core.endpoint_notice().is_none(),
+            "superseded response raised an error"
+        );
+        core.tab_transfer_response(
+            &response(2, br#"{"result":{"tab_id":"moved"}}"#),
+            "live",
+            now,
+        );
+        assert!(
+            core.endpoint_notice().is_none(),
+            "successful transfer raised an error"
+        );
+        core.begin_tab_transfer(3);
+        core.clear_tab_transfer();
+        core.tab_transfer_response(&response(3, rejected), "live", now);
+        assert!(
+            core.endpoint_notice().is_none(),
+            "reset endpoint accepted an old response"
+        );
+        core.begin_tab_transfer(4);
+        core.tab_transfer_response(&response(4, rejected), "live", now);
+        core.clear_tab_transfer();
+        assert!(
+            core.endpoint_notice().is_none(),
+            "endpoint reset retained the notice"
+        );
     }
 }

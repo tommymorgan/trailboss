@@ -862,3 +862,52 @@ the native agent-tree/reorder suite passed 25/25 (9.564s tests / 11.203s total),
 including all nine interruption cases. Rustfmt and strict Clippy passed. An
 independent real-provider/native witness passed five cancellation cases
 (4.924s operation / 4.948s total).
+
+### T16 unsupported native transfer feedback
+
+The opt-in actual-legacy-Core regression
+`executable_pty_unsupported_sidebar_transfer_reports_notice_without_reordering`
+starts the current store, real agent-tree and native executable against an
+explicitly supplied pre-transfer Core. It separately observes startup, the live
+cross-space insertion indicator and a post-release endpoint notice across the
+full terminal width. Tools starts with One, Build, Two, so a fallback source
+reorder is observable. Both space lists, Build's terminal identity, all three
+Diagnostics focus identities and the native process must remain unchanged;
+legacy movement/focus subscriptions must stay quiet.
+
+Its causal RED reached the post-release notice stage with no visible notice
+(8.748s test / 9.660s total). An earlier fixture-only failure exceeded Unix
+socket path capacity; shortening the owned session prefix corrected setup and
+is not behavioral RED. The native frontend had discarded non-tab-cycle endpoint
+response chunks, unlike the separate legacy client notice implementation.
+
+Native transfer requests now have their own request identity and retain only
+matching response chunks from the current Core boot. A correlated rejection
+shows a red, top-right `Action unavailable: tab.transfer` notice containing the
+Core's message, without invoking `tab.move`. Successful replies show no error.
+The notice expires after eight seconds and clears on endpoint boot replacement
+or a superseding transfer. Clipboard acknowledgements keep their separate
+success semantics, configuration and lifecycle; only feedback-card painting and
+geometry are shared.
+
+The candidate actual-legacy-Core test passed (1/1, 0.974s test / 2.828s total).
+An independent legacy-native witness passed in 0.857s total: the correlated
+rejection was visible, both spaces and the current view were unchanged, no
+source reorder occurred, the native PID was unchanged and Diagnostics continued
+accepting keyboard input. Its first frame assertion put the marker behind the
+notice; the owned output file proved input had arrived, and printing below the
+notice corrected the witness without a production workaround.
+
+The two behavioral Core tests passed (0.003s test / 1.205s total), covering wrong
+request and boot rejection, complete response chunk assembly, silent success,
+supersession, endpoint reset and notice expiry without changing clipboard state.
+All 35 affected native/library tests passed (9.664s test / 10.560s total), strict
+all-target Clippy passed (1.623s), and Rustfmt check passed (2.073s).
+In an owned throwaway copy, dropping only `tab-transfer` response forwarding
+caused the actual legacy test to fail at the post-release unsupported-notice
+stage (8.727s test / 10.736s total); the candidate was not mutated.
+An independent mutant witness failed at the same post-release notice boundary
+(6.742s total). Restoring that owned copy made the actual legacy test pass again
+(1/1, 0.993s test / 2.211s total).
+Earlier compile errors while adding the feedback tests preceded these passing
+checks and are not counted as behavioral RED or GREEN.
