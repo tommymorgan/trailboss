@@ -35,7 +35,6 @@ export const topologySubscriptions: SubscriptionSpec[] = [
   'tab.focused',
   'tab.renamed',
   'tab.moved',
-  'tab.transferred',
   'pane.created',
   'pane.closed',
   'pane.updated',

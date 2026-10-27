@@ -817,3 +817,96 @@ fn living_refresh_the_tree_from_all_eight_session_events() {
 fn executable_pty_refreshes_all_eight_session_events_without_restart() {
     refresh_tree_from_session_events(true);
 }
+
+#[test]
+#[ignore = "requires an explicitly supplied pre-transfer legacy Core executable"]
+fn executable_pty_current_store_starts_and_refreshes_against_legacy_core() {
+    let legacy = std::path::PathBuf::from(
+        std::env::var_os("TRAILBOSS_TEST_LEGACY_CORE")
+            .expect("set TRAILBOSS_TEST_LEGACY_CORE to a pre-transfer Core executable"),
+    );
+    assert!(
+        legacy.is_absolute(),
+        "legacy executable must be an explicit absolute path"
+    );
+    let name = format!(
+        "legacy-store-{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let home = std::env::temp_dir().join(&name);
+    std::fs::create_dir_all(&home).unwrap();
+    let core = Core::launch_with_executable(home, name, legacy);
+    let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+    let workspace = tools["workspace"]["workspace_id"].as_str().unwrap();
+    let build = tools["tab"]["tab_id"].as_str().unwrap();
+    core.request("tab.rename", json!({"tab_id":build,"label":"Build"}));
+    let remaining = core.request(
+        "tab.create",
+        json!({
+            "workspace_id":workspace,"label":"Remaining","cwd":core.home
+        }),
+    );
+    let logs = core.request("workspace.create", json!({"label":"Logs","cwd":core.home}));
+    let diagnostics = logs["root_pane"]["pane_id"].as_str().unwrap();
+    core.request(
+        "tab.rename",
+        json!({"tab_id":logs["tab"]["tab_id"],"label":"Diagnostics"}),
+    );
+    core.request("pane.focus", json!({"pane_id":diagnostics}));
+    core.request(
+        "plugin.link",
+        json!({
+            "path":format!("{}/plugins/agent-tree",env!("CARGO_MANIFEST_DIR")),"enabled":true
+        }),
+    );
+    let mut console = LiveConsole::new(&core);
+    let native_pid = console.child.0.process_id();
+    console.wait(|rows, _| {
+        ["Tools", "Build", "Remaining", "Diagnostics"]
+            .iter()
+            .all(|label| rows.iter().any(|row| row.contains(label)))
+    });
+    // These legacy topology events must refresh the production store and live
+    // declaration without reopening the native client or manually refreshing.
+    core.request(
+        "workspace.rename",
+        json!({"workspace_id":workspace,"label":"UpdatedTools"}),
+    );
+    core.request("tab.rename", json!({"tab_id":build,"label":"RenamedBuild"}));
+    core.request(
+        "tab.move",
+        json!({"tab_id":remaining["tab"]["tab_id"],"insert_index":0}),
+    );
+    console.wait(|rows, _| {
+        let Some(header) = rows
+            .iter()
+            .position(|row| row.trim_start().starts_with("UpdatedTools"))
+        else {
+            return false;
+        };
+        rows[header + 1].contains("Remaining") && rows[header + 2].contains("RenamedBuild")
+    });
+    let snapshot = core.request("session.snapshot", json!({}))["snapshot"].clone();
+    assert_eq!(
+        snapshot["focused_workspace_id"],
+        logs["workspace"]["workspace_id"]
+    );
+    assert_eq!(snapshot["focused_tab_id"], logs["tab"]["tab_id"]);
+    assert_eq!(snapshot["focused_pane_id"], diagnostics);
+    let tabs = core.request("tab.list", json!({"workspace_id":workspace}));
+    assert_eq!(tabs["tabs"][0]["tab_id"], remaining["tab"]["tab_id"]);
+    assert_eq!(tabs["tabs"][1]["tab_id"], build);
+    assert_eq!(tabs["tabs"][1]["label"], "RenamedBuild");
+    assert_eq!(
+        console.child.0.process_id(),
+        native_pid,
+        "native client restarted"
+    );
+    assert!(
+        console.child.0.try_wait().unwrap().is_none(),
+        "native client exited"
+    );
+}

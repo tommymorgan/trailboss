@@ -353,9 +353,12 @@ request API. A completed cross-space operation emits one `tab.transferred`
 summary carrying the authoritative transfer result, source/destination
 `workspace.updated` (or source `workspace.closed`) and existing `pane.moved`
 notifications. No terminal creation or exit is implied. The event catalog,
-subscription dispatch, plugin context/invalidation, store subscriptions,
-generated schema and existing endpoint method advertisement include the new
-contract; same-space `tab.moved` retains its separate semantics.
+subscription dispatch, plugin context/invalidation, generated schema and existing
+endpoint method advertisement include the new contract; same-space `tab.moved`
+retains its separate semantics. The store subscribes only to existing topology
+events: post-commit `workspace.updated`/`workspace.closed` and `pane.moved` trigger
+its full snapshot refresh, converging both spaces without requiring the new
+summary subscription. Explicit subscribers can still request `tab.transferred`.
 
 The production-boundary plugin/store/subscriber regression first failed on
 the unknown `tab.transferred` subscription. After implementation it passed;
@@ -371,6 +374,23 @@ with unchanged TerminalIds (0.300325s operation). Suppressing only the completed
 summary outside the candidate let the store assertions pass but failed the
 required summary observation at the subscriber timeout (6.261s tests /
 32.862194s total). The mutation was restored before final candidate gates.
+
+The actual pre-transfer Core rejects an unknown subscription event before any
+store snapshot can initialize. A current-store/current-native compatibility
+regression against the explicitly supplied legacy executable reproduced a blank
+sidebar (8.674s test / 9.993183451s total). Removing the redundant
+`tab.transferred` store subscription preserves legacy startup without retries,
+capability negotiation or protocol changes. The permanent opt-in regression
+also requires workspace/tab renames and in-space reordering to refresh the live
+sidebar without restarting its client, preserving all three focus identities.
+
+The restored legacy regression passed (0.762s test / 1.005s total). An independent
+legacy-Core/current-native proof passed startup, reactive renames/reordering and
+keyboard delivery to the still-viewed Diagnostics shell (0.779s total).
+The current-Core/store/native convergence proof also passed (1.296s total).
+Affected gates passed: 29 Bun tests, store TypeScript, strict scoped Biome,
+22 Rust agent-tree/transfer tests and strict agent-tree Clippy. The bounded
+compatibility-delta review reported no issues.
 
 ### T05: Background moves preserve viewed and remembered focus
 
