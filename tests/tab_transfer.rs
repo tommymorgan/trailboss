@@ -54,6 +54,26 @@ fn restart(core: &mut Core) -> Vec<u8> {
     saved
 }
 
+// The imported owner is not Core.child. Stop whichever owner currently serves
+// this isolated session, including on a failed post-handoff assertion.
+struct StopOwner(PathBuf);
+impl Drop for StopOwner {
+    fn drop(&mut self) {
+        let api = trailboss_runtime::api_client::ApiClient::for_target(
+            trailboss_runtime::api_client::ConnectionTarget::SocketPath(self.0.clone()),
+        );
+        let request = serde_json::from_value::<trailboss_runtime::api_schema::Request>(
+            json!({"id":"stop-handoff-owner","method":"server.stop","params":{}}),
+        )
+        .unwrap();
+        let _ = api.request_value_with_timeout(&request, Duration::from_secs(2));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while self.0.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
 fn wait_for_file(path: &std::path::Path) -> String {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -1116,31 +1136,11 @@ fn same_space_transfers_reorder_with_stable_ids_and_silent_noops() {
 
 #[test]
 fn inherited_pane_context_survives_transfer_and_live_handoff_until_close() {
-    // The imported owner is not Core.child. Stop whichever owner currently
-    // serves this isolated session, including on a failed post-handoff assertion.
-    struct StopOwner<'a>(&'a Core);
-    impl Drop for StopOwner<'_> {
-        fn drop(&mut self) {
-            let socket = self
-                .0
-                .home
-                .join(format!("trailboss/sessions/{}/trailboss.sock", self.0.name));
-            let api = trailboss_runtime::api_client::ApiClient::for_target(
-                trailboss_runtime::api_client::ConnectionTarget::SocketPath(socket.clone()),
-            );
-            let request = serde_json::from_value::<trailboss_runtime::api_schema::Request>(
-                json!({"id":"stop-handoff-owner","method":"server.stop","params":{}}),
-            )
-            .unwrap();
-            let _ = api.request_value_with_timeout(&request, Duration::from_secs(2));
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while socket.exists() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        }
-    }
     let core = Core::new();
-    let _stop_owner = StopOwner(&core);
+    let _stop_owner = StopOwner(
+        core.home
+            .join(format!("trailboss/sessions/{}/trailboss.sock", core.name)),
+    );
     let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
     let first = tools["root_pane"]["pane_id"].as_str().unwrap().to_owned();
     let second = core.request(
@@ -1493,4 +1493,176 @@ fn ordinary_restart_restores_transferred_tab_placement_layout_labels_and_focus()
         restored_client.focused_pane_id.as_deref(),
         Some(panes[1].as_str())
     );
+}
+
+#[test]
+#[ignore = "requires an explicitly supplied alias-blind legacy Core executable"]
+fn alias_blind_importer_is_rejected_before_public_socket_or_owner_changes() {
+    use std::os::unix::fs::MetadataExt;
+
+    let legacy = PathBuf::from(
+        std::env::var_os("TRAILBOSS_TEST_LEGACY_CORE")
+            .expect("set TRAILBOSS_TEST_LEGACY_CORE to an alias-blind legacy Core executable"),
+    );
+    assert!(
+        legacy.is_absolute(),
+        "legacy executable must be an explicit absolute path"
+    );
+    let mut core = Core::new();
+    let _stop_owner = StopOwner(
+        core.home
+            .join(format!("trailboss/sessions/{}/trailboss.sock", core.name)),
+    );
+    let probe_home = core.home.join("legacy-probe");
+    std::fs::create_dir_all(&probe_home).unwrap();
+    let probe =
+        Core::launch_with_executable(probe_home, format!("{}-legacy", core.name), legacy.clone());
+    let source_ping = core.request("ping", json!({}));
+    let legacy_ping = probe.request("ping", json!({}));
+    assert_eq!(
+        source_ping["version"], legacy_ping["version"],
+        "fixture must advertise the same version"
+    );
+    assert_eq!(
+        source_ping["protocol"], legacy_ping["protocol"],
+        "fixture must advertise the same protocol"
+    );
+    drop(probe);
+    let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+    let inherited = tools["root_pane"]["pane_id"].as_str().unwrap().to_owned();
+    let terminal = tools["root_pane"]["terminal_id"].clone();
+    core.request("pane.send_text", json!({"pane_id":inherited,"text":"rollback_local=retained; printf '%s %s %s\\n' \"$$\" \"$rollback_local\" \"$HERDR_PANE_ID\" > rollback-before.state\n"}));
+    let initial_state = wait_for_file(&core.home.join("rollback-before.state"));
+    let shell = initial_state.split_whitespace().next().unwrap();
+    let identity = process_identity(shell);
+    let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+    core.request("pane.focus", json!({"pane_id":inherited}));
+    let moved = cli(
+        &core,
+        &[
+            "tab",
+            "move",
+            tools["tab"]["tab_id"].as_str().unwrap(),
+            "--workspace",
+            main["workspace"]["workspace_id"].as_str().unwrap(),
+        ],
+    );
+    assert!(
+        moved.status.success(),
+        "transfer failed: {}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+    let transfer: Value = serde_json::from_slice(&moved.stdout).unwrap();
+    let current = transfer["result"]["transfer"]["panes"][0]["pane_id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        core.request("pane.get", json!({"pane_id":inherited}))["pane"]["terminal_id"],
+        terminal
+    );
+    let mut client = core.attach();
+    while client.focused_pane_id.as_deref() != Some(current) {
+        client.receive().unwrap();
+    }
+    let boot = client.boot_id.clone();
+    let socket = core
+        .home
+        .join(format!("trailboss/sessions/{}/trailboss.sock", core.name));
+    let client_socket = core.home.join(format!(
+        "trailboss/sessions/{}/trailboss-client.sock",
+        core.name
+    ));
+    let socket_inodes = [
+        std::fs::metadata(&socket).unwrap().ino(),
+        std::fs::metadata(&client_socket).unwrap().ino(),
+    ];
+    let topology = core.request("session.snapshot", json!({}))["snapshot"].clone();
+    let source_pid = core.child.id();
+    let mut wire = BufReader::new(UnixStream::connect(&socket).unwrap());
+    wire.get_mut()
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    serde_json::to_writer(wire.get_mut(), &json!({"id":"alias-blind-import","method":"server.live_handoff","params":{"import_exe":legacy}})).unwrap();
+    wire.get_mut().write_all(b"\n").unwrap();
+    let mut line = String::new();
+    wire.read_line(&mut line).unwrap();
+    let rejected: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(rejected["id"], "alias-blind-import");
+    assert_eq!(
+        rejected["error"]["code"], "handoff_failed",
+        "alias-blind import was not rejected: {rejected}"
+    );
+    assert!(
+        rejected["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("did not confirm restored public pane aliases"),
+        "rejected for the wrong reason: {rejected}"
+    );
+    assert!(
+        rejected.get("result").is_none(),
+        "rejected import reported success"
+    );
+    assert_eq!(core.child.id(), source_pid);
+    assert!(
+        core.child.try_wait().unwrap().is_none(),
+        "source Core exited after precommit rejection"
+    );
+    assert_eq!(
+        [
+            std::fs::metadata(&socket).unwrap().ino(),
+            std::fs::metadata(&client_socket).unwrap().ino()
+        ],
+        socket_inodes,
+        "precommit rejection replaced public sockets"
+    );
+    // Handoff intentionally disconnects clients before preparing the importer.
+    // Reattach to prove rollback still serves the original Core boot.
+    drop(client);
+    let mut client = core.attach();
+    while client.focused_pane_id.as_deref() != Some(current) {
+        client.receive().unwrap();
+    }
+    assert_eq!(client.boot_id, boot);
+    let restored = core.request("session.snapshot", json!({}))["snapshot"].clone();
+    assert_eq!(restored["focused_pane_id"], topology["focused_pane_id"]);
+    for key in ["workspaces", "tabs"] {
+        assert_eq!(restored[key], topology[key], "rollback changed {key}");
+    }
+    assert_eq!(
+        core.request("pane.get", json!({"pane_id":inherited}))["pane"]["terminal_id"],
+        terminal
+    );
+    assert_eq!(process_identity(shell), identity);
+    core.request("pane.send_text",json!({"pane_id":inherited,"text":format!(
+        "printf '%s %s %s\\n' \"$$\" \"$rollback_local\" \"$HERDR_PANE_ID\" > rollback-after.state; '{}' pane current --current > rollback-current.json 2> rollback-current.err; printf '%s\\n' \"$?\" > rollback-current.done; printf '%s%s\\n' 'ROLLBACK-' 'READER-RESUMED'\n",
+        support::executable().display()
+    )}));
+    assert_eq!(
+        wait_for_file(&core.home.join("rollback-after.state")),
+        initial_state
+    );
+    assert_eq!(
+        wait_for_file(&core.home.join("rollback-current.done")).trim(),
+        "0",
+        "inherited CLI failed after rollback: {}",
+        std::fs::read_to_string(core.home.join("rollback-current.err")).unwrap()
+    );
+    let inherited_result: Value =
+        serde_json::from_str(&wait_for_file(&core.home.join("rollback-current.json"))).unwrap();
+    assert_eq!(inherited_result["result"]["pane"]["pane_id"], current);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client
+        .primary
+        .as_ref()
+        .is_none_or(|surface| !surface.text().contains("ROLLBACK-READER-RESUMED"))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "source terminal reader did not resume after rollback"
+        );
+        client.receive().unwrap();
+    }
+    assert_eq!(client.boot_id, boot);
+    assert_eq!(client.focused_pane_id.as_deref(), Some(current));
 }

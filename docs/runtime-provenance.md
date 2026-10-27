@@ -537,3 +537,37 @@ older-Core witness also failed: the mutated CLI exited 0 instead of nonzero
 (3.755s tests / 29.937279188s total), and the older-Core wire witness passed again
 (0.373940688s operation / 0.934879895s total). Strict Clippy (0.171949206s) and
 Rustfmt check (2.023386314s) passed on the restored candidate.
+
+### T18: Reject an alias-blind importer before ownership commits
+
+One opt-in regression launches an explicitly supplied actual legacy Core to
+compare its advertised version/protocol with the candidate, then attempts a
+real handoff of a transferred shell tab without optional version/protocol
+expectations. The alias-restoration error is correlated and reports no success.
+Both public socket inodes, the original Core process and boot, TerminalId,
+shell PID/start/PTY/executable, inherited locator and shell-local state survive.
+A newly attached native Client receives fresh shell output after reader rollback.
+The existing handoff disconnects attached clients before preparation; uninterrupted
+client connections are not claimed. The default harness still launches the
+candidate; only this explicit opt-in supplies a legacy executable.
+
+The baseline passed without production edits (1/1 explicitly requested ignored
+test, 0.970s tests / 1.884263396s total). Initial fixture failures were corrected
+by focusing the source before transfer and reattaching after the intentional
+handoff client shutdown; neither was a production RED.
+
+The required owned mutation passed zero expected aliases into the restored
+receipt check. The permanent regression failed on unexpected success instead of
+`handoff_failed` (0.951s tests / 27.231443836s total), and the independent genuine
+OMP witness failed on the same unexpected successful handoff (7.614214845s total).
+After removing that mutation, all ten transfer tests passed, including explicitly
+running this ignored regression (3.720s tests / 29.558430473s total). Strict Clippy
+(0.459107303s) and Rustfmt check (2.043529914s) passed.
+
+The restored independent witness compared actual source/importer version and
+protocol, retained the public socket inode and original shell/OMP process,
+PTY, executable, session and inherited alias, and completed all five genuine
+Working-to-Done turns, including fresh turns after rejection (8.840292440s total).
+All owned processes were cleaned up. The restored acknowledgment remains before
+public socket removal and ownership commit; no production change beyond T09 was
+needed. These are isolated proofs, not changes to human sessions or installations.

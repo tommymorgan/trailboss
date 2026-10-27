@@ -76,7 +76,10 @@ impl Core {
         Self::launch(home, name)
     }
     pub fn launch(home: PathBuf, name: String) -> Self {
-        let mut command = Command::new(executable());
+        Self::launch_with_executable(home, name, executable())
+    }
+    pub fn launch_with_executable(home: PathBuf, name: String, executable: PathBuf) -> Self {
+        let mut command = Command::new(executable);
         command.args(["server", "--session", &name]);
         for key in HOMES {
             command.env(key, &home);

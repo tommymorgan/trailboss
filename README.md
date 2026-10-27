@@ -80,6 +80,15 @@ restore starts new shell processes; it does not preserve running jobs or agents.
 The existing `tab.move` API remains a reorder within one space.
 This is not a transfer between different Core sessions.
 
+The alias-blind importer regression uses an explicitly supplied older Core with
+the same advertised version and protocol. It runs only when requested:
+
+```sh
+TRAILBOSS_TEST_LEGACY_CORE=/absolute/path/to/alias-blind-trailboss \
+  cargo nextest run --locked -p trailboss --test tab_transfer --run-ignored only \
+  -E 'test(alias_blind_importer_is_rejected_before_public_socket_or_owner_changes)'
+```
+
 ## Command discovery for UI plugins
 
 The socket API method `ui.command.list` takes empty parameters and returns the
