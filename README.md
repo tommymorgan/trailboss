@@ -53,6 +53,20 @@ overrides compatible with running agents. New session files use the
 `trailboss` namespace; changing product labels does not migrate an existing
 session or its socket. See [runtime provenance](docs/runtime-provenance.md#trailboss-naming-cutover).
 
+## Moving a running tab between spaces
+
+Use `trailboss tab move <tab-id> --workspace <space-id>` to move a complete
+running tab to another space in the same Core. The tab is appended by default;
+`--index N` chooses a zero-based insertion slot.
+
+The move retains the split layout, pane labels, zoom, focused pane and live
+terminals. An attached client displaying the moved tab follows it to its new
+space. The public API is `tab.transfer` with `tab_id`, `workspace_id` and an
+optional `insert_index`; its `transfer` response includes the destination tab
+and mappings from previous pane locators to their new locators.
+The existing `tab.move` API remains a reorder within one space.
+This is not a transfer between different Core sessions.
+
 ## Command discovery for UI plugins
 
 The socket API method `ui.command.list` takes empty parameters and returns the

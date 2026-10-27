@@ -276,6 +276,13 @@ fn tab_command() -> Command {
                 .arg(required("tab_id", "TAB_ID"))
                 .arg(required("label", "LABEL").num_args(1..)),
         )
+        .subcommand(
+            Command::new("move")
+                .about("Move a complete running tab to a workspace")
+                .arg(required("tab_id", "TAB_ID"))
+                .arg(option("workspace", "WORKSPACE_ID").required(true))
+                .arg(option("index", "N")),
+        )
         .subcommand(id_command("close", "tab_id", "Close a tab"))
 }
 

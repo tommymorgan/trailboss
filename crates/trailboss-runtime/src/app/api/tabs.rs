@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, TabCreateParams, TabListParams,
-    TabMoveParams, TabRenameParams, TabTarget,
+    TabMoveParams, TabRenameParams, TabTarget, TabTransferPane, TabTransferParams,
+    TabTransferResult,
 };
 use crate::app::{App, Mode};
 
@@ -211,6 +212,126 @@ impl App {
         }
 
         encode_success(id, ResponseResult::TabList { tabs })
+    }
+
+    pub(super) fn handle_tab_transfer(&mut self, id: String, params: TabTransferParams) -> String {
+        let Some((source_ws_idx, source_tab_idx)) = self.parse_tab_id(&params.tab_id) else {
+            return tab_not_found(id, &params.tab_id);
+        };
+        let Some(destination_ws_idx) = self.parse_workspace_id(&params.workspace_id) else {
+            return workspace_not_found(id, &params.workspace_id);
+        };
+        let index = params
+            .insert_index
+            .unwrap_or(self.state.workspaces[destination_ws_idx].tabs.len());
+        if index > self.state.workspaces[destination_ws_idx].tabs.len() {
+            return encode_error(
+                id,
+                "tab_transfer_failed",
+                format!("insert_index {index} is out of bounds"),
+            );
+        }
+        let previous_workspace_id = self.public_workspace_id(source_ws_idx);
+        let previous_tab_id = self.public_tab_id(source_ws_idx, source_tab_idx).unwrap();
+        let root_pane = self.state.workspaces[source_ws_idx].tabs[source_tab_idx].root_pane;
+        let previous_panes: Vec<_> = self.state.workspaces[source_ws_idx].tabs[source_tab_idx]
+            .panes
+            .keys()
+            .map(|pane| (*pane, self.public_pane_id(source_ws_idx, *pane).unwrap()))
+            .collect();
+        if source_ws_idx == destination_ws_idx {
+            let changed = self.state.workspaces[source_ws_idx].move_tab(source_tab_idx, index);
+            let final_index = self.state.workspaces[source_ws_idx]
+                .find_tab_index_for_pane(root_pane)
+                .unwrap();
+            if changed {
+                self.schedule_session_save();
+                self.emit_event(EventEnvelope {
+                    event: EventKind::TabMoved,
+                    data: EventData::TabMoved {
+                        tab_id: previous_tab_id.clone(),
+                        workspace_id: previous_workspace_id.clone(),
+                        insert_index: index,
+                        tabs: self.tab_list_info(source_ws_idx),
+                    },
+                });
+            }
+            return encode_success(
+                id,
+                ResponseResult::TabTransfer {
+                    transfer: TabTransferResult {
+                        changed,
+                        previous_tab_id,
+                        previous_workspace_id,
+                        tab: self.tab_info(source_ws_idx, final_index).unwrap(),
+                        index: final_index,
+                        panes: previous_panes
+                            .into_iter()
+                            .map(|(_, pane_id)| TabTransferPane {
+                                previous_pane_id: pane_id.clone(),
+                                pane_id,
+                            })
+                            .collect(),
+                        closed_workspace_id: None,
+                    },
+                },
+            );
+        }
+        let follows_view = self.state.active == Some(source_ws_idx)
+            && self.state.workspaces[source_ws_idx].active_tab == source_tab_idx;
+        let destination_id = self.public_workspace_id(destination_ws_idx);
+        let tab = self.state.workspaces[source_ws_idx].take_tab_for_transfer(source_tab_idx);
+        for (pane_id, previous_id) in &previous_panes {
+            self.state
+                .public_pane_id_aliases
+                .insert(previous_id.clone(), *pane_id);
+        }
+        let closed_workspace_id = if self.state.workspaces[source_ws_idx].tabs.is_empty() {
+            self.state.workspaces.remove(source_ws_idx);
+            if let Some(active) = self.state.active {
+                self.state.active = Some(if active > source_ws_idx {
+                    active - 1
+                } else {
+                    active.min(self.state.workspaces.len() - 1)
+                });
+            }
+            if self.state.selected > source_ws_idx {
+                self.state.selected -= 1;
+            } else {
+                self.state.selected = self.state.selected.min(self.state.workspaces.len() - 1);
+            }
+            Some(previous_workspace_id.clone())
+        } else {
+            None
+        };
+        let destination_ws_idx = self.parse_workspace_id(&destination_id).unwrap();
+        self.state.workspaces[destination_ws_idx].insert_transferred_tab(tab, index);
+        if follows_view {
+            self.state.switch_workspace_tab(destination_ws_idx, index);
+        }
+        let panes = previous_panes
+            .into_iter()
+            .map(|(pane_id, previous_pane_id)| TabTransferPane {
+                previous_pane_id,
+                pane_id: self.public_pane_id(destination_ws_idx, pane_id).unwrap(),
+            })
+            .collect();
+        self.state.mark_session_dirty();
+        self.schedule_session_save();
+        encode_success(
+            id,
+            ResponseResult::TabTransfer {
+                transfer: TabTransferResult {
+                    changed: true,
+                    previous_tab_id,
+                    previous_workspace_id,
+                    tab: self.tab_info(destination_ws_idx, index).unwrap(),
+                    index,
+                    panes,
+                    closed_workspace_id,
+                },
+            },
+        )
     }
 
     pub(super) fn handle_tab_close(&mut self, id: String, target: TabTarget) -> String {

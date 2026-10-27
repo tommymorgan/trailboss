@@ -37,6 +37,32 @@ pub struct TabMoveParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TabTransferParams {
+    pub tab_id: String,
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insert_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TabTransferPane {
+    pub previous_pane_id: String,
+    pub pane_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TabTransferResult {
+    pub changed: bool,
+    pub previous_tab_id: String,
+    pub previous_workspace_id: String,
+    pub tab: TabInfo,
+    pub index: usize,
+    pub panes: Vec<TabTransferPane>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_workspace_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TabInfo {
     pub tab_id: String,
     pub workspace_id: String,

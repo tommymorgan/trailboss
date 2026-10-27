@@ -4463,6 +4463,29 @@
           ],
           "type": "object"
         },
+        "TabTransferParams": {
+          "properties": {
+            "insert_index": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tab_id",
+            "workspace_id"
+          ],
+          "type": "object"
+        },
         "ToastTrailbossPosition": {
           "enum": [
             "top-left",
@@ -5323,6 +5346,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/TabMoveParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "tab.transfer",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TabTransferParams"
             }
           },
           "required": [
@@ -9807,6 +9846,22 @@
             },
             {
               "properties": {
+                "transfer": {
+                  "$ref": "#/schemas/success_response/$defs/TabTransferResult"
+                },
+                "type": {
+                  "const": "tab_transfer",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "transfer"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "agent": {
                   "$ref": "#/schemas/success_response/$defs/AgentInfo"
                 },
@@ -11028,6 +11083,63 @@
             "focused",
             "pane_count",
             "agent_status"
+          ],
+          "type": "object"
+        },
+        "TabTransferPane": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "previous_pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "previous_pane_id",
+            "pane_id"
+          ],
+          "type": "object"
+        },
+        "TabTransferResult": {
+          "properties": {
+            "changed": {
+              "type": "boolean"
+            },
+            "closed_workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "index": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "panes": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/TabTransferPane"
+              },
+              "type": "array"
+            },
+            "previous_tab_id": {
+              "type": "string"
+            },
+            "previous_workspace_id": {
+              "type": "string"
+            },
+            "tab": {
+              "$ref": "#/schemas/success_response/$defs/TabInfo"
+            }
+          },
+          "required": [
+            "changed",
+            "previous_tab_id",
+            "previous_workspace_id",
+            "tab",
+            "index",
+            "panes"
           ],
           "type": "object"
         },

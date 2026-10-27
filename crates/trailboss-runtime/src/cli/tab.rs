@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::api::schema::{TabCreateParams, TabListParams, TabRenameParams};
+use crate::api::schema::{TabCreateParams, TabListParams, TabRenameParams, TabTransferParams};
 
 pub(super) fn run_tab_command(args: &[String]) -> std::io::Result<i32> {
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
@@ -14,6 +14,7 @@ pub(super) fn run_tab_command(args: &[String]) -> std::io::Result<i32> {
         "get" => tab_get(&args[1..]),
         "focus" => tab_focus(&args[1..]),
         "rename" => tab_rename(&args[1..]),
+        "move" => tab_move(&args[1..]),
         "close" => tab_close(&args[1..]),
         "help" | "--help" | "-h" => {
             print_tab_help();
@@ -161,6 +162,45 @@ fn tab_rename(args: &[String]) -> std::io::Result<i32> {
     })
 }
 
+fn tab_move(args: &[String]) -> std::io::Result<i32> {
+    let usage = "usage: trailboss tab move <tab_id> --workspace <workspace_id> [--index N]";
+    let Some(tab_id) = args.first().filter(|arg| !arg.starts_with('-')) else {
+        eprintln!("{usage}");
+        return Ok(2);
+    };
+    let mut workspace_id = None;
+    let mut insert_index = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--workspace" if workspace_id.is_none() && index + 1 < args.len() => {
+                workspace_id = Some(args[index + 1].clone());
+            }
+            "--index" if insert_index.is_none() && index + 1 < args.len() => {
+                let Ok(slot) = args[index + 1].parse::<usize>() else {
+                    eprintln!("{usage}");
+                    return Ok(2);
+                };
+                insert_index = Some(slot);
+            }
+            _ => {
+                eprintln!("{usage}");
+                return Ok(2);
+            }
+        }
+        index += 2;
+    }
+    let Some(workspace_id) = workspace_id else {
+        eprintln!("{usage}");
+        return Ok(2);
+    };
+    super::runtime::tab_transfer(TabTransferParams {
+        tab_id: super::normalize_tab_id(tab_id),
+        workspace_id,
+        insert_index,
+    })
+}
+
 fn tab_close(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_tab_id) = args.first() else {
         eprintln!("usage: trailboss tab close <tab_id>");
@@ -183,5 +223,6 @@ fn print_tab_help() {
     eprintln!("  trailboss tab get <tab_id>");
     eprintln!("  trailboss tab focus <tab_id>");
     eprintln!("  trailboss tab rename <tab_id> <label>");
+    eprintln!("  trailboss tab move <tab_id> --workspace <workspace_id> [--index N]");
     eprintln!("  trailboss tab close <tab_id>");
 }

@@ -313,3 +313,23 @@ The lead’s one basic review took 77.387s and identified that the third panes i
 - Final independent non-test reports `/tmp/herdr-task61-final-smoke-local.json` and `-remote.json`: 15/15 readiness before measurement in each mode; 36/36 passing samples; maxima 71.327873ms local and 83.913756ms remote, with every visible/focus proof passing. The UI observer actually runs on achy for remote mode. Owned clients/Core/roots detach, stop and clean normally; daily-driver state remains untouched.
 
 Task 6.1 is DONE / Living updated YES with one exact outline and both literal-bound examples. Part herdr-fork-slice-6-task-1a retains the scenario-atomic exception: final 826 reviewable lines, no lock/generated changes. Exactly one basic review (77.387s) and one bounded readiness repair completed. Final full-workspace nextest passed 3746 tests with 22 skipped in 6.819s tests / 7.18s wall on 8bc1f2b5; both actual latency modes already passed opt-in above. Only this acceptance paragraph was folded afterward. Task 6.2 remains TODO; no PR, push or demos.
+
+## Cross-space tab movement: T01 command and terminal continuity
+
+The CLI now routes `trailboss tab move <tab-id> --workspace <space-id> [--index N]`
+through the new `tab.transfer` API rather than overloading the existing in-space
+`tab.move`. Core moves the owned tab and assigns destination public locators
+without recreating its terminal runtimes. Clients viewing the transferred tab
+follow its destination; the retained layout keeps the same focused split pane.
+
+The isolated `cli_transfers_complete_split_tab_without_restarting_terminals`
+contract passed (1/1, 0.804s tests / 28.330614s build-and-run). It verifies
+destination order, split layout, labels, zoom, client focus, TerminalIds, original
+Linux processes and PTYs, shell-local variables and background jobs. A separate
+real CLI continuity witness passed in 0.243590s. An outside-candidate mutation
+inserting the transferred tab at slot zero failed the exact order assertion
+(1 failed, 0.494s tests), and the restored candidate passed. Generated API schema
+refresh passed 1/1; workspace/all-target check, strict Clippy and Rustfmt passed.
+These are local source proofs, not installation or human-session activation.
+Events/store convergence, remaining transfer cases and handoff compatibility
+are not claimed by this T01 checkpoint.

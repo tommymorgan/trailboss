@@ -17,7 +17,7 @@ use super::plugins::{
 };
 use super::server::ServerCapabilities;
 use super::session::SessionSnapshot;
-use super::tabs::TabInfo;
+use super::tabs::{TabInfo, TabTransferResult};
 use super::workspaces::WorkspaceInfo;
 use super::worktrees::{WorktreeInfo, WorktreeSourceInfo};
 
@@ -93,6 +93,9 @@ pub enum ResponseResult {
     },
     TabList {
         tabs: Vec<TabInfo>,
+    },
+    TabTransfer {
+        transfer: TabTransferResult,
     },
     AgentInfo {
         agent: AgentInfo,

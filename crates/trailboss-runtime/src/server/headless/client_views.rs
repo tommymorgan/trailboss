@@ -234,6 +234,7 @@ impl HeadlessServer {
                 | Method::PaneSplit(_)
                 | Method::TabClose(_)
                 | Method::TabCreate(_)
+                | Method::TabTransfer(_)
                 | Method::WorkspaceClose(_)
                 | Method::WorkspaceCreate(_)
                 | Method::WorktreeCreate(_)
@@ -270,6 +271,7 @@ impl HeadlessServer {
                 | Method::TabCreate(_)
                 | Method::TabFocus(_)
                 | Method::TabMove(_)
+                | Method::TabTransfer(_)
                 | Method::TabRename(_)
                 | Method::WorkspaceClose(_)
                 | Method::WorkspaceCreate(_)
@@ -302,6 +304,7 @@ impl HeadlessServer {
                 | Method::TabClose(_)
                 | Method::TabCreate(_)
                 | Method::TabFocus(_)
+                | Method::TabTransfer(_)
                 | Method::WorkspaceClose(_)
                 | Method::WorkspaceCreate(_)
                 | Method::WorkspaceFocus(_)
@@ -854,18 +857,43 @@ impl HeadlessServer {
             api::schema::Method::TabCreate(params) => params.focus,
             _ => false,
         };
+        let transferred_client_ids = match &msg.request.method {
+            api::schema::Method::TabTransfer(params) => Some(
+                self.clients
+                    .iter()
+                    .filter_map(|(id, client)| {
+                        (client
+                            .shell_location
+                            .as_ref()
+                            .and_then(|location| location.focused_tab_id())
+                            == Some(params.tab_id.as_str()))
+                        .then_some(*id)
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        };
         let inspect_pane_move = matches!(
             &msg.request.method,
             api::schema::Method::PaneMove(params) if params.focus
         );
-        let response_proxy = (agent_focus_target.is_some() || inspect_pane_move).then(|| {
-            let (proxy_tx, proxy_rx) = std::sync::mpsc::channel();
-            let original = std::mem::replace(&mut msg.respond_to, proxy_tx);
-            (original, proxy_rx)
-        });
+        let response_proxy =
+            (agent_focus_target.is_some() || inspect_pane_move || transferred_client_ids.is_some())
+                .then(|| {
+                    let (proxy_tx, proxy_rx) = std::sync::mpsc::channel();
+                    let original = std::mem::replace(&mut msg.respond_to, proxy_tx);
+                    (original, proxy_rx)
+                });
         let reconcile = Self::shell_locations_may_need_reconcile(&msg.request.method);
         let changed = self.handle_api_request_with_shutdown_check_inner(msg, false, false);
         let proxied_result = forward_proxied_api_response(response_proxy);
+        if let Some(api::schema::ResponseResult::TabTransfer { transfer }) = &proxied_result {
+            if transfer.changed {
+                for client_id in transferred_client_ids.unwrap_or_default() {
+                    self.focus_shell_client_on_tab(client_id, &transfer.tab.tab_id);
+                }
+            }
+        }
         let proxied_request_succeeded = proxied_result.is_some();
         // Same-tab and zoomed moves succeed without moving or requesting focus.
         let pane_move_focus_succeeded = inspect_pane_move
