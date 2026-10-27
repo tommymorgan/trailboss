@@ -483,3 +483,27 @@ session takeover with sequence 1000000 was ignored, and both roots continued
 their own turns. OMP/shell/companion PID/start/PTY/executable identities survived;
 all recorded owned processes were gone after stopping the new Core through its
 API. These are isolated local proofs, not installation or human-session changes.
+
+### T10: Ordinary restart restores transferred tab placement
+
+The real CLI moves a split Build tab from Tools into `[One, Build, Two]` in Main.
+After ordinary Core shutdown, the test reads the actual saved session, restarts
+the same owned session, and checks space order, tab order, labels, distinct CWDs,
+split geometry, zoom and selected Tests pane. Tools is absent from both saved
+and restored topology. New shell PIDs, actual process CWDs and fresh native
+Client output distinguish cold restoration from live-process continuity.
+
+The existing implementation passed the baseline without production changes
+(1/1, 0.898s tests / 1.893661339s total). An owned mutation reversing persisted
+tab order failed causally with `[Two, Build, One]` instead of `[One, Build, Two]`
+(0.873s tests / 26.948457523s total). After restoring the source, the full target
+passed 9/9 (3.736s tests / 29.695521271s total), strict root/runtime Clippy passed
+(0.487924829s), and Rustfmt check passed (2.076868464s). Restart ownership remains
+local to this test file, without a shared dead-code lint suppression.
+
+An independent ordinary-shutdown/relaunch witness checked the saved ordering,
+layout, focus and missing Tools space, observed a new Core and Tests shell,
+and received fresh native input/output (0.678930588s operation / 0.931078235s
+total). Its initial API-ready/client-socket startup race was a witness correction;
+the permanent harness already waits for the actual Client socket. These remain
+isolated local proofs, not installation or activation in human sessions.

@@ -75,7 +75,7 @@ impl Core {
         std::fs::create_dir_all(&home).unwrap();
         Self::launch(home, name)
     }
-    fn launch(home: PathBuf, name: String) -> Self {
+    pub fn launch(home: PathBuf, name: String) -> Self {
         let mut command = Command::new(executable());
         command.args(["server", "--session", &name]);
         for key in HOMES {
@@ -131,32 +131,6 @@ impl Core {
             std::thread::sleep(Duration::from_millis(10));
         }
         core
-    }
-    #[allow(dead_code)] // Shared harness: only restart scenarios call this.
-    pub fn restart(&mut self) -> Vec<u8> {
-        let old_pid = self.child.id();
-        self.request("server.stop", json!({}));
-        let deadline = Instant::now() + Duration::from_secs(8);
-        loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                assert!(status.success(), "Core stop failed: {status}");
-                break;
-            }
-            assert!(Instant::now() < deadline, "normal Core stop hung");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let saved = std::fs::read(
-            self.home
-                .join(format!("trailboss/sessions/{}/session.json", self.name)),
-        )
-        .expect("Core stop did not retain its actual persistence");
-        let mut replacement = Self::launch(self.home.clone(), self.name.clone());
-        assert_ne!(replacement.child.id(), old_pid);
-        // Keep the same owned root until Core 2 has consumed its persistence.
-        std::mem::swap(&mut self.child, &mut replacement.child);
-        std::mem::swap(&mut self.api, &mut replacement.api);
-        replacement.home = PathBuf::new();
-        saved
     }
     pub fn request(&self, method: &str, params: Value) -> Value {
         let request: Request = serde_json::from_value(

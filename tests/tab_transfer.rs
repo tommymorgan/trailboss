@@ -29,6 +29,31 @@ fn cli(core: &Core, args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
+fn restart(core: &mut Core) -> Vec<u8> {
+    let old_pid = core.child.id();
+    core.request("server.stop", json!({}));
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if let Some(status) = core.child.try_wait().unwrap() {
+            assert!(status.success(), "Core stop failed: {status}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "normal Core stop hung");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let saved = std::fs::read(
+        core.home
+            .join(format!("trailboss/sessions/{}/session.json", core.name)),
+    )
+    .expect("Core stop did not retain its actual persistence");
+    let replacement = Core::launch(core.home.clone(), core.name.clone());
+    assert_ne!(replacement.child.id(), old_pid);
+    // The exited owner must not remove the root now owned by its replacement.
+    core.home = PathBuf::new();
+    *core = replacement;
+    saved
+}
+
 fn wait_for_file(path: &std::path::Path) -> String {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -1254,5 +1279,218 @@ fn inherited_pane_context_survives_transfer_and_live_handoff_until_close() {
     assert_eq!(
         core.request("pane.get", json!({"pane_id":original[1]}))["pane"]["terminal_id"],
         terminals[1]
+    );
+}
+
+#[test]
+fn ordinary_restart_restores_transferred_tab_placement_layout_labels_and_focus() {
+    let mut core = Core::new();
+    let directories = [core.home.join("build left"), core.home.join("build right")];
+    for directory in &directories {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    let tools = core.request(
+        "workspace.create",
+        json!({"label":"Tools","cwd":directories[0]}),
+    );
+    let first = tools["root_pane"]["pane_id"].as_str().unwrap();
+    core.request(
+        "tab.rename",
+        json!({"tab_id":tools["tab"]["tab_id"],"label":"Build"}),
+    );
+    let split = core.request("pane.split",json!({"target_pane_id":first,"direction":"right","ratio":0.37,"cwd":directories[1],"focus":true}));
+    let second = split["pane"]["pane_id"].as_str().unwrap();
+    for (pane, label) in [(first, "Compiler"), (second, "Tests")] {
+        core.request("pane.rename", json!({"pane_id":pane,"label":label}));
+    }
+    let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+    let workspace = main["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    core.request(
+        "tab.rename",
+        json!({"tab_id":main["tab"]["tab_id"],"label":"One"}),
+    );
+    core.request(
+        "tab.create",
+        json!({"workspace_id":workspace,"label":"Two","cwd":core.home}),
+    );
+    let moved = cli(
+        &core,
+        &[
+            "tab",
+            "move",
+            tools["tab"]["tab_id"].as_str().unwrap(),
+            "--workspace",
+            &workspace,
+            "--index",
+            "1",
+        ],
+    );
+    assert!(
+        moved.status.success(),
+        "CLI move failed: {}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+    let transfer: Value = serde_json::from_slice(&moved.stdout).unwrap();
+    let panes = [first, second].map(|old| {
+        transfer["result"]["transfer"]["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mapping| mapping["previous_pane_id"] == old)
+            .unwrap()["pane_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    });
+    core.request("pane.focus", json!({"pane_id":panes[1]}));
+    core.request("pane.zoom", json!({"pane_id":panes[1],"mode":"on"}));
+    let mut client = core.attach();
+    while client.focused_pane_id.as_deref() != Some(panes[1].as_str()) {
+        client.receive().unwrap();
+    }
+    let boot = client.boot_id.clone();
+    let before = core.request("session.snapshot", json!({}))["snapshot"].clone();
+    let expected_layout =
+        core.request("pane.layout", json!({"pane_id":panes[1]}))["layout"].clone();
+    let pane_placement = |core: &Core| {
+        panes
+            .iter()
+            .map(|pane| {
+                let info = core.request("pane.get", json!({"pane_id":pane}))["pane"].clone();
+                json!([
+                    info["pane_id"],
+                    info["workspace_id"],
+                    info["tab_id"],
+                    info["label"],
+                    info["cwd"]
+                ])
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected_panes = pane_placement(&core);
+    let original_shells = panes
+        .iter()
+        .map(|pane| {
+            core.request("pane.process_info", json!({"pane_id":pane}))["process_info"]["shell_pid"]
+                .as_u64()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    drop(client);
+    let saved = restart(&mut core);
+    let persisted: Value = serde_json::from_slice(&saved).unwrap();
+    assert!(
+        !persisted["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|space| space["label"] == "Tools"),
+        "saved session retained removed Tools"
+    );
+    let mut restored_client = core.attach();
+    while restored_client.focused_pane_id.as_deref() != Some(panes[1].as_str()) {
+        restored_client.receive().unwrap();
+    }
+    assert_ne!(
+        restored_client.boot_id, boot,
+        "ordinary restart retained the old Core"
+    );
+    let restored = core.request("session.snapshot", json!({}))["snapshot"].clone();
+    assert_eq!(restored["focused_pane_id"], panes[1]);
+    let spaces = |snapshot: &Value| {
+        snapshot["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|space| {
+                json!([
+                    space["workspace_id"],
+                    space["label"],
+                    space["focused"],
+                    space["active_tab_id"],
+                    space["tab_count"],
+                    space["pane_count"]
+                ])
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        spaces(&restored),
+        spaces(&before),
+        "saved space order or remembered selection changed"
+    );
+    let tabs = core.request("tab.list", json!({"workspace_id":workspace}));
+    assert_eq!(
+        tabs["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tab| tab["label"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["One", "Build", "Two"]
+    );
+    assert!(tabs["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tab| tab["label"] == "Build")
+        .unwrap()["focused"]
+        .as_bool()
+        .unwrap());
+    assert!(
+        !restored["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|space| space["label"] == "Tools"),
+        "restore recreated removed Tools"
+    );
+    assert_eq!(
+        pane_placement(&core),
+        expected_panes,
+        "restored moved pane labels/CWDs/membership changed"
+    );
+    assert_eq!(
+        core.request("pane.layout", json!({"pane_id":panes[1]}))["layout"],
+        expected_layout,
+        "restored split geometry/zoom/focus changed"
+    );
+    for (index, pane) in panes.iter().enumerate() {
+        let pid = core.request("pane.process_info", json!({"pane_id":pane}))["process_info"]
+            ["shell_pid"]
+            .as_u64()
+            .unwrap();
+        assert!(
+            !original_shells.contains(&pid),
+            "cold restore claimed old shell process survival"
+        );
+        assert_eq!(
+            std::fs::read_link(format!("/proc/{pid}/cwd")).unwrap(),
+            directories[index]
+        );
+        core.request("pane.send_text",json!({"pane_id":pane,"text":format!("pwd > '{}/cold-cwd-{index}'; printf '%s%s\\n' 'RESTORED-BUILD-' '{index}'\n",core.home.display())}));
+        assert_eq!(
+            wait_for_file(&core.home.join(format!("cold-cwd-{index}"))).trim(),
+            directories[index].to_str().unwrap()
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while restored_client
+        .primary
+        .as_ref()
+        .is_none_or(|surface| !surface.text().contains("RESTORED-BUILD-1"))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "restored Client did not display saved Tests pane"
+        );
+        restored_client.receive().unwrap();
+    }
+    assert_eq!(
+        restored_client.focused_pane_id.as_deref(),
+        Some(panes[1].as_str())
     );
 }
