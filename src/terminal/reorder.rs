@@ -33,6 +33,16 @@ struct Press {
     pointer: (u16, u16),
     viewport: Rect,
     dragging: bool,
+    destination: Option<String>,
+}
+impl Press {
+    fn retain_destination(&mut self, workspace: &str) {
+        let destination =
+            (Some(workspace) != self.action.context.workspace_id.as_deref()).then_some(workspace);
+        if self.destination.as_deref() != destination {
+            self.destination = destination.map(str::to_owned);
+        }
+    }
 }
 #[derive(Default)]
 pub struct Drag {
@@ -171,6 +181,7 @@ impl Drag {
             pointer: (x, y),
             viewport,
             dragging: false,
+            destination: None,
         });
         true
     }
@@ -183,7 +194,7 @@ impl Drag {
         snapshot: &ClientShellSnapshot,
     ) -> bool {
         let list_offset = self.list_offset;
-        let Some(press) = self.press.as_ref() else {
+        let Some(press) = self.press.as_mut() else {
             return false;
         };
         let mut exists = false;
@@ -201,6 +212,10 @@ impl Drag {
         if press.boot != snapshot.boot_id
             || press.viewport != viewport
             || !valid(snapshot, &press.action.context)
+            || press
+                .destination
+                .as_deref()
+                .is_some_and(|destination| workspace(snapshot, destination).is_none())
             || !exists
             || super::has_modal(core, declarations, viewport)
         {
@@ -218,7 +233,10 @@ impl Drag {
                 press.pointer.0,
                 press.pointer.1,
             )
-            .map(|(_, _, r)| r);
+            .map(|(destination, _, rect)| {
+                press.retain_destination(destination);
+                rect
+            });
             if self.indicator.is_none() {
                 return self.cancel();
             }
@@ -255,7 +273,10 @@ impl Drag {
                 x,
                 y,
             )
-            .map(|(_, _, r)| r)
+            .map(|(destination, _, rect)| {
+                press.retain_destination(destination);
+                rect
+            })
         } else {
             None
         };

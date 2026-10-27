@@ -256,6 +256,65 @@ fn invalid_drop_boot_removed_source_resize_and_cancel_clear() {
     }
 }
 #[test]
+fn coalesced_destination_removal_cancels_before_another_header_reuses_its_cell() {
+    let (core, mut snapshot, viewport) = (Core::default(), snapshot(), Rect::viewport(30, 14));
+    let declarations = expanded_declarations(&snapshot);
+    let mut drag = Drag::default();
+    assert!(drag.press(&core, &declarations, viewport, &snapshot, 1, 2));
+    drag.motion(&core, &declarations, viewport, &snapshot, 1, 6);
+    assert!(drag.captured());
+    assert_eq!(drag.indicator().unwrap().y, 6);
+
+    // Both replacements arrive before the next reconcile: c's header takes
+    // b's exact cell, with no intervening projection lacking a drop target.
+    snapshot.revision += 1;
+    snapshot
+        .workspaces
+        .retain(|workspace| workspace.workspace_id != "b");
+    snapshot.tabs.retain(|tab| tab.workspace_id != "b");
+    let replacement = expanded_declarations(&snapshot);
+    drag.reconcile(&core, &replacement, viewport, &snapshot);
+    let release = drag.release(&core, &replacement, viewport, &snapshot, 1, 6);
+    assert!(
+        release.movement.is_none(),
+        "closed destination was silently replaced by {:?}",
+        release.movement
+    );
+    assert!(release.click.is_none());
+    assert!(!drag.captured());
+    assert!(drag.indicator().is_none());
+}
+#[test]
+fn pointer_retargeting_does_not_keep_an_abandoned_destination_alive() {
+    for (row, method, params) in [
+        (4, "tab.move", json!({"tab_id":"t1","insert_index":2})),
+        (9, "tab.transfer", json!({"tab_id":"t1","workspace_id":"c"})),
+    ] {
+        let (core, mut snapshot, viewport) = (Core::default(), snapshot(), Rect::viewport(30, 14));
+        let declarations = expanded_declarations(&snapshot);
+        let mut drag = Drag::default();
+        assert!(drag.press(&core, &declarations, viewport, &snapshot, 1, 2));
+        drag.motion(&core, &declarations, viewport, &snapshot, 1, 6);
+        drag.motion(&core, &declarations, viewport, &snapshot, 1, row);
+
+        // The pointer deliberately left b. Its later disappearance must not
+        // cancel the surviving target, even before the provider reprojects.
+        snapshot.revision += 1;
+        snapshot
+            .workspaces
+            .retain(|workspace| workspace.workspace_id != "b");
+        snapshot.tabs.retain(|tab| tab.workspace_id != "b");
+        drag.reconcile(&core, &declarations, viewport, &snapshot);
+        assert!(drag.captured());
+        let request = drag
+            .release(&core, &declarations, viewport, &snapshot, 1, row)
+            .movement
+            .unwrap();
+        assert_eq!(request.method, method);
+        assert_eq!(request.params, params);
+    }
+}
+#[test]
 fn tab_indices_are_live_workspace_local_and_suppress_noops() {
     let mut s = snapshot();
     let source = context("a", Some("t1"));

@@ -849,7 +849,8 @@ a duplicate declaration-withdrawal case. Handoff observes the old native process
 exit and a new boot, then attaches a fresh native client and releases without
 pressing; this does not claim native reconnection support.
 
-Existing behavior passed without a production fix. Before the readiness repair,
+The initial nine-case behavior passed without a production fix; the later
+coalesced-destination correction is recorded below. Before the readiness repair,
 the parent's owned Escape mutation omitted both capture cancellation and gesture
 reset: the permanent nine-case outline failed (17.418s tests / 18.716s total),
 and an independent release moved Build despite Escape (1.068s). Restoring both
@@ -862,6 +863,32 @@ the native agent-tree/reorder suite passed 25/25 (9.564s tests / 11.203s total),
 including all nine interruption cases. Rustfmt and strict Clippy passed. An
 independent real-provider/native witness passed five cancellation cases
 (4.924s operation / 4.948s total).
+
+The bounded Unit2 review found a distinct destination-close race: if both the
+replacement Core snapshot and sidebar projection arrive before reconciliation,
+Logs can occupy the former Main header cell. The previous implementation
+recomputed that row and could transfer Build to Logs instead of canceling.
+`coalesced_destination_removal_cancels_before_another_header_reuses_its_cell`
+reproduced the wrong `tab.transfer` destination deterministically (0.006s test /
+0.879s total), without an empty intermediate projection. This is executed RED,
+not merely the reviewer's source-based inference.
+
+The captured gesture now retains its current cross-space destination identity
+and cancels if that space disappears before recomputing the row. Only a new
+cross-space identity is copied; unchanged targets reuse it, and same-space
+targets retain no extra destination allocation. Existing release-time insertion
+recomputation remains intact. The companion pointer-retargeting test checks that
+leaving Main for another surviving space, or returning to the source, does not
+keep the abandoned destination as a cancellation dependency.
+
+Both deterministic tests passed with the affected native/reorder/divider/copy
+suite (35/35, 9.727s test / 11.749s total). Actual native witnesses also passed
+stationary-pointer insertion (0.912s), six interrupted-capture cases (6.416s)
+and existing gestures (1.064s). Strict warning-denying Clippy passed (1.567s).
+The first format check reported only formatting in the new guard and tests;
+it is not counted as a behavioral failure.
+After parent-owned formatting, the final Rustfmt check passed (2.068s); the
+format-only changes did not alter the verified behavior.
 
 ### T16 unsupported native transfer feedback
 
