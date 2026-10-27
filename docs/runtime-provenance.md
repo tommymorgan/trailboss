@@ -778,6 +778,16 @@ header click only focuses that space. Split comparisons intentionally exclude
 viewport-dependent rectangles, which can change asynchronously on native attach.
 No human session, installation or publication is part of this verification.
 
+Native transfer fixtures wait for the actual agent-tree `focus-tab` declaration
+with the source workspace/tab identity and no pane identity before attaching the
+native client, including a fresh attachment after handoff. Labels alone cannot
+prove readiness: the stock fallback renders the same labels under a different
+action owner. A bounded parent trace of a T14 failure showed the gesture captured
+that fallback and correctly cancelled when its provider disappeared. The shared
+fixture precondition fixes this startup race without sleeps, gesture retries or
+production input changes; the earlier untraced T12 failure has no direct causal
+trace and is not claimed as a separate proven instance.
+
 ### T13 viewed and background native focus
 
 `executable_pty_sidebar_transfer_preserves_viewed_and_background_panes` covers
@@ -825,3 +835,30 @@ test passed (0.908s tests / 2.345s total) and the independent witness passed
 (1.031s total), observing One shift from row 10 to row 11 without another motion.
 Candidate native agent-tree and reorder suites passed 24/24 (5.036s tests /
 5.277s total), with Rustfmt and strict Clippy passing.
+
+### T15 interrupted native captures dispatch nothing
+
+`executable_pty_sidebar_transfer_cancels_every_interrupted_capture` covers nine
+actual native cases: source close, destination close, Core boot replacement,
+source declaration replacement, viewport resize, modal opening, release outside
+the sidebar, release on a pane row and Escape. After each interruption it records
+the authoritative topology/view baseline, releases the old capture and requires
+no transfer/focus events or further topology/view mutation. Modal opening keeps
+the original agent-tree source identity present underneath the modal; it is not
+a duplicate declaration-withdrawal case. Handoff observes the old native process
+exit and a new boot, then attaches a fresh native client and releases without
+pressing; this does not claim native reconnection support.
+
+Existing behavior passed without a production fix. Before the readiness repair,
+the parent's owned Escape mutation omitted both capture cancellation and gesture
+reset: the permanent nine-case outline failed (17.418s tests / 18.716s total),
+and an independent release moved Build despite Escape (1.068s). Restoring both
+input paths passed the outline (9.208s tests / 10.169s total). A partial viewport
+guard mutation stayed green because resize independently cancels the capture;
+it is not claimed as causal mutation evidence.
+
+With the real-provider readiness precondition and repaired Core-only predecessor,
+the native agent-tree/reorder suite passed 25/25 (9.564s tests / 11.203s total),
+including all nine interruption cases. Rustfmt and strict Clippy passed. An
+independent real-provider/native witness passed five cancellation cases
+(4.924s operation / 4.948s total).

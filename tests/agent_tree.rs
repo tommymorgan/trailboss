@@ -1752,3 +1752,394 @@ fn executable_pty_transfer_uses_the_stationary_pointers_release_time_row() {
     assert_eq!(labels(destination), ["Build", "Zero", "One", "Two"]);
     assert_eq!(labels(source), ["Remaining"]);
 }
+
+#[test]
+fn executable_pty_sidebar_transfer_cancels_every_interrupted_capture() {
+    use std::{io::BufRead, io::BufReader, os::unix::net::UnixStream, path::PathBuf};
+
+    struct StopOwner(PathBuf);
+    impl Drop for StopOwner {
+        fn drop(&mut self) {
+            let api = trailboss_runtime::api_client::ApiClient::for_target(
+                trailboss_runtime::api_client::ConnectionTarget::SocketPath(self.0.clone()),
+            );
+            let request = serde_json::from_value::<trailboss_runtime::api_schema::Request>(
+                json!({"id":"stop-handoff-owner","method":"server.stop","params":{}}),
+            )
+            .unwrap();
+            let _ = api.request_value_with_timeout(&request, Duration::from_secs(2));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while self.0.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+    fn topology(core: &Core) -> serde_json::Value {
+        let snapshot = core.request("session.snapshot", json!({}))["snapshot"].clone();
+        let select = |key: &str, fields: &[&str]| {
+            snapshot[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entity| {
+                    fields
+                        .iter()
+                        .map(|field| ((*field).to_owned(), entity[*field].clone()))
+                        .collect::<serde_json::Map<_, _>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        json!({
+            "workspace":snapshot["focused_workspace_id"],
+            "tab":snapshot["focused_tab_id"],
+            "pane":snapshot["focused_pane_id"],
+            "workspaces":select("workspaces", &["workspace_id","number","active_tab_id"]),
+            "tabs":select("tabs", &["tab_id","workspace_id","number","label"]),
+            "panes":select("panes", &["pane_id","terminal_id","workspace_id","tab_id"]),
+        })
+    }
+    for case in [
+        "source-close",
+        "destination-close",
+        "boot",
+        "declaration-replacement",
+        "viewport",
+        "modal",
+        "outside",
+        "pane-row",
+        "escape",
+    ] {
+        let core = Core::new();
+        let socket = core
+            .home
+            .join("trailboss/sessions")
+            .join(&core.name)
+            .join("trailboss.sock");
+        // The imported owner is not Core.child; stop only this owned session.
+        let _owner = (case == "boot").then(|| StopOwner(socket.clone()));
+        let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+        let source = tools["workspace"]["workspace_id"].as_str().unwrap();
+        let build = tools["tab"]["tab_id"].as_str().unwrap();
+        core.request("tab.rename", json!({"tab_id":build,"label":"Build"}));
+        core.request(
+            "tab.create",
+            json!({"workspace_id":source,"label":"Remaining","cwd":core.home}),
+        );
+        let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+        let destination = main["workspace"]["workspace_id"].as_str().unwrap();
+        core.request(
+            "tab.rename",
+            json!({"tab_id":main["tab"]["tab_id"],"label":"One"}),
+        );
+        let split = core.request(
+            "pane.split",
+            json!({
+                "target_pane_id":main["root_pane"]["pane_id"],"direction":"right","cwd":core.home
+            }),
+        );
+        for (pane, label) in [
+            (&main["root_pane"]["pane_id"], "TargetLeft"),
+            (&split["pane"]["pane_id"], "TargetRight"),
+        ] {
+            core.request("pane.rename", json!({"pane_id":pane,"label":label}));
+        }
+        let logs = core.request("workspace.create", json!({"label":"Logs","cwd":core.home}));
+        let diagnostics = logs["root_pane"]["pane_id"].as_str().unwrap();
+        core.request(
+            "tab.rename",
+            json!({"tab_id":logs["tab"]["tab_id"],"label":"Diagnostics"}),
+        );
+        core.request("pane.focus", json!({"pane_id":diagnostics}));
+        core.request(
+            "plugin.link",
+            json!({
+                "path":format!("{}/plugins/agent-tree",env!("CARGO_MANIFEST_DIR")),"enabled":true
+            }),
+        );
+        let mut console = LiveConsole::new_for_tab(&core, source, build);
+        let mut native_pid = console.child.0.process_id();
+        let rows = console.wait(|rows, _| {
+            ["Build", "TargetLeft", "TargetRight", "Diagnostics"]
+                .iter()
+                .all(|label| rows.iter().any(|row| row.contains(label)))
+        });
+        let source_row = rows.iter().position(|row| row.contains("Build")).unwrap();
+        let target_row = rows
+            .iter()
+            .position(|row| row.trim_start().starts_with("Main"))
+            .unwrap();
+        let pane_row = rows
+            .iter()
+            .position(|row| row.contains("TargetRight"))
+            .unwrap();
+        console
+            .writer
+            .write_all(
+                format!(
+                    "\x1b[<0;5;{}M\x1b[<32;5;{}M",
+                    source_row + 1,
+                    target_row + 1
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        console.writer.flush().unwrap();
+        // A normal workspace header also contains dashes: require the insertion
+        // line to replace its label, not merely find its ordinary separator.
+        console.wait(|rows, _| {
+            rows[target_row]
+                .trim_start()
+                .starts_with("────────────────────")
+        });
+        match case {
+            "source-close" => {
+                core.request("tab.close", json!({"tab_id":build}));
+                console.wait(|rows, _| !rows.iter().any(|row| row.contains("Build")));
+            }
+            "destination-close" => {
+                core.request("workspace.close", json!({"workspace_id":destination}));
+                console.wait(|rows, _| {
+                    !rows.iter().any(|row| row.contains("TargetRight"))
+                        && !rows
+                            .iter()
+                            .any(|row| row.trim_start().starts_with("────────────────────"))
+                });
+            }
+            "boot" => {
+                let mut before = core.attach();
+                while before.boot_id.is_empty() {
+                    before.receive().unwrap();
+                }
+                let old_boot = before.boot_id.clone();
+                drop(before);
+                core.request(
+                    "server.live_handoff",
+                    json!({"import_exe":support::executable()}),
+                );
+                let mut after = core.attach();
+                while after.boot_id.is_empty() {
+                    after.receive().unwrap();
+                }
+                assert_ne!(
+                    after.boot_id, old_boot,
+                    "{case}: ownership did not change boot"
+                );
+                let deadline = Instant::now() + Duration::from_secs(8);
+                while console.child.0.try_wait().unwrap().is_none() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "{case}: old native client retained its capture"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                // Handoff currently ends the native connection. Do not invent
+                // reconnect behavior: the old captured gesture dies with it,
+                // and releasing on a fresh client must not dispatch anything.
+                console = LiveConsole::new_for_tab(&core, source, build);
+                assert_ne!(
+                    console.child.0.process_id(),
+                    native_pid,
+                    "{case}: client did not change"
+                );
+                native_pid = console.child.0.process_id();
+                console.wait(|rows, _| {
+                    ["Build", "TargetRight", "Diagnostics"]
+                        .iter()
+                        .all(|label| rows.iter().any(|row| row.contains(label)))
+                        && !rows[target_row]
+                            .trim_start()
+                            .starts_with("────────────────────")
+                });
+            }
+            "declaration-replacement" | "modal" => {
+                let plugin = core.home.join("interrupt-capture");
+                std::fs::create_dir_all(&plugin).unwrap();
+                let tree = if case == "modal" {
+                    // Resolve the unchanged agent-tree list zone in the same
+                    // sidebar geometry; only the overlay captures input.
+                    json!({"type":"row","children":[
+                        {"type":"flex","weight":1,"child":{"type":"column","children":[
+                            {"type":"flex","weight":1,"child":{"type":"zone","zone":"list"}},
+                            {"type":"zone","zone":"footer"},
+                            {"type":"modal","child":{"type":"column","children":[
+                                {"type":"label","text":"INTERRUPT-CAPTURE","role":"label"},
+                                {"type":"input"}
+                            ]}}
+                        ]}},
+                        {"type":"flex","weight":3,"child":{"type":"surface"}}
+                    ]})
+                } else {
+                    json!({"type":"column","children":[
+                        {"type":"label","text":"INTERRUPT-CAPTURE","role":"label"},
+                        {"type":"surface"}
+                    ]})
+                };
+                let declaration = json!({"herdr":"widget_tree","version":1,"zones":[],
+                    "composition":{"priority":100,"tree":tree}});
+                std::fs::write(
+                    plugin.join("producer.ts"),
+                    format!("console.log(JSON.stringify({declaration})); await Bun.stdin.text();"),
+                )
+                .unwrap();
+                std::fs::write(plugin.join("trailboss-plugin.toml"),
+                    "id = \"fixture.interrupt-capture\"\nname = \"Capture interruption\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[ui]]\nid = \"tree\"\nsurface = \"sidebar\"\ncommand = [\"bun\", \"producer.ts\"]\nstream = true\n"
+                ).unwrap();
+                core.request("plugin.link", json!({"path":plugin,"enabled":true}));
+                console.wait(|_, screen| {
+                    screen.screen_text_rows().unwrap().iter().any(|row| {
+                        row.cells
+                            .iter()
+                            .flat_map(|cell| cell.graphemes.iter())
+                            .filter_map(|ch| char::from_u32(*ch))
+                            .collect::<String>()
+                            .contains("INTERRUPT-CAPTURE")
+                    })
+                });
+                if case == "modal" {
+                    let mut observer = core.attach();
+                    let deadline = Instant::now() + Duration::from_secs(8);
+                    while !observer.declarations.as_ref().is_some_and(|declarations| {
+                        declarations
+                            .iter()
+                            .any(|(owner, _)| owner == "fixture.interrupt-capture")
+                    }) {
+                        assert!(
+                            Instant::now() < deadline,
+                            "modal declaration was not published"
+                        );
+                        observer.receive().unwrap();
+                    }
+                    assert!(
+                        sidebar::rows(observer.declarations.as_ref().unwrap()).any(
+                            |(owner, node)| {
+                                owner == "tommymorgan.agent-tree"
+                                    && matches!(node,
+                            Node::Row { action, context, .. }
+                            if action.as_deref() == Some("focus-tab")
+                                && context.workspace_id.as_deref() == Some(source)
+                                && context.tab_id.as_deref() == Some(build)
+                                && context.pane_id.is_none())
+                            }
+                        ),
+                        "modal replaced the original captured sidebar identity"
+                    );
+                }
+            }
+            "viewport" => {
+                console.screen.resize(110, 28, 0, 0).unwrap();
+                console
+                    ._master
+                    .resize(portable_pty::PtySize {
+                        rows: 28,
+                        cols: 110,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })
+                    .unwrap();
+                console.wait(|rows, _| {
+                    rows.len() == 28
+                        && rows.iter().any(|row| row.contains("TargetRight"))
+                        && !rows[target_row]
+                            .trim_start()
+                            .starts_with("────────────────────")
+                });
+            }
+            "escape" => {
+                console.writer.write_all(b"\x1b").unwrap();
+                console.writer.flush().unwrap();
+                console.wait(|rows, _| {
+                    !rows[target_row]
+                        .trim_start()
+                        .starts_with("────────────────────")
+                });
+            }
+            "outside" | "pane-row" => {}
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            console.child.0.process_id(),
+            native_pid,
+            "{case}: native client replaced"
+        );
+        assert!(
+            console.child.0.try_wait().unwrap().is_none(),
+            "{case}: native client exited"
+        );
+        let before_release = topology(&core);
+        assert_eq!(
+            before_release["workspace"], logs["workspace"]["workspace_id"],
+            "{case}"
+        );
+        assert_eq!(before_release["tab"], logs["tab"]["tab_id"], "{case}");
+        assert_eq!(before_release["pane"], diagnostics, "{case}");
+        if case != "source-close" {
+            assert_eq!(
+                core.request(
+                    "pane.get",
+                    json!({
+                        "pane_id":tools["root_pane"]["pane_id"]
+                    })
+                )["pane"]["workspace_id"],
+                source,
+                "{case}: interruption itself moved Build"
+            );
+        }
+        let mut events = BufReader::new(UnixStream::connect(&socket).unwrap());
+        events
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .unwrap();
+        serde_json::to_writer(
+            events.get_mut(),
+            &json!({
+                "id":"interrupted-release","method":"events.subscribe","params":{"subscriptions":[
+                    {"type":"tab.transferred"},{"type":"tab.focused"},
+                    {"type":"pane.focused"},{"type":"workspace.focused"}
+                ]}
+            }),
+        )
+        .unwrap();
+        events.get_mut().write_all(b"\n").unwrap();
+        let mut line = String::new();
+        events.read_line(&mut line).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&line)
+            .unwrap()
+            .get("error")
+            .is_none());
+        let (x, row) = match case {
+            "outside" => (60, target_row),
+            "pane-row" => (5, pane_row),
+            _ => (5, target_row),
+        };
+        console
+            .writer
+            .write_all(format!("\x1b[<0;{x};{}m", row + 1).as_bytes())
+            .unwrap();
+        console.writer.flush().unwrap();
+        line.clear();
+        let error = events.read_line(&mut line).expect_err(&format!(
+            "{case}: interrupted release emitted a transfer or click: {line}"
+        ));
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+            "{case}: event stream closed instead of remaining quiet: {error}"
+        );
+        assert_eq!(
+            topology(&core),
+            before_release,
+            "{case}: release changed topology or view"
+        );
+        assert_eq!(
+            console.child.0.process_id(),
+            native_pid,
+            "{case}: native client replaced"
+        );
+        assert!(
+            console.child.0.try_wait().unwrap().is_none(),
+            "{case}: native client exited"
+        );
+    }
+}
