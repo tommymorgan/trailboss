@@ -470,6 +470,34 @@ struct LiveConsole {
     screen: ghostty_vt::Terminal,
 }
 impl LiveConsole {
+    fn new_for_tab(core: &Core, workspace_id: &str, tab_id: &str) -> Self {
+        // Stock fallback rows have the same labels but a different action owner.
+        // Start the native client only after its actual drag source is published.
+        let mut observer = core.attach();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if observer.declarations.as_ref().is_some_and(|trees| {
+                sidebar::rows(trees).any(|(owner, node)| {
+                    owner == "tommymorgan.agent-tree"
+                        && matches!(node, Node::Row { action: Some(action), context, .. }
+                            if action == "focus-tab"
+                                && context.workspace_id.as_deref() == Some(workspace_id)
+                                && context.tab_id.as_deref() == Some(tab_id)
+                                && context.pane_id.is_none())
+                })
+            }) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "agent-tree did not publish the native drag source"
+            );
+            observer.receive().unwrap();
+        }
+        drop(observer);
+        Self::new(core)
+    }
+
     fn new(core: &Core) -> Self {
         let pair = portable_pty::native_pty_system()
             .openpty(portable_pty::PtySize {
@@ -1236,4 +1264,236 @@ command = ["sh", "-c", '''printf ready > '{}'; IFS= read -r line; test "$line" =
         untouched["layout"]["zoomed"], false,
         "overlay exit changed Main's unrelated tab"
     );
+}
+
+#[test]
+fn executable_pty_transfers_split_tab_to_each_cross_space_drop_slot() {
+    use std::{
+        io::{BufRead, BufReader},
+        os::unix::net::UnixStream,
+    };
+    fn shell_state(core: &Core, pane: &str, index: usize, stage: &str) -> String {
+        let initialize = if stage == "before" {
+            format!("native_local=value-{index}; sleep 300 & native_job=$!; ")
+        } else {
+            String::new()
+        };
+        core.request("pane.send_text", json!({"pane_id":pane,"text":format!(
+            "{initialize}kill -0 \"$native_job\" && printf '%s %s %s\\n' \"$$\" \"$native_job\" \"$native_local\" > native-{stage}-{index}\n"
+        )}));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(state) =
+                std::fs::read_to_string(core.home.join(format!("native-{stage}-{index}")))
+            {
+                if state.ends_with('\n') {
+                    return state;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "native {stage} shell state missing"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    fn process(pid: &str) -> (String, std::path::PathBuf, std::path::PathBuf) {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        (
+            stat.rsplit_once(") ")
+                .unwrap()
+                .1
+                .split_whitespace()
+                .nth(19)
+                .unwrap()
+                .to_owned(),
+            std::fs::read_link(format!("/proc/{pid}/fd/0")).unwrap(),
+            std::fs::read_link(format!("/proc/{pid}/exe")).unwrap(),
+        )
+    }
+    for (target, expected) in [
+        ("before", ["Build", "One", "Two"]),
+        ("between", ["One", "Build", "Two"]),
+        ("after", ["One", "Two", "Build"]),
+        ("expanded-header", ["One", "Two", "Build"]),
+        ("collapsed-header", ["One", "Two", "Build"]),
+    ] {
+        let core = Core::new();
+        let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+        let source = tools["workspace"]["workspace_id"].as_str().unwrap();
+        let build = tools["tab"]["tab_id"].as_str().unwrap();
+        let first = tools["root_pane"]["pane_id"].as_str().unwrap();
+        core.request("tab.rename", json!({"tab_id":build,"label":"Build"}));
+        let split = core.request(
+            "pane.split",
+            json!({"target_pane_id":first,"direction":"right","ratio":0.37,"cwd":core.home}),
+        );
+        let second = split["pane"]["pane_id"].as_str().unwrap();
+        core.request(
+            "tab.create",
+            json!({"workspace_id":source,"label":"Remaining","cwd":core.home}),
+        );
+        let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+        let destination = main["workspace"]["workspace_id"].as_str().unwrap();
+        core.request(
+            "tab.rename",
+            json!({"tab_id":main["tab"]["tab_id"],"label":"One"}),
+        );
+        core.request(
+            "tab.create",
+            json!({"workspace_id":destination,"label":"Two","cwd":core.home}),
+        );
+        let panes = [first, second];
+        let originals = panes
+            .iter()
+            .enumerate()
+            .map(|(index, pane)| {
+                let state = shell_state(&core, pane, index, "before");
+                let ids = state
+                    .split_whitespace()
+                    .take(2)
+                    .map(process)
+                    .collect::<Vec<_>>();
+                (
+                    state,
+                    ids,
+                    core.request("pane.get", json!({"pane_id":pane}))["pane"]["terminal_id"]
+                        .clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if target == "collapsed-header" {
+            core.request("tab.focus", json!({"tab_id":main["tab"]["tab_id"]}));
+        }
+        core.request("plugin.link", json!({"path":format!("{}/plugins/agent-tree",env!("CARGO_MANIFEST_DIR")),"enabled":true}));
+        let mut console = LiveConsole::new_for_tab(&core, source, build);
+        let mut rows = console.wait(|rows, _| {
+            ["Build", "Remaining", "One", "Two"]
+                .iter()
+                .all(|label| rows.iter().any(|row| row.contains(label)))
+        });
+        let layout = core.request("pane.layout", json!({"pane_id":second}))["layout"].clone();
+        let header = rows
+            .iter()
+            .position(|row| row.trim_start().starts_with("Main"))
+            .unwrap();
+        if target == "collapsed-header" {
+            console.click(header);
+            rows = console.wait(|rows, _| {
+                rows[header].contains("hidden") && !rows.iter().any(|row| row.contains("One"))
+            });
+        }
+        let source_row = rows.iter().position(|row| row.contains("Build")).unwrap();
+        let target_row = match target {
+            "before" => rows.iter().position(|row| row.contains("One")).unwrap(),
+            "between" => rows.iter().position(|row| row.contains("Two")).unwrap(),
+            "after" => rows.iter().position(|row| row.contains("Two")).unwrap() + 1,
+            _ => header,
+        };
+        let before_source = core.request("tab.list", json!({"workspace_id":source}));
+        let before_destination = core.request("tab.list", json!({"workspace_id":destination}));
+        let socket = core
+            .home
+            .join(format!("trailboss/sessions/{}/trailboss.sock", core.name));
+        let mut events = BufReader::new(UnixStream::connect(socket).unwrap());
+        events
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        serde_json::to_writer(events.get_mut(), &json!({"id":"native-transfer-events","method":"events.subscribe","params":{"subscriptions":[{"type":"tab.transferred"}]}})).unwrap();
+        events.get_mut().write_all(b"\n").unwrap();
+        let mut line = String::new();
+        events.read_line(&mut line).unwrap();
+        let subscribed: Value = serde_json::from_str(&line).unwrap();
+        assert!(subscribed.get("error").is_none(), "{subscribed}");
+        console
+            .writer
+            .write_all(
+                format!(
+                    "\x1b[<0;5;{}M\x1b[<32;5;{}M",
+                    source_row + 1,
+                    target_row + 1
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        console.writer.flush().unwrap();
+        console.wait(|rows, _| {
+            rows.iter().enumerate().any(|(index, row)| {
+                row.contains("────────────────────")
+                    && if target.ends_with("header") {
+                        index >= header
+                    } else {
+                        index == target_row
+                    }
+            })
+        });
+        assert_eq!(
+            core.request("tab.list", json!({"workspace_id":source})),
+            before_source,
+            "{target}: source mutated before release"
+        );
+        assert_eq!(
+            core.request("tab.list", json!({"workspace_id":destination})),
+            before_destination,
+            "{target}: destination mutated before release"
+        );
+        console
+            .writer
+            .write_all(format!("\x1b[<0;5;{}m", target_row + 1).as_bytes())
+            .unwrap();
+        console.writer.flush().unwrap();
+        line.clear();
+        events.read_line(&mut line).unwrap();
+        let event: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(event["event"], "tab_transferred", "{target}: {event}");
+        let tabs = core.request("tab.list", json!({"workspace_id":destination}));
+        assert_eq!(
+            tabs["tabs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tab| tab["label"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            expected,
+            "{target}"
+        );
+        assert_eq!(
+            core.request("tab.list", json!({"workspace_id":source}))["tabs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        for (index, pane) in panes.iter().enumerate() {
+            let state = shell_state(&core, pane, index, "after");
+            assert_eq!(state, originals[index].0, "{target}: shell state changed");
+            for (pid, identity) in state.split_whitespace().take(2).zip(&originals[index].1) {
+                assert_eq!(&process(pid), identity, "{target}: process/PTY changed");
+            }
+            let current = core.request("pane.get", json!({"pane_id":pane}));
+            assert_eq!(current["pane"]["terminal_id"], originals[index].2);
+            assert_eq!(current["pane"]["workspace_id"], destination);
+            let after = core.request("pane.layout", json!({"pane_id":current["pane"]["pane_id"]}));
+            let semantics = |layout: &Value| {
+                layout["splits"].as_array().unwrap().iter()
+                .map(|split| json!({"id":split["id"],"direction":split["direction"],"ratio":split["ratio"]}))
+                .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                semantics(&after["layout"]),
+                semantics(&layout),
+                "{target}: split semantics changed"
+            );
+        }
+        events
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_millis(150)))
+            .unwrap();
+        line.clear();
+        assert!(
+            events.read_line(&mut line).is_err(),
+            "{target}: duplicate transfer event {line}"
+        );
+    }
 }

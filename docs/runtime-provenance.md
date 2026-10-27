@@ -755,3 +755,25 @@ in 0.522669909s, preserving terminal identity, process, start time, PTY and
 shell-local state while accepting post-transfer public `ClientShellPopupInput`
 (`delivery-popup-endpoint-independent-green.json` and `popup-endpoint-green.json`).
 Full-prefix verification and the scoped review remain separate gates.
+
+## Native cross-space tab drag: T12 drop slots
+
+`executable_pty_transfers_split_tab_to_each_cross_space_drop_slot` drives the
+production executable and agent-tree sidebar through a controlling PTY. Each
+isolated case drags a two-pane Build tab from Tools into Main: before One,
+between One and Two, after Two, or onto Main's expanded or collapsed header.
+It observes the insertion line before release, unchanged source and destination
+tab lists during the drag, one transfer event after release, exact destination
+order, and retained split IDs, directions and ratios. Original public pane
+aliases still address the same TerminalIDs, shell PIDs/start times, PTYs,
+executables, shell-local values and running background jobs.
+
+The parent observed the causal RED at `55a00f6c`: the real sidebar rendered the
+source and destination but the cross-space insertion line never appeared.
+At `c27207b0`, the native regression and existing reorder suite passed 22/22
+(4.941s tests / 5.824s total). A separate owned real-native PTY witness exercised
+all five placements successfully (4.400s), including process cleanup.
+The fixture focuses Main before clicking its header to collapse it: an unfocused
+header click only focuses that space. Split comparisons intentionally exclude
+viewport-dependent rectangles, which can change asynchronously on native attach.
+No human session, installation or publication is part of this verification.

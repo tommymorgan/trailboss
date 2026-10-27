@@ -218,7 +218,7 @@ impl Drag {
                 press.pointer.0,
                 press.pointer.1,
             )
-            .map(|(_, r)| r);
+            .map(|(_, _, r)| r);
             if self.indicator.is_none() {
                 return self.cancel();
             }
@@ -255,7 +255,7 @@ impl Drag {
                 x,
                 y,
             )
-            .map(|(_, r)| r)
+            .map(|(_, _, r)| r)
         } else {
             None
         };
@@ -300,7 +300,26 @@ impl Drag {
             x,
             y,
         )
-        .and_then(|(before, _)| move_request(snapshot, &press.action.context, before));
+        .and_then(|(destination, before, _)| {
+            if Some(destination) == press.action.context.workspace_id.as_deref() {
+                move_request(snapshot, &press.action.context, before)
+            } else {
+                let tab = press.action.context.tab_id.as_deref()?;
+                let mut params = json!({"tab_id":tab,"workspace_id":destination});
+                if let Some(before) = before {
+                    let index = snapshot
+                        .tabs
+                        .iter()
+                        .filter(|tab| tab.workspace_id == destination)
+                        .position(|tab| tab.tab_id == before)?;
+                    params["insert_index"] = json!(index);
+                }
+                Some(MoveRequest {
+                    method: "tab.transfer",
+                    params,
+                })
+            }
+        });
         Release {
             movement,
             click: None,
@@ -324,6 +343,73 @@ impl Drag {
     }
 }
 
+fn cross_space_target<'a>(
+    core: &Core,
+    declarations: &Declarations,
+    viewport: Rect,
+    list_offset: u16,
+    snapshot: &'a ClientShellSnapshot,
+    source: &Context,
+    x: u16,
+    y: u16,
+) -> Option<(&'a str, Option<&'a str>, Rect)> {
+    source.tab_id.as_ref()?;
+    let mut hovered = false;
+    let mut result = None;
+    let mut trailing = None;
+    rows(
+        core,
+        declarations,
+        viewport,
+        list_offset,
+        &mut |_, _, context, rect, menu| {
+            let contains = rect.contains(x, y);
+            hovered |= contains;
+            if context.workspace_id == source.workspace_id
+                || context.pane_id.is_some()
+                || !valid(snapshot, context)
+                || (menu && menus::menu_cell(rect) == Some(x))
+            {
+                return;
+            }
+            let Some(destination) = context
+                .workspace_id
+                .as_deref()
+                .and_then(|id| workspace(snapshot, id))
+            else {
+                return;
+            };
+            let before = context
+                .tab_id
+                .as_deref()
+                .and_then(|id| snapshot.tabs.iter().find(|tab| tab.tab_id == id));
+            let line = Rect { height: 1, ..rect };
+            if contains {
+                result = Some((
+                    destination.workspace_id.as_str(),
+                    before.map(|tab| tab.tab_id.as_str()),
+                    line,
+                ));
+            }
+            if let Some(tab) = before {
+                if snapshot
+                    .tabs
+                    .iter()
+                    .rev()
+                    .find(|tab| tab.workspace_id == destination.workspace_id)
+                    .is_some_and(|last| last.tab_id == tab.tab_id)
+                    && y == rect.y.saturating_add(rect.height)
+                    && x >= rect.x
+                    && x < rect.x.saturating_add(rect.width)
+                {
+                    trailing = Some((destination.workspace_id.as_str(), None, Rect { y, ..line }));
+                }
+            }
+        },
+    );
+    result.or_else(|| (!hovered).then_some(trailing).flatten())
+}
+
 // Slots are derived from live declaration rows, never labels or plugin names.
 fn target<'a>(
     core: &Core,
@@ -334,7 +420,7 @@ fn target<'a>(
     source: &Context,
     x: u16,
     y: u16,
-) -> Option<(Option<&'a str>, Rect)> {
+) -> Option<(&'a str, Option<&'a str>, Rect)> {
     let pane = super::surface_rect(core, declarations, viewport)?;
     if x < viewport.x
         || x >= pane.x
@@ -343,9 +429,23 @@ fn target<'a>(
     {
         return None;
     }
-    let space = source.workspace_id.as_deref()?;
+    let space = workspace(snapshot, source.workspace_id.as_deref()?)?
+        .workspace_id
+        .as_str();
     if source.tab_id.is_none() && !root(snapshot, space) {
         return None;
+    }
+    if let Some(target) = cross_space_target(
+        core,
+        declarations,
+        viewport,
+        list_offset,
+        snapshot,
+        source,
+        x,
+        y,
+    ) {
+        return Some(target);
     }
     let mut best: Option<(u16, Option<&str>, Rect)> = None;
     let mut first = u16::MAX;
@@ -448,7 +548,7 @@ fn target<'a>(
             best = Some((distance, next, line));
         }
     }
-    best.map(|(_, before, line)| (before, line))
+    best.map(|(_, before, line)| (space, before, line))
 }
 
 pub fn move_request(
