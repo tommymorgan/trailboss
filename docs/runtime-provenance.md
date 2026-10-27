@@ -777,3 +777,25 @@ The fixture focuses Main before clicking its header to collapse it: an unfocused
 header click only focuses that space. Split comparisons intentionally exclude
 viewport-dependent rectangles, which can change asynchronously on native attach.
 No human session, installation or publication is part of this verification.
+
+### T13 viewed and background native focus
+
+`executable_pty_sidebar_transfer_preserves_viewed_and_background_panes` covers
+Build's second split pane being viewed and Diagnostics in Logs being viewed
+while Build moves in the background. Real native keyboard input before and after
+the mouse gesture reads the original shell-local value and shell PID, writes
+them to an isolated file and produces a fresh non-echo marker in the terminal
+surface. The test also checks TerminalID and the authoritative focused space,
+tab and pane. Both branches already passed with T12 and the Core focus policy;
+no production change was needed.
+
+The parent observed the initial honest GREEN at `1d89ce0c` (1/1, 1.836s tests /
+2.713s total). An owned throwaway mutation disabling `follows_view` failed
+causally: post-transfer native input reached a different shell rather than the
+original second pane (0.896s tests / 1.157s total). Restored behavior passed
+1/1 (1.815s tests / 7.731s total). The candidate's complete native agent-tree and
+reorder suites passed 23/23 (4.963s tests / 5.196s total), with Rustfmt and strict
+Clippy passing. An independent owned native witness passed both focus branches
+(1.716s operation / 1.735s total), retained all three original shell PIDs/start
+times, PTYs and TerminalIDs, and asserted cleanup; its mutated counterpart
+failed to render the post-transfer marker in the intended view.

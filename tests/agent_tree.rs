@@ -1497,3 +1497,158 @@ fn executable_pty_transfers_split_tab_to_each_cross_space_drop_slot() {
         );
     }
 }
+
+#[test]
+fn executable_pty_sidebar_transfer_preserves_viewed_and_background_panes() {
+    fn native_input(
+        console: &mut LiveConsole,
+        core: &Core,
+        case: &str,
+        stage: &str,
+        expected: &str,
+    ) {
+        let marker = format!("NATIVE-{stage}-{case}");
+        console.writer.write_all(format!(
+            "printf '%s %s\\n' \"$native_view\" \"$$\" > native-view-{stage}; printf '%s%s\\n' 'NATIVE-{stage}-' '{case}'\r"
+        ).as_bytes()).unwrap();
+        console.writer.flush().unwrap();
+        console.wait(|_, screen| {
+            screen.screen_text_rows().unwrap().iter().any(|row| {
+                row.cells
+                    .iter()
+                    .skip(30)
+                    .flat_map(|cell| cell.graphemes.iter())
+                    .filter_map(|ch| char::from_u32(*ch))
+                    .collect::<String>()
+                    .contains(&marker)
+            })
+        });
+        assert_eq!(
+            std::fs::read_to_string(core.home.join(format!("native-view-{stage}")))
+                .unwrap()
+                .trim(),
+            format!(
+                "{expected} {}",
+                std::fs::read_to_string(core.home.join(format!("native-ready-{expected}")))
+                    .unwrap()
+                    .trim()
+            ),
+            "{case}: native input reached a different pane"
+        );
+    }
+    for case in ["viewed", "background"] {
+        let core = Core::new();
+        let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+        let source = tools["workspace"]["workspace_id"].as_str().unwrap();
+        let build = tools["tab"]["tab_id"].as_str().unwrap();
+        let first = tools["root_pane"]["pane_id"].as_str().unwrap();
+        core.request("tab.rename", json!({"tab_id":build,"label":"Build"}));
+        let split = core.request(
+            "pane.split",
+            json!({"target_pane_id":first,"direction":"right","ratio":0.37,"cwd":core.home}),
+        );
+        let second = split["pane"]["pane_id"].as_str().unwrap();
+        core.request(
+            "tab.create",
+            json!({"workspace_id":source,"label":"Remaining","cwd":core.home}),
+        );
+        let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+        let destination = main["workspace"]["workspace_id"].as_str().unwrap();
+        let logs = core.request("workspace.create", json!({"label":"Logs","cwd":core.home}));
+        let diagnostics = logs["root_pane"]["pane_id"].as_str().unwrap();
+        core.request(
+            "tab.rename",
+            json!({"tab_id":logs["tab"]["tab_id"],"label":"Diagnostics"}),
+        );
+        for (pane, value) in [
+            (first, "first"),
+            (second, "second"),
+            (diagnostics, "diagnostics"),
+        ] {
+            core.request(
+                "pane.send_text",
+                json!({"pane_id":pane,"text":format!(
+                    "native_view={value}; printf '%s\\n' \"$$\" > native-ready-{value}\n"
+                )}),
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while ["first", "second", "diagnostics"].iter().any(|value| {
+            !std::fs::read_to_string(core.home.join(format!("native-ready-{value}")))
+                .is_ok_and(|text| text.ends_with('\n'))
+        }) {
+            assert!(
+                Instant::now() < deadline,
+                "view fixture shells did not initialize"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (viewed, expected) = if case == "viewed" {
+            (second, "second")
+        } else {
+            (diagnostics, "diagnostics")
+        };
+        core.request("pane.focus", json!({"pane_id":viewed}));
+        let before = core.request("pane.get", json!({"pane_id":viewed}))["pane"].clone();
+        core.request("plugin.link",json!({"path":format!("{}/plugins/agent-tree",env!("CARGO_MANIFEST_DIR")),"enabled":true}));
+        let mut console = LiveConsole::new_for_tab(&core, source, build);
+        let rows = console.wait(|rows, _| {
+            ["Build", "Main", "Diagnostics"]
+                .iter()
+                .all(|label| rows.iter().any(|row| row.contains(label)))
+        });
+        native_input(&mut console, &core, case, "BEFORE", expected);
+        let build_row = rows.iter().position(|row| row.contains("Build")).unwrap();
+        let main_row = rows
+            .iter()
+            .position(|row| row.trim_start().starts_with("Main"))
+            .unwrap();
+        console
+            .writer
+            .write_all(
+                format!("\x1b[<0;5;{}M\x1b[<32;5;{}M", build_row + 1, main_row + 1).as_bytes(),
+            )
+            .unwrap();
+        console.writer.flush().unwrap();
+        console.wait(|rows, _| rows[main_row].contains("────────────────────"));
+        console
+            .writer
+            .write_all(format!("\x1b[<0;5;{}m", main_row + 1).as_bytes())
+            .unwrap();
+        console.writer.flush().unwrap();
+        console.wait(|rows, _| {
+            !rows[main_row].contains("────────────────────")
+                && core.request("pane.get", json!({"pane_id":second}))["pane"]["workspace_id"]
+                    == destination
+        });
+        native_input(&mut console, &core, case, "AFTER", expected);
+        let current = core.request("pane.get", json!({"pane_id":viewed}))["pane"].clone();
+        assert_eq!(
+            current["terminal_id"], before["terminal_id"],
+            "{case}: viewed terminal changed"
+        );
+        let expected_space = if case == "viewed" {
+            destination
+        } else {
+            logs["workspace"]["workspace_id"].as_str().unwrap()
+        };
+        assert_eq!(current["workspace_id"], expected_space);
+        let snapshot = core.request("session.snapshot", json!({}));
+        assert_eq!(
+            snapshot["snapshot"]["focused_workspace_id"], expected_space,
+            "{case}: focused space changed"
+        );
+        assert_eq!(
+            snapshot["snapshot"]["focused_pane_id"], current["pane_id"],
+            "{case}: focused pane changed"
+        );
+        assert_eq!(
+            snapshot["snapshot"]["focused_tab_id"], current["tab_id"],
+            "{case}: focused tab changed"
+        );
+        assert_eq!(
+            core.request("pane.layout", json!({"pane_id":viewed}))["layout"]["focused_pane_id"],
+            current["pane_id"]
+        );
+    }
+}
