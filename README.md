@@ -74,6 +74,13 @@ close, including across a supported live Core handoff. Existing shell and agent
 environment variables are not rewritten. A handoff carrying these aliases
 requires the replacement Core to acknowledge their restoration before taking
 ownership; an alias-unaware replacement is rejected without committing the handoff.
+On Linux, the importing Core also recovers a missing inherited locator from the
+live shell attached to each imported PTY. It verifies the shell's terminal
+session and process identity, preserves existing locators, and leaves ambiguous
+or unreadable identities unresolved. This recovery does not rewrite environment
+variables or restart shells or agents; other platforms retain normal alias
+preservation without this Linux process-environment recovery.
+
 Ordinary shutdown and restart restore the moved tab's destination, order, layout,
 labels and selected pane, without recreating an emptied source space. This cold
 restore starts new shell processes; it does not preserve running jobs or agents.

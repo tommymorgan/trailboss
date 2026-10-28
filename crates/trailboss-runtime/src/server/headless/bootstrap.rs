@@ -232,6 +232,12 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
     let event_hub = api::EventHub::default();
     let server_stop = crate::server::shutdown::ServerStop::default();
 
+    let public_alias_count = received
+        .manifest
+        .panes
+        .iter()
+        .map(|pane| pane.public_pane_aliases.len())
+        .sum();
     let mut imports = HashMap::new();
     for (pane, fd) in received.manifest.panes.into_iter().zip(received.fds) {
         let pane_id = pane.pane_id;
@@ -258,10 +264,9 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             &received.manifest.snapshot,
             &mut imports,
         )?;
-        crate::server::handoff::report_restored(
-            &mut received.stream,
-            app.state.public_pane_id_aliases.len(),
-        )?;
+        // Acknowledge the aliases the source sent, not additional locators
+        // recovered from owned runtimes during import.
+        crate::server::handoff::report_restored(&mut received.stream, public_alias_count)?;
         if std::env::var("TRAILBOSS_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("after_restored") {
             return Err(io::Error::other(
                 "test handoff import failure after restored",

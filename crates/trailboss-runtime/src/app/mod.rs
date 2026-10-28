@@ -735,7 +735,18 @@ impl App {
             app.plugin_installation_cleanup_allowed = false;
         }
         let mut public_aliases = std::collections::HashMap::new();
+        #[cfg(target_os = "linux")]
+        let mut inherited_aliases = std::collections::HashMap::<String, Option<u32>>::new();
         for (&old_pane_id, import) in imports.iter_mut() {
+            #[cfg(target_os = "linux")]
+            if let Some(alias) =
+                crate::platform::inherited_pane_id_for_pty(import.state.child_pid, import.master_fd)
+            {
+                inherited_aliases
+                    .entry(alias)
+                    .and_modify(|owner| *owner = None)
+                    .or_insert(Some(old_pane_id));
+            }
             for alias in std::mem::take(&mut import.state.public_pane_aliases) {
                 if public_aliases.insert(alias, old_pane_id).is_some() {
                     return Err(io::Error::other("duplicate handoff public pane alias"));
@@ -776,6 +787,26 @@ impl App {
                 ));
             }
             app.state.public_pane_id_aliases.insert(alias, pane_id);
+        }
+        #[cfg(target_os = "linux")]
+        for (alias, owner) in inherited_aliases {
+            let Some(old_pane_id) = owner else {
+                continue;
+            };
+            let valid = alias.rsplit_once(":p").is_some_and(|(workspace, number)| {
+                !workspace.is_empty()
+                    && !workspace.contains(':')
+                    && crate::workspace::decode_public_number(number).is_some_and(|n| n > 0)
+            });
+            let pane_id = app
+                .state
+                .pane_id_aliases
+                .get(&old_pane_id)
+                .copied()
+                .unwrap_or_else(|| crate::layout::PaneId::from_raw(old_pane_id));
+            if valid && app.find_pane(pane_id).is_some() && app.parse_pane_id(&alias).is_none() {
+                app.state.public_pane_id_aliases.insert(alias, pane_id);
+            }
         }
         // Aliases retain public workspace identities even after their source
         // workspace was emptied and removed by a tab transfer.

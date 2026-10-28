@@ -1375,6 +1375,186 @@ fn same_space_transfers_reorder_with_stable_ids_and_silent_noops() {
     }
 }
 
+fn core_with_missing_inherited_locator() -> Core {
+    use std::os::unix::fs::PermissionsExt;
+    let name = format!(
+        "ir-{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let home = std::env::temp_dir().join(&name);
+    std::fs::create_dir_all(&home).unwrap();
+    let shell = home.join("inherited-shell");
+    std::fs::write(
+        &shell,
+        "#!/bin/sh\nif [ -d \"$HOME/stale-all-shells\" ] || rmdir \"$HOME/stale-next-shell\" 2>/dev/null; then\n export HERDR_PANE_ID=wJ:p1\nfi\nprintf '%s\\n' started > \"$HOME/first-shell.started\"\nexec /bin/sh\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        home.join("config.toml"),
+        format!("[terminal]\ndefault_shell = '{}'\n", shell.display()),
+    )
+    .unwrap();
+    let core = Core::launch(home, name);
+    wait_for_file(&core.home.join("first-shell.started"));
+    std::fs::create_dir(core.home.join("stale-next-shell")).unwrap();
+    core
+}
+
+#[test]
+fn missing_inherited_locator_recovers_lifecycle_on_its_owned_runtime_after_handoff() {
+    let core = core_with_missing_inherited_locator();
+    let _stop_owner = StopOwner(
+        core.home
+            .join(format!("trailboss/sessions/{}/trailboss.sock", core.name)),
+    );
+    let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
+    let original = tools["root_pane"]["pane_id"].as_str().unwrap();
+    core.request(
+        "pane.send_text",
+        json!({"pane_id":original,"text":format!(
+            "HERDR_AGENT=omp python3 '{}/tests/support/stale_pane_reporter.py' '{}'\n",
+            env!("CARGO_MANIFEST_DIR"), core.home.display()
+        )}),
+    );
+    let ready: Value =
+        serde_json::from_str(&wait_for_file(&core.home.join("reporter.ready"))).unwrap();
+    assert_eq!(ready["locator"], "wJ:p1");
+    let shell_pid = ready["shell_pid"].as_u64().unwrap().to_string();
+    let reporter_pid = ready["pid"].as_u64().unwrap().to_string();
+    let shell_identity = process_identity(&shell_pid);
+    let reporter_identity = process_identity(&reporter_pid);
+    let detected = Instant::now() + Duration::from_secs(5);
+    while core.request("pane.get", json!({"pane_id":original}))["pane"]["agent"] != "omp" {
+        assert!(Instant::now() < detected, "owned reporter was not detected");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let main = core.request("workspace.create", json!({"label":"Main","cwd":core.home}));
+    let decoy = main["root_pane"]["pane_id"].as_str().unwrap();
+    let transfer = core.request(
+        "tab.transfer",
+        json!({
+            "tab_id":tools["tab"]["tab_id"],
+            "workspace_id":main["workspace"]["workspace_id"]
+        }),
+    );
+    let destination = transfer["transfer"]["panes"][0]["pane_id"]
+        .as_str()
+        .unwrap();
+    core.request("pane.focus", json!({"pane_id":decoy}));
+    let decoy_before = core.request("pane.get", json!({"pane_id":decoy}))["pane"].clone();
+    core.request(
+        "server.live_handoff",
+        json!({"import_exe":support::executable()}),
+    );
+    for state in ["working", "idle"] {
+        std::fs::write(core.home.join(format!("{state}.go")), "").unwrap();
+        let replies: Value =
+            serde_json::from_str(&wait_for_file(&core.home.join(format!("{state}.reply"))))
+                .unwrap();
+        for reply in replies.as_array().unwrap() {
+            assert_eq!(
+                reply["result"]["type"], "ok",
+                "inherited lifecycle report was rejected after handoff: {reply}"
+            );
+        }
+        let applied = Instant::now() + Duration::from_secs(5);
+        let pane = loop {
+            let pane = core.request("pane.get", json!({"pane_id":destination}))["pane"].clone();
+            if pane["agent_status"] == state && pane["agent_session"]["value"] == "retained-session"
+            {
+                break pane;
+            }
+            assert!(
+                Instant::now() < applied,
+                "lifecycle did not settle on its owned pane: {pane}; resolved locator: {}",
+                core.request("pane.get", json!({"pane_id":"wJ:p1"}))
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(pane["pane_id"], destination);
+        assert_eq!(pane["workspace_id"], main["workspace"]["workspace_id"]);
+        assert_eq!(
+            pane["agent_status"], state,
+            "lifecycle state was not applied: {pane}"
+        );
+        assert_eq!(pane["agent_session"]["value"], "retained-session");
+        let focused = core.request("pane.get", json!({"pane_id":decoy}))["pane"].clone();
+        assert_eq!(focused["focused"], true);
+        assert_eq!(focused["agent_status"], decoy_before["agent_status"]);
+        assert_eq!(focused["agent_session"], decoy_before["agent_session"]);
+        assert_eq!(process_identity(&shell_pid), shell_identity);
+        assert_eq!(process_identity(&reporter_pid), reporter_identity);
+    }
+    assert_eq!(
+        core.request("pane.get", json!({"pane_id":"wJ:p1"}))["pane"]["pane_id"],
+        destination
+    );
+    std::fs::write(core.home.join("reporter.done"), "").unwrap();
+}
+
+#[test]
+fn ambiguous_inherited_locator_does_not_choose_a_runtime_after_handoff() {
+    let core = core_with_missing_inherited_locator();
+    let socket = core
+        .home
+        .join(format!("trailboss/sessions/{}/trailboss.sock", core.name));
+    let _stop_owner = StopOwner(socket.clone());
+    std::fs::create_dir(core.home.join("stale-all-shells")).unwrap();
+    let mut panes = Vec::new();
+    for index in 0..2 {
+        let workspace = core.request(
+            "workspace.create",
+            json!({"label":format!("Owner{index}"),"cwd":core.home}),
+        );
+        let pane = workspace["root_pane"]["pane_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        core.request(
+            "pane.send_text",
+            json!({"pane_id":pane,"text":format!(
+                "printf '%s\\n' \"$HERDR_PANE_ID\" > duplicate-{index}.ready\n"
+            )}),
+        );
+        assert_eq!(
+            wait_for_file(&core.home.join(format!("duplicate-{index}.ready"))).trim(),
+            "wJ:p1"
+        );
+        panes.push(pane);
+    }
+    core.request(
+        "server.live_handoff",
+        json!({"import_exe":support::executable()}),
+    );
+    let mut wire = BufReader::new(UnixStream::connect(socket).unwrap());
+    wire.get_mut()
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    writeln!(
+        wire.get_mut(),
+        "{}",
+        json!({
+            "id":"ambiguous-owner","method":"pane.get","params":{"pane_id":"wJ:p1"}
+        })
+    )
+    .unwrap();
+    let mut line = String::new();
+    wire.read_line(&mut line).unwrap();
+    let reply: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(reply["id"], "ambiguous-owner");
+    assert_eq!(reply["error"]["code"], "pane_not_found", "{reply}");
+    for pane in panes {
+        assert_eq!(
+            core.request("pane.get", json!({"pane_id":pane}))["pane"]["pane_id"],
+            pane
+        );
+    }
+}
+
 #[test]
 fn inherited_pane_context_survives_transfer_and_live_handoff_until_close() {
     let core = Core::new();
