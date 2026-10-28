@@ -21,6 +21,7 @@ impl App {
         command: Vec<String>,
         context: &PluginInvocationContext,
         event_json: Option<String>,
+        arguments: Option<&str>,
     ) -> Result<PluginCommandLogInfo, (&'static str, String)> {
         let mut prepared = prepare_plugin_command(
             plugin,
@@ -29,6 +30,7 @@ impl App {
             action_id.as_ref(),
             event.as_ref(),
             event_json.as_deref(),
+            arguments,
         )?;
         let log_id = format!("plugin-log-{}", self.state.next_plugin_command_log_id);
         self.state.next_plugin_command_log_id += 1;
@@ -145,6 +147,7 @@ impl App {
                     startup.command,
                     &context,
                     None,
+                    None,
                 );
             }
         }
@@ -195,6 +198,7 @@ impl App {
                     hook.command.clone(),
                     &context,
                     event_json.clone(),
+                    None,
                 );
             }
         }
@@ -251,6 +255,7 @@ pub(super) fn prepare_plugin_command(
     action_id: Option<&String>,
     event: Option<&String>,
     event_json: Option<&str>,
+    arguments: Option<&str>,
 ) -> Result<std::process::Command, (&'static str, String)> {
     let Some(program) = command.first() else {
         return Err((
@@ -322,6 +327,13 @@ pub(super) fn prepare_plugin_command(
         &args,
         std::path::Path::new(&plugin.plugin_root),
     );
+    if let Some(arguments) = arguments {
+        let encoded = serde_json::to_string(arguments)
+            .map_err(|err| ("invalid_plugin_arguments", err.to_string()))?;
+        command.env("HERDR_PLUGIN_ARGUMENTS_JSON", encoded);
+    } else {
+        command.env_remove("HERDR_PLUGIN_ARGUMENTS_JSON");
+    }
     command
         .envs(env)
         .stdout(Stdio::piped())

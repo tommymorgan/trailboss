@@ -60,6 +60,10 @@ pub struct Client {
     pub declarations: Option<Vec<(String, protocol::widgets::Declaration)>>,
     pub primary: Option<Surface>,
     pub snapshot: Option<protocol::ClientShellSnapshot>,
+    pub command_ui: Option<protocol::endpoint::EndpointPluginUi>,
+    pending_ui: Option<protocol::endpoint::EndpointPluginUi>,
+    projection_pair: Option<(String, u64)>,
+    argument_capability: bool,
 }
 fn error(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
@@ -153,6 +157,10 @@ impl Client {
             workspace_id: None,
             focused_pane_id: None,
             focused_tab_id: None,
+            command_ui: None,
+            pending_ui: None,
+            projection_pair: None,
+            argument_capability: false,
             boot_id: String::new(),
             declarations: None,
             primary: None,
@@ -306,6 +314,15 @@ impl Client {
                 self.project();
             }
             ServerMessage::EndpointControl { kind, data }
+                if kind == protocol::endpoint::ENDPOINT_WELCOME_KIND =>
+            {
+                let welcome: protocol::endpoint::EndpointServerWelcome =
+                    serde_json::from_str(&data).map_err(error)?;
+                self.argument_capability = welcome.capabilities.iter().any(|capability| {
+                    capability == protocol::endpoint::PLUGIN_ACTION_ARGUMENTS_CAPABILITY
+                });
+            }
+            ServerMessage::EndpointControl { kind, data }
                 if kind == protocol::endpoint::PLUGIN_UI_KIND =>
             {
                 let ui: protocol::endpoint::EndpointPluginUi =
@@ -314,12 +331,7 @@ impl Client {
                     "client.declarations.receive",
                     format_args!("revision={}", ui.revision),
                 );
-                self.declarations = Some(
-                    ui.ui
-                        .into_iter()
-                        .filter_map(|item| item.declaration.map(|tree| (item.plugin_id, tree)))
-                        .collect(),
-                );
+                self.pending_ui = Some(ui);
             }
             ServerMessage::EndpointControl { kind, data }
                 if kind == protocol::endpoint::ENDPOINT_SNAPSHOT_KIND =>
@@ -335,11 +347,12 @@ impl Client {
                 self.focused_tab_id.clone_from(&s.focused_tab_id);
                 self.workspace_id.clone_from(&s.focused_workspace_id);
                 self.focused_pane_id.clone_from(&s.focused_pane_id);
+                self.projection_pair = Some((s.boot_id.clone(), s.revision));
                 self.snapshot = Some(s);
             }
             message @ ServerMessage::ClientShellEndpointResponseChunk { .. }
                 if matches!(&message, ServerMessage::ClientShellEndpointResponseChunk { request_id, .. }
-                    if request_id.starts_with("tab-cycle-") || request_id.starts_with("tab-transfer-")) =>
+                    if request_id.starts_with("tab-cycle-") || request_id.starts_with("tab-transfer-") || request_id.starts_with("widget-action-") || request_id.starts_with("argument-log-")) =>
             {
                 self.endpoint_response = Some(message);
             }
@@ -354,6 +367,29 @@ impl Client {
             }
             _ => {}
         }
+        if self.pending_ui.as_ref().is_some_and(|ui| {
+            self.projection_pair
+                .as_ref()
+                .is_some_and(|(boot, revision)| *boot == ui.boot_id && *revision == ui.revision)
+        }) {
+            let mut ui = self.pending_ui.take().expect("paired projection");
+            if !self.argument_capability {
+                for item in &mut ui.ui {
+                    item.command_inputs.clear();
+                }
+            }
+            self.declarations = Some(
+                ui.ui
+                    .iter()
+                    .filter_map(|item| {
+                        item.declaration
+                            .clone()
+                            .map(|tree| (item.plugin_id.clone(), tree))
+                    })
+                    .collect(),
+            );
+            self.command_ui = Some(ui);
+        }
         Ok(())
     }
     fn reset_boot(&mut self, boot: &str) {
@@ -362,6 +398,9 @@ impl Client {
             self.primary = None;
             self.surface_changed = true;
             self.graphics_messages.clear();
+            self.command_ui = None;
+            self.pending_ui = None;
+            self.projection_pair = None;
         }
     }
     fn project(&mut self) {
@@ -486,7 +525,9 @@ impl Input {
             core::Effect::Request { method, params } => {
                 self.dispatch_request(core, boot_id, method, params)
             }
-            core::Effect::Plugin => self.invoke(boot_id, plugin, action, context),
+            core::Effect::Plugin => self
+                .invoke(boot_id, plugin, action, context, None)
+                .map(|_| ()),
         }
     }
     pub fn dispatch_request(
@@ -561,13 +602,17 @@ impl Input {
         plugin_id: &str,
         action: &str,
         context: &protocol::widgets::Context,
-    ) -> io::Result<()> {
+        arguments: Option<&str>,
+    ) -> io::Result<u64> {
         self.next_action_id += 1;
-        let request = serde_json::json!({ "id": format!("widget-action-{}", self.next_action_id), "method": "plugin.action.invoke", "params": {
+        let mut request = serde_json::json!({ "id": format!("widget-action-{}", self.next_action_id), "method": "plugin.action.invoke", "params": {
             "plugin_id": plugin_id, "action_id": action, "context": {
                 "workspace_id": context.workspace_id, "tab_id": context.tab_id, "pane_id": context.pane_id, "invocation_source": "plugin_ui"
             }
         }});
+        if let Some(arguments) = arguments {
+            request["params"]["arguments"] = serde_json::json!(arguments);
+        }
         protocol::write_message(
             &mut self.stream,
             &ClientMessage::ClientShellEndpointRequest {
@@ -575,7 +620,8 @@ impl Input {
                 request: request.to_string(),
             },
         )
-        .map_err(error)
+        .map_err(error)?;
+        Ok(self.next_action_id)
     }
     pub fn request(
         &mut self,
@@ -593,6 +639,22 @@ impl Input {
             },
         )
         .map_err(error)
+    }
+    pub fn request_argument_log(
+        &mut self,
+        boot_id: &str,
+        params: serde_json::Value,
+    ) -> io::Result<u64> {
+        self.next_action_id += 1;
+        let id = self.next_action_id;
+        let request = serde_json::json!({
+            "id":format!("argument-log-{id}"), "method":"plugin.log.list", "params":params,
+        });
+        self.send(&ClientMessage::ClientShellEndpointRequest {
+            boot_id: boot_id.to_owned(),
+            request: request.to_string(),
+        })?;
+        Ok(id)
     }
     pub fn request_tab_transfer(
         &mut self,
@@ -926,6 +988,10 @@ mod tests {
                 declarations: None,
                 primary: None,
                 snapshot: None,
+                command_ui: None,
+                pending_ui: None,
+                projection_pair: None,
+                argument_capability: false,
             },
             peer,
         )

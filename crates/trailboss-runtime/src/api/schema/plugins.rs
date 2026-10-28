@@ -254,9 +254,21 @@ pub struct PluginManifestStartup {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PluginArgumentInput {
+    RawTail,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginManifestAction {
     pub id: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_input: Option<PluginArgumentInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -394,6 +406,8 @@ pub struct PluginLogListParams {
 pub struct PluginActionInvokeParams {
     pub action_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<PluginInvocationContext>,
@@ -513,6 +527,10 @@ pub enum UiCommandTarget {
 pub struct UiCommandInfo {
     pub key: UiCommandKey,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_input: Option<PluginArgumentInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub contexts: Vec<PluginActionContext>,
@@ -527,6 +545,10 @@ pub struct PluginActionInfo {
     pub plugin_id: String,
     pub action_id: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_input: Option<PluginArgumentInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -144,7 +144,7 @@ impl App {
             let mut context = self.current_plugin_context("plugin-ui-stream");
             context.invocation_source = Some("plugin_ui_stream".to_string());
             let prepared = super::runtime::prepare_plugin_command(
-                &plugin, command, &context, None, None, None,
+                &plugin, command, &context, None, None, None, None,
             );
             let prepared = match prepared {
                 Ok(command) => command,
@@ -443,6 +443,7 @@ impl App {
         action_id: &str,
         action_command: &[String],
         context: &PluginInvocationContext,
+        arguments: Option<&str>,
     ) -> Option<Result<PluginCommandLogInfo, (&'static str, String)>> {
         if !plugin
             .ui
@@ -469,13 +470,16 @@ impl App {
             Ok(log) => log,
             Err(err) => return Some(Err(err)),
         };
-        let mut line = serde_json::json!({
+        let mut envelope = serde_json::json!({
             "herdr": "action",
             "id": log.log_id,
             "action_id": action_id,
             "context": context,
-        })
-        .to_string();
+        });
+        if let Some(arguments) = arguments {
+            envelope["arguments"] = serde_json::Value::String(arguments.to_owned());
+        }
+        let mut line = envelope.to_string();
         line.push('\n');
         forward.insert_pending(&log.log_id);
         tracing::info!(
@@ -612,7 +616,8 @@ impl App {
             };
             let mut context = self.current_plugin_context("plugin-ui-refresh");
             context.invocation_source = Some("plugin_ui_refresh".to_string());
-            let started = self.start_plugin_command(&plugin, None, None, command, &context, None);
+            let started =
+                self.start_plugin_command(&plugin, None, None, command, &context, None, None);
             self.state.plugin_ui_refresh_dirty.remove(&key);
             match started {
                 Ok(log) => {
@@ -727,6 +732,7 @@ fn try_parse_plugin_ui_rows(
             return Ok(Vec::new());
         }
         return Ok(vec![EndpointPluginUiItem {
+            command_inputs: Vec::new(),
             plugin_id: plugin_id.to_owned(),
             ui_id: ui_id.to_owned(),
             declaration: Some(declaration),
@@ -754,6 +760,7 @@ fn try_parse_plugin_ui_rows(
                 action.starts_with("host:") || actions.iter().any(|declared| &declared.id == action)
             });
             Some(EndpointPluginUiItem {
+                command_inputs: Vec::new(),
                 declaration: None,
                 plugin_id: plugin_id.to_string(),
                 ui_id: ui_id.to_string(),
@@ -1115,6 +1122,7 @@ command = ["sh", "-c", "printf '[{\"title\":\"%s\"}]\\n' \"$$\"; exec sleep 30"]
             vec!["true".into()],
             &context,
             None,
+            None,
         )
         .unwrap();
         let completed = next_stream_event(&mut app.event_rx).await;
@@ -1223,6 +1231,8 @@ command = ["sh", "-c", "printf '[{\"title\":\"%s\"}]\\n' \"$$\"; exec sleep 30"]
 
     fn action(id: &str) -> PluginManifestAction {
         PluginManifestAction {
+            argument_input: None,
+            argument_hint: None,
             id: id.to_string(),
             title: id.to_string(),
             description: None,

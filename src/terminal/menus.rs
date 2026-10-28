@@ -142,6 +142,7 @@ pub enum Response {
     Consumed,
     Invoke(Action),
     Prepare(Action),
+    Arguments(Action, Option<String>),
 }
 #[derive(Default)]
 pub struct Controls {
@@ -662,6 +663,34 @@ impl Controls {
             return response;
         }
         if let Some(interaction) = &self.interaction {
+            if interaction.arguments {
+                if core.argument_finished || !core.argument_editing {
+                    self.interaction = None;
+                    return Response::Consumed;
+                }
+                return match key.code {
+                    KeyCode::Esc => {
+                        self.interaction = None;
+                        Response::Invoke(Action {
+                            plugin: "trailboss.core".into(),
+                            action: "host:cancel".into(),
+                            context: Context::default(),
+                        })
+                    }
+                    KeyCode::Enter if core.argument_pending.is_none() => Response::Arguments(
+                        Action {
+                            plugin: interaction.plugin.clone(),
+                            action: interaction.selected_action().to_owned(),
+                            context: interaction.context.clone(),
+                        },
+                        Some(core.input_text.clone()),
+                    ),
+                    KeyCode::Char(_) | KeyCode::Backspace if core.argument_pending.is_none() => {
+                        Response::Pass
+                    }
+                    _ => Response::Consumed,
+                };
+            }
             let dialog = super::modals::from_tree(
                 core,
                 declarations,

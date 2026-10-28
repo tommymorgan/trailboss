@@ -54,6 +54,10 @@ struct RawPluginManifestAction {
     id: String,
     title: String,
     #[serde(default)]
+    argument_input: Option<crate::api::schema::PluginArgumentInput>,
+    #[serde(default)]
+    argument_hint: Option<String>,
+    #[serde(default)]
     description: Option<String>,
     #[serde(default)]
     confirmation_fragment: Option<String>,
@@ -534,6 +538,8 @@ fn normalize_manifest_action(
     let platforms = normalize_platforms(action.platforms)?;
     let command = normalize_command(action.command)?;
     Ok(PluginManifestAction {
+        argument_input: action.argument_input,
+        argument_hint: action.argument_hint,
         id,
         title,
         description,

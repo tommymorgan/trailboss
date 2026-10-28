@@ -346,6 +346,7 @@ fn run_client_inner(
     );
     let mut surface = client.primary.take();
     let mut declarations = client.declarations.take().unwrap_or_default();
+    core.command_ui = client.command_ui.take();
     let mut boot_id = client.boot_id.clone();
     let mut snapshot = client.snapshot.take();
     if let Some(snapshot) = &snapshot {
@@ -400,6 +401,7 @@ fn run_client_inner(
                     std::mem::take(&mut client.graphics_messages),
                     std::mem::take(&mut client.surface_changed),
                     client.endpoint_response.take(),
+                    client.command_ui.take(),
                 );
                 trailboss_runtime::render_prof::trace(
                     "client.update.send_start",
@@ -494,8 +496,12 @@ fn run_client_inner(
                 next_graphics,
                 surface_changed,
                 endpoint_response,
+                command_ui,
             ) = update?;
             if boot_id != next_boot {
+                core.command_ui = None;
+                core.argument_editing = false;
+                core.clear_argument_invocation();
                 core.clear_tab_history();
                 core.clear_tab_transfer();
                 core.prefix_active = false;
@@ -515,6 +521,9 @@ fn run_client_inner(
             if let Some(next) = next_declarations {
                 declarations = next;
             }
+            if let Some(ui) = command_ui {
+                core.command_ui = Some(ui);
+            }
             if let Some((workspace, tab, pane)) = session {
                 input.focus_pane_target(pane.as_deref().unwrap_or_default());
                 if surface
@@ -531,6 +540,7 @@ fn run_client_inner(
             }
             if let Some(response) = endpoint_response.as_ref() {
                 core.tab_transfer_response(response, &next_boot, Instant::now());
+                core.argument_response(response, &next_boot, Instant::now());
             }
             if let Some(
                 trailboss_runtime::protocol::ServerMessage::ClientShellEndpointResponseChunk {
@@ -568,6 +578,14 @@ fn run_client_inner(
             boot_id = next_boot;
             dirty = true;
         }
+        let had_argument_error = core.argument_error.is_some();
+        if let Some(params) = core.argument_log_query(Instant::now()) {
+            match input.request_argument_log(&boot_id, params) {
+                Ok(id) => core.argument_log_requested(id, Instant::now()),
+                Err(_) => core.argument_observation_failed(),
+            }
+        }
+        dirty |= !had_argument_error && core.argument_error.is_some();
         dirty |= core.tick_tab_cycle(Instant::now());
         if let Some(surface) = &surface {
             renderer
@@ -1238,6 +1256,65 @@ fn apply_menu_response(
     match response {
         terminal::menus::Response::Pass => Ok(false),
         terminal::menus::Response::Consumed => Ok(true),
+        terminal::menus::Response::Arguments(action, arguments) => {
+            if core.argument_pending.is_some() {
+                return Ok(true);
+            }
+            let valid_target = snapshot.is_some_and(|snapshot| {
+                snapshot.boot_id == boot_id
+                    && action.context.workspace_id.as_ref().is_none_or(|id| {
+                        snapshot
+                            .workspaces
+                            .iter()
+                            .any(|workspace| &workspace.workspace_id == id)
+                    })
+                    && action
+                        .context
+                        .tab_id
+                        .as_ref()
+                        .is_none_or(|id| snapshot.tabs.iter().any(|tab| &tab.tab_id == id))
+                    && action
+                        .context
+                        .pane_id
+                        .as_ref()
+                        .is_none_or(|id| snapshot.panes.iter().any(|pane| &pane.pane_id == id))
+            });
+            if !valid_target || (core.argument_editing && core.argument_invalid) {
+                core.argument_invalid = true;
+                return Ok(true);
+            }
+            if !core.argument_editing {
+                core.argument_editing = true;
+                core.argument_context = Some(action.context.clone());
+                core.argument_invalid = false;
+                core.input_text.clear();
+            }
+            if let Some(arguments) = arguments {
+                let id = input.invoke(
+                    boot_id,
+                    &action.plugin,
+                    &action.action,
+                    &action.context,
+                    Some(&arguments),
+                )?;
+                core.begin_argument_invocation(
+                    boot_id,
+                    id,
+                    &action.plugin,
+                    &action.action,
+                    Instant::now(),
+                );
+            } else {
+                core.clear_argument_invocation();
+                core.argument_editing = true;
+                core.argument_finished = false;
+                core.argument_error = None;
+                core.input_text.clear();
+                core.argument_context = Some(action.context.clone());
+                core.argument_invalid = false;
+            }
+            Ok(true)
+        }
         terminal::menus::Response::Prepare(action) => {
             match core.prepare_palette(&action.action, &action.context) {
                 trailboss::core::Effect::Consumed => {}
@@ -1245,7 +1322,13 @@ fn apply_menu_response(
                     input.dispatch_request(core, boot_id, method, params)?
                 }
                 trailboss::core::Effect::Plugin => {
-                    input.invoke(boot_id, &action.plugin, &action.action, &action.context)?
+                    input.invoke(
+                        boot_id,
+                        &action.plugin,
+                        &action.action,
+                        &action.context,
+                        None,
+                    )?;
                 }
             }
             Ok(true)
@@ -1257,7 +1340,13 @@ fn apply_menu_response(
                     input.dispatch_request(core, boot_id, method, params)?;
                 }
                 trailboss::core::Effect::Plugin => {
-                    input.invoke(boot_id, &action.plugin, &action.action, &action.context)?;
+                    input.invoke(
+                        boot_id,
+                        &action.plugin,
+                        &action.action,
+                        &action.context,
+                        None,
+                    )?;
                 }
             }
             Ok(true)

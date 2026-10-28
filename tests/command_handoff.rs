@@ -1,3 +1,5 @@
+#[path = "support/command_arguments_lifecycle.rs"]
+mod argument_lifecycle;
 #[path = "support/console.rs"]
 mod console;
 mod support;
@@ -397,6 +399,7 @@ fn existing_input_handoffs_core_names_and_confirmations_keep_captured_targets() 
                         &submit.plugin,
                         &submit.action,
                         &submit.context,
+                        None,
                     )
                     .unwrap();
             }
@@ -694,7 +697,13 @@ fn existing_input_handoffs_real_plugin_owner_pane_reuses_ordinary_interaction() 
             client
                 .input()
                 .unwrap()
-                .invoke(&client.boot_id, "fixture.input-owner", "ask-name", &target)
+                .invoke(
+                    &client.boot_id,
+                    "fixture.input-owner",
+                    "ask-name",
+                    &target,
+                    None,
+                )
                 .unwrap();
         } else {
             let declarations = client.declarations.as_ref().unwrap();
@@ -749,6 +758,7 @@ fn existing_input_handoffs_real_plugin_owner_pane_reuses_ordinary_interaction() 
                     &selected.plugin,
                     &selected.action,
                     &selected.context,
+                    None,
                 )
                 .unwrap();
         }
@@ -1360,13 +1370,20 @@ fn cancelling_existing_plugin_owner_flow_discards_draft_on_both_entry_routes() {
                     &selected.plugin,
                     &selected.action,
                     &selected.context,
+                    None,
                 )
                 .unwrap();
         } else {
             client
                 .input()
                 .unwrap()
-                .invoke(&client.boot_id, "fixture.input-owner", "ask-name", &target)
+                .invoke(
+                    &client.boot_id,
+                    "fixture.input-owner",
+                    "ask-name",
+                    &target,
+                    None,
+                )
                 .unwrap();
         }
         let deadline = Instant::now() + Duration::from_secs(8);
@@ -1857,6 +1874,7 @@ fn unavailable_open_selection_disappears_without_activating_a_neighbor_or_replac
                         &selected.plugin,
                         &selected.action,
                         &selected.context,
+                        None,
                     )
                     .unwrap();
                 await_receipts(&replacement.join("executed.jsonl"), 2);
@@ -2057,6 +2075,7 @@ fn reordered_duplicate_commands_keep_the_selected_owner_and_captured_resource() 
                     &selected.plugin,
                     &selected.action,
                     &selected.context,
+                    None,
                 )
                 .unwrap();
             let deadline = Instant::now() + Duration::from_secs(8);
@@ -2100,6 +2119,7 @@ fn reordered_duplicate_commands_keep_the_selected_owner_and_captured_resource() 
             &selected.plugin,
             &selected.action,
             &selected.context,
+            None,
         )
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
@@ -2490,6 +2510,7 @@ fn discovered_owner_rows_hide_missing_captured_resources_without_authorizing_man
                 &selected.plugin,
                 &selected.action,
                 &selected.context,
+                None,
             )
             .unwrap();
         let receipt = roots[1].join("executed.jsonl");
@@ -3214,6 +3235,10 @@ fn discovered_display_identity(
             "action":action.action,"context":action.context}),
         Response::Prepare(action) => json!({"response":"Prepare","owner":action.plugin,
             "action":action.action,"context":action.context}),
+        Response::Arguments(action, arguments) => {
+            json!({"response":"Arguments","owner":action.plugin,
+            "action":action.action,"context":action.context,"arguments":arguments})
+        }
     };
     // Search using the visible safe text, not the original control bytes or the
     // hidden long-title suffix. Both rows match, so text cannot be identity.
@@ -3287,6 +3312,7 @@ fn discovered_display_identity(
             &selected.plugin,
             &selected.action,
             &selected.context,
+            None,
         )
         .unwrap();
     let receipt = owner.join("executed.jsonl");
@@ -3328,4 +3354,783 @@ fn discovered_display_identity(
         );
         assert_eq!(command["key"], expected_key);
     }
+}
+
+#[test]
+fn fuzzy_tab_arguments_execute_one_real_owner_operation_on_the_captured_target() {
+    let core = support::Core::new();
+    let captured = core.request(
+        "workspace.create",
+        json!({"label":"Arg target","cwd":core.home,"focus":true}),
+    );
+    let owner = core.home.join("argument-owner");
+    std::fs::create_dir_all(&owner).unwrap();
+    std::fs::write(
+        owner.join("trailboss-plugin.toml"),
+        r#"id = "fixture.argument-owner"
+name = "Argument owner"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+[[actions]]
+id = "pr-followup"
+title = "omp: pr-followup"
+contexts = ["pane"]
+argument_input = { kind = "raw_tail" }
+argument_hint = "<pull-request> [note]"
+command = ["python3", "invoke.py"]
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        owner.join("invoke.py"),
+        r#"import json, os, socket
+tail = json.loads(os.environ["HERDR_PLUGIN_ARGUMENTS_JSON"])
+assert isinstance(tail, str)
+context = json.loads(os.environ["HERDR_PLUGIN_CONTEXT_JSON"])
+request = {"id": "argument-owner", "method": "tab.create", "params": {
+    "workspace_id": context["workspace_id"], "label": "Arguments[" + tail + "]", "focus": False}}
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+    connection.connect(os.environ["HERDR_SOCKET_PATH"])
+    connection.sendall((json.dumps(request) + "\n").encode())
+    response = connection.makefile("rb").readline()
+    assert "error" not in json.loads(response), response
+"#,
+    )
+    .unwrap();
+    core.request("plugin.link", json!({"path":owner,"enabled":true}));
+    for plugin in ["stock-ui", "sidebar-menus", "command-palette"] {
+        link(&core, plugin);
+    }
+    let before = core.request("session.snapshot", json!({}));
+    let mut console = console::Console::new(&core);
+    console.wait(|screen| screen.iter().any(|line| line.contains("Arg target")));
+    console.text("\x1bOP");
+    console.text("ompprf");
+    console.wait(|screen| screen.iter().any(|line| line.contains("omp: pr-followup")));
+    console.text("\t");
+    console.wait(|screen| {
+        screen.iter().any(|line| line.contains("omp: pr-followup"))
+            && screen
+                .iter()
+                .any(|line| line.contains("<pull-request> [note]"))
+    });
+    assert_eq!(
+        core.request("session.snapshot", json!({}))["snapshot"]["tabs"],
+        before["snapshot"]["tabs"],
+        "accepting the fuzzy result must not invoke the owner"
+    );
+    console.text("42  \"review note\" café");
+    console.wait(|screen| screen.iter().any(|line| line.contains("review note")));
+    assert_eq!(
+        core.request("session.snapshot", json!({}))["snapshot"]["tabs"],
+        before["snapshot"]["tabs"],
+        "editing arguments must not invoke the owner"
+    );
+    console.text("\r");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let snapshot = core.request("session.snapshot", json!({}));
+        let created: Vec<_> = snapshot["snapshot"]["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|tab| tab["label"] == "Arguments[42  \"review note\" café]")
+            .collect();
+        if !created.is_empty() {
+            assert_eq!(created.len(), 1, "one Enter must perform one operation");
+            assert_eq!(
+                created[0]["workspace_id"], captured["workspace"]["workspace_id"],
+                "the owner must use the destination captured by the native palette"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "native argument submission did not perform the owner operation; snapshot={snapshot}; logs={}",
+            core.request("plugin.log.list", json!({"limit":10}))
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn raw_arguments_in_later_owner_items_open_and_execute_through_the_native_palette() {
+    for ordinary_ui_first in [true, false] {
+        let core = support::Core::new();
+        let captured = core.request(
+            "workspace.create",
+            json!({"label":"Later","cwd":core.home,"focus":true}),
+        );
+        let owner = core.home.join("later-argument-owner");
+        std::fs::create_dir_all(&owner).unwrap();
+        let mut manifest = String::from(
+            "id = \"fixture.later-arguments\"\nname = \"Later arguments\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n",
+        );
+        if ordinary_ui_first {
+            manifest.push_str(
+                "[[ui]]\nid = \"ordinary\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"publish.py\"]\nstream = true\n",
+            );
+            std::fs::write(
+                owner.join("publish.py"),
+                "import json,sys\nprint(json.dumps({'herdr':'widget_tree','version':1,'zones':[],'fragments':[{'name':'fixture.later-arguments.ordinary','priority':0,'tree':{'type':'label','text':'Ordinary owner UI','role':'label'}}]}),flush=True)\nfor line in sys.stdin: pass\n",
+            )
+            .unwrap();
+        } else {
+            for index in 0..128 {
+                manifest.push_str(&format!(
+                    "[[actions]]\nid = \"a{index:03}\"\ntitle = \"Legacy decoy {index:03}\"\ncontexts = [\"pane\"]\ncommand = [\"python3\", \"invoke.py\"]\n",
+                ));
+            }
+        }
+        manifest.push_str(
+            "[[actions]]\nid = \"create\"\ntitle = \"Later raw create\"\ncontexts = [\"pane\"]\nargument_input = { kind = \"raw_tail\" }\nargument_hint = \"<exact tail>\"\ncommand = [\"python3\", \"invoke.py\"]\n",
+        );
+        std::fs::write(owner.join("trailboss-plugin.toml"), manifest).unwrap();
+        std::fs::write(
+            owner.join("invoke.py"),
+            r#"import json, os, socket
+assert os.environ["HERDR_PLUGIN_ACTION_ID"] == "create"
+tail = json.loads(os.environ["HERDR_PLUGIN_ARGUMENTS_JSON"])
+assert isinstance(tail, str)
+context = json.loads(os.environ["HERDR_PLUGIN_CONTEXT_JSON"])
+request = {"id": "later-owner", "method": "tab.create", "params": {
+    "workspace_id": context["workspace_id"], "label": "Later[" + tail + "]", "focus": False}}
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+    connection.connect(os.environ["HERDR_SOCKET_PATH"])
+    connection.sendall((json.dumps(request) + "\n").encode())
+    response = connection.makefile("rb").readline()
+    assert "error" not in json.loads(response), response
+"#,
+        )
+        .unwrap();
+        core.request("plugin.link", json!({"path":owner,"enabled":true}));
+        for plugin in ["stock-ui", "sidebar-menus", "command-palette"] {
+            link(&core, plugin);
+        }
+        let catalog = core.request("ui.command.list", json!({}));
+        let target_fragment = catalog["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| {
+                command["key"]
+                    == json!({"kind":"plugin","plugin_id":"fixture.later-arguments","action_id":"create"})
+            })
+            .unwrap()["fragment_name"]
+            .as_str()
+            .unwrap();
+        // Require the real endpoint projection to exhibit the trigger before
+        // starting the PTY: the selected capability is not in the first item.
+        let mut client = core.attach();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            if let Some(ui) = &client.command_ui {
+                let items: Vec<_> = ui
+                    .ui
+                    .iter()
+                    .filter(|item| item.plugin_id == "fixture.later-arguments")
+                    .collect();
+                if let Some(target_index) = items.iter().position(|item| {
+                    item.command_inputs
+                        .iter()
+                        .any(|input| input.fragment_name == target_fragment)
+                }) {
+                    if ordinary_ui_first
+                        && !items
+                            .iter()
+                            .any(|item| item.ui_id == "ordinary" && item.declaration.is_some())
+                    {
+                        assert!(
+                            Instant::now() < deadline,
+                            "ordinary UI did not publish before the generated command"
+                        );
+                        client.receive().unwrap();
+                        continue;
+                    }
+                    assert_eq!(items.len(), 2, "fixture must publish two owner items");
+                    assert_eq!(target_index, 1, "capability must be in the later item");
+                    assert!(items[0].command_inputs.is_empty());
+                    if ordinary_ui_first {
+                        assert_eq!(items[0].ui_id, "ordinary");
+                    } else {
+                        assert_eq!(
+                            items[0].declaration.as_ref().unwrap().fragments.len(),
+                            128,
+                            "target must follow a full generated command chunk"
+                        );
+                    }
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Core did not publish the required later-item argument capability"
+            );
+            client.receive().unwrap();
+        }
+        let before = core.request("session.snapshot", json!({}));
+        let mut console = console::Console::new(&core);
+        console.wait(|screen| screen.iter().any(|line| line.contains("Later")));
+        for (accept_first, tail) in [(true, "42  \"review note\" café"), (false, "")] {
+            console.text("\x1bOP");
+            console.text("Later raw create");
+            console.wait(|screen| screen.iter().any(|line| line.contains("Later raw create")));
+            if accept_first {
+                console.text("\t");
+                console.wait(|screen| {
+                    !screen.iter().any(|line| line.contains("Commands"))
+                        && screen.iter().any(|line| line.contains("<exact tail>"))
+                });
+                console.text(tail);
+                console.wait(|screen| screen.iter().any(|line| line.contains("review note")));
+                assert_eq!(
+                    core.request("session.snapshot", json!({}))["snapshot"]["tabs"],
+                    before["snapshot"]["tabs"],
+                    "accepting and editing must not invoke the owner"
+                );
+            }
+            console.text("\r");
+            let label = format!("Later[{tail}]");
+            console.wait(|_| {
+                core.request("session.snapshot", json!({}))["snapshot"]["tabs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tab| tab["label"] == label)
+            });
+            let snapshot = core.request("session.snapshot", json!({}));
+            let created: Vec<_> = snapshot["snapshot"]["tabs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|tab| {
+                    tab["label"]
+                        .as_str()
+                        .is_some_and(|label| label.starts_with("Later["))
+                })
+                .collect();
+            assert_eq!(created.len(), if accept_first { 1 } else { 2 });
+            assert_eq!(
+                created.iter().filter(|tab| tab["label"] == label).count(),
+                1,
+                "one Enter must perform one real owner operation"
+            );
+            assert!(created
+                .iter()
+                .all(|tab| { tab["workspace_id"] == captured["workspace"]["workspace_id"] }));
+        }
+    }
+}
+
+// A missing hint is intentional: acceptance must still open an editable tail,
+// and neither entry route may synthesize a placeholder as the owner's value.
+fn raw_argument_edge_owner(core: &support::Core) {
+    let owner = core.home.join("argument-edge-owner");
+    std::fs::create_dir_all(&owner).unwrap();
+    std::fs::write(
+        owner.join("trailboss-plugin.toml"),
+        r#"id = "fixture.argument-edge"
+name = "Argument edge owner"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+[[actions]]
+id = "create"
+title = "Argument edge create"
+contexts = ["pane"]
+argument_input = { kind = "raw_tail" }
+command = ["python3", "invoke.py"]
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        owner.join("invoke.py"),
+        r#"import json, os, socket
+tail = json.loads(os.environ["HERDR_PLUGIN_ARGUMENTS_JSON"])
+assert isinstance(tail, str)
+context = json.loads(os.environ["HERDR_PLUGIN_CONTEXT_JSON"])
+request = {"id": "argument-edge", "method": "tab.create", "params": {
+    "workspace_id": context["workspace_id"], "label": "Edge[" + tail + "]", "focus": False}}
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+    connection.connect(os.environ["HERDR_SOCKET_PATH"])
+    connection.sendall((json.dumps(request) + "\n").encode())
+    response = connection.makefile("rb").readline()
+    assert "error" not in json.loads(response), response
+"#,
+    )
+    .unwrap();
+    core.request("plugin.link", json!({"path":owner,"enabled":true}));
+    for plugin in ["stock-ui", "sidebar-menus", "command-palette"] {
+        link(core, plugin);
+    }
+}
+
+fn search_raw_argument_edge(console: &mut console::Console) {
+    console.text("\x1bOP");
+    console.text("Argument edge create");
+    console.wait(|screen| {
+        screen.iter().any(|line| line.contains("Commands"))
+            && screen
+                .iter()
+                .any(|line| line.contains("Argument edge create"))
+    });
+}
+
+fn edge_tabs(core: &support::Core) -> Vec<Value> {
+    core.request("session.snapshot", json!({}))["snapshot"]["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|tab| {
+            tab["label"]
+                .as_str()
+                .is_some_and(|label| label.starts_with("Edge["))
+        })
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn raw_argument_direct_enter_and_accepted_empty_each_execute_an_explicit_empty_tail() {
+    for accept_first in [false, true] {
+        let core = support::Core::new();
+        let captured = core.request(
+            "workspace.create",
+            json!({"label":"Empty target","cwd":core.home,"focus":true}),
+        );
+        raw_argument_edge_owner(&core);
+        let mut console = console::Console::new(&core);
+        console.wait(|screen| screen.iter().any(|line| line.contains("Empty target")));
+        search_raw_argument_edge(&mut console);
+        if accept_first {
+            console.text("\t");
+            console.wait(|screen| {
+                !screen.iter().any(|line| line.contains("Commands"))
+                    && screen
+                        .iter()
+                        .any(|line| line.contains("Argument edge create"))
+            });
+            assert!(edge_tabs(&core).is_empty(), "Tab invoked the owner");
+            // Exercise the real editor, then erase to empty. This catches a
+            // missing-hint placeholder accidentally becoming the raw value.
+            let draft = "empty-editor-probe";
+            console.text(draft);
+            console.wait(|screen| screen.iter().any(|line| line.contains(draft)));
+            console.text(&"\x7f".repeat(draft.len()));
+            console.wait(|screen| !screen.iter().any(|line| line.contains(draft)));
+        }
+        console.text("\r");
+        console.wait(|_| !edge_tabs(&core).is_empty());
+        let tabs = edge_tabs(&core);
+        assert_eq!(tabs.len(), 1, "entry route submitted more than once");
+        assert_eq!(tabs[0]["label"], "Edge[]");
+        assert_eq!(
+            tabs[0]["workspace_id"],
+            captured["workspace"]["workspace_id"]
+        );
+    }
+}
+
+#[test]
+fn escaping_raw_arguments_discards_the_tail_before_a_fresh_owner_submission() {
+    let core = support::Core::new();
+    core.request(
+        "workspace.create",
+        json!({"label":"Escape target","cwd":core.home,"focus":true}),
+    );
+    raw_argument_edge_owner(&core);
+    let mut console = console::Console::new(&core);
+    console.wait(|screen| screen.iter().any(|line| line.contains("Escape target")));
+    search_raw_argument_edge(&mut console);
+    console.text("\t");
+    console.wait(|screen| {
+        !screen.iter().any(|line| line.contains("Commands"))
+            && screen
+                .iter()
+                .any(|line| line.contains("Argument edge create"))
+    });
+    console.text("discarded-tail");
+    console.wait(|screen| screen.iter().any(|line| line.contains("discarded-tail")));
+    console.text("\x1b");
+    console.wait(|screen| {
+        !screen
+            .iter()
+            .any(|line| line.contains("Argument edge create"))
+    });
+    assert!(edge_tabs(&core).is_empty(), "Escape invoked the owner");
+    search_raw_argument_edge(&mut console);
+    console.text("\r");
+    console.wait(|_| !edge_tabs(&core).is_empty());
+    let tabs = edge_tabs(&core);
+    assert_eq!(
+        tabs.len(),
+        1,
+        "cancelled draft performed an owner operation"
+    );
+    assert_eq!(
+        tabs[0]["label"], "Edge[]",
+        "a fresh search inherited cancelled input"
+    );
+}
+
+#[test]
+fn invalidating_raw_argument_owner_or_target_never_retargets_another_pane() {
+    for remove_target in [false, true] {
+        let core = support::Core::new();
+        let captured = core.request(
+            "workspace.create",
+            json!({"label":"Stale target","cwd":core.home,"focus":true}),
+        );
+        let survivor = core.request(
+            "tab.create",
+            json!({"workspace_id":captured["workspace"]["workspace_id"],"label":"Survivor","focus":false}),
+        );
+        raw_argument_edge_owner(&core);
+        let mut console = console::Console::new(&core);
+        console.wait(|screen| screen.iter().any(|line| line.contains("Stale target")));
+        search_raw_argument_edge(&mut console);
+        console.text("\t");
+        console.wait(|screen| {
+            !screen.iter().any(|line| line.contains("Commands"))
+                && screen
+                    .iter()
+                    .any(|line| line.contains("Argument edge create"))
+        });
+        console.text("stale-tail");
+        console.wait(|screen| screen.iter().any(|line| line.contains("stale-tail")));
+        if remove_target {
+            core.request("tab.close", json!({"tab_id":captured["tab"]["tab_id"]}));
+        } else {
+            core.request(
+                "plugin.disable",
+                json!({"plugin_id":"fixture.argument-edge"}),
+            );
+        }
+        core.request(
+            "workspace.rename",
+            json!({"workspace_id":captured["workspace"]["workspace_id"],"label":"Changed"}),
+        );
+        // Observe a later Core update before testing the invalidated draft.
+        console.wait(|screen| screen.iter().any(|line| line.contains("Changed")));
+        console.text("\r\x1b");
+        console.wait(|screen| {
+            !screen
+                .iter()
+                .any(|line| line.contains("Argument edge create"))
+        });
+        // A fresh palette is an input-processing barrier after the stale Enter.
+        // It must remain usable, without resurrecting the removed draft.
+        console.text("\x1bOP");
+        console.wait(|screen| screen.iter().any(|line| line.contains("Commands")));
+        assert!(
+            edge_tabs(&core).is_empty(),
+            "stale draft invoked or retargeted the owner"
+        );
+        assert!(
+            core.request("tab.get", json!({"tab_id":survivor["tab"]["tab_id"]}))["tab"].is_object()
+        );
+    }
+}
+
+#[test]
+fn accepted_raw_arguments_keep_the_captured_workspace_after_core_focus_changes() {
+    let core = support::Core::new();
+    let captured = core.request(
+        "workspace.create",
+        json!({"label":"Captured edge","cwd":core.home,"focus":true}),
+    );
+    raw_argument_edge_owner(&core);
+    let mut console = console::Console::new(&core);
+    console.wait(|screen| screen.iter().any(|line| line.contains("Captured edge")));
+    search_raw_argument_edge(&mut console);
+    console.text("\t");
+    console.wait(|screen| {
+        !screen.iter().any(|line| line.contains("Commands"))
+            && screen
+                .iter()
+                .any(|line| line.contains("Argument edge create"))
+    });
+    let elsewhere = core.request(
+        "workspace.create",
+        json!({"label":"Other edge","cwd":core.home,"focus":true}),
+    );
+    core.request("tab.focus", json!({"tab_id":elsewhere["tab"]["tab_id"]}));
+    // Core focus is not this PTY client's local focus. The owner must still
+    // use its captured context rather than consulting Core's current target.
+    console.text("captured-destination");
+    console.wait(|screen| {
+        screen
+            .iter()
+            .any(|line| line.contains("captured-destination"))
+    });
+    console.text("\r");
+    console.wait(|_| !edge_tabs(&core).is_empty());
+    let tabs = edge_tabs(&core);
+    assert_eq!(tabs.len(), 1);
+    assert_eq!(tabs[0]["label"], "Edge[captured-destination]");
+    assert_eq!(
+        tabs[0]["workspace_id"],
+        captured["workspace"]["workspace_id"]
+    );
+    assert_ne!(
+        tabs[0]["workspace_id"],
+        elsewhere["workspace"]["workspace_id"]
+    );
+}
+
+// These owners perform a real resource operation; their independent identities
+// remain observable even when both public command titles are identical.
+fn raw_navigation_owners(core: &support::Core, same_title: bool) -> Vec<String> {
+    for (owner, title) in [
+        ("fixture.raw-blue", "Raw choice Blue"),
+        ("fixture.raw-red", "Raw choice Rose"),
+    ] {
+        let directory = core.home.join(owner);
+        std::fs::create_dir_all(&directory).unwrap();
+        let title = if same_title {
+            "Twin raw command"
+        } else {
+            title
+        };
+        std::fs::write(
+            directory.join("trailboss-plugin.toml"),
+            format!(
+                "id = {owner:?}\nname = \"Raw navigation owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n\
+                 [[actions]]\nid = \"create\"\ntitle = {title:?}\ncontexts = [\"pane\"]\nargument_input = {{ kind = \"raw_tail\" }}\nargument_hint = \"<owner tail>\"\ncommand = [\"python3\", \"invoke.py\"]\n"
+            ),
+        ).unwrap();
+        std::fs::write(
+            directory.join("invoke.py"),
+            r#"import json, os, socket
+tail = json.loads(os.environ["HERDR_PLUGIN_ARGUMENTS_JSON"])
+assert isinstance(tail, str)
+context = json.loads(os.environ["HERDR_PLUGIN_CONTEXT_JSON"])
+owner = os.environ["HERDR_PLUGIN_ID"]
+request = {"id": "raw-navigation", "method": "tab.create", "params": {
+    "workspace_id": context["workspace_id"], "label": owner + "[" + tail + "]", "focus": False}}
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+    connection.connect(os.environ["HERDR_SOCKET_PATH"])
+    connection.sendall((json.dumps(request) + "\n").encode())
+    response = connection.makefile("rb").readline()
+    assert "error" not in json.loads(response), response
+"#,
+        )
+        .unwrap();
+        core.request("plugin.link", json!({"path":directory,"enabled":true}));
+    }
+    let catalog = core.request("ui.command.list", json!({}));
+    ["fixture.raw-blue", "fixture.raw-red"]
+        .iter()
+        .map(|owner| {
+            catalog["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|command| {
+                    command["key"]["plugin_id"] == *owner && command["key"]["action_id"] == "create"
+                })
+                .unwrap()["fragment_name"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect()
+}
+
+fn raw_navigation_tabs(core: &support::Core) -> Vec<Value> {
+    core.request("session.snapshot", json!({}))["snapshot"]["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|tab| {
+            tab["label"]
+                .as_str()
+                .is_some_and(|label| label.starts_with("fixture.raw-"))
+        })
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn down_and_up_between_raw_commands_execute_only_the_command_accepted_with_tab() {
+    let core = support::Core::new();
+    let captured = core.request(
+        "workspace.create",
+        json!({"label":"Navigate","cwd":core.home,"focus":true}),
+    );
+    raw_navigation_owners(&core, false);
+    for plugin in ["stock-ui", "sidebar-menus", "command-palette"] {
+        link(&core, plugin);
+    }
+    let mut console = console::Console::new(&core);
+    console.wait(|screen| screen.iter().any(|line| line.contains("Navigate")));
+    for (movement, title, expected_owner, tail) in [
+        ("\x1b[B", "Raw choice Rose", "fixture.raw-red", "down"),
+        ("\x1b[B\x1b[A", "Raw choice Blue", "fixture.raw-blue", "up"),
+    ] {
+        let before = raw_navigation_tabs(&core);
+        console.text("\x1bOP");
+        console.text("Raw choice");
+        console.wait(|screen| {
+            screen.iter().any(|line| line.contains("Raw choice Blue"))
+                && screen.iter().any(|line| line.contains("Raw choice Rose"))
+        });
+        console.text(movement);
+        console.text("\t");
+        console.wait(|screen| {
+            !screen.iter().any(|line| line.contains("Commands"))
+                && screen.iter().any(|line| line.contains(title))
+                && screen.iter().any(|line| line.contains("<owner tail>"))
+        });
+        console.text(tail);
+        console.wait(|screen| screen.iter().any(|line| line.contains(tail)));
+        assert_eq!(
+            raw_navigation_tabs(&core),
+            before,
+            "navigation/Tab/edit invoked an owner"
+        );
+        console.text("\r");
+        let expected_label = format!("{expected_owner}[{tail}]");
+        console.wait(|_| {
+            raw_navigation_tabs(&core)
+                .iter()
+                .any(|tab| tab["label"] == expected_label)
+        });
+        let tabs = raw_navigation_tabs(&core);
+        assert_eq!(tabs.len(), before.len() + 1, "another owner also executed");
+        let created = tabs
+            .iter()
+            .find(|tab| tab["label"] == expected_label)
+            .unwrap();
+        assert_eq!(
+            created["workspace_id"],
+            captured["workspace"]["workspace_id"]
+        );
+    }
+}
+
+#[test]
+fn same_title_raw_occurrence_keeps_its_owner_and_target_when_declarations_reorder_after_tab() {
+    let core = support::Core::new();
+    let blue = core.request(
+        "workspace.create",
+        json!({"label":"Blue","cwd":core.home,"focus":false}),
+    );
+    let red = core.request(
+        "workspace.create",
+        json!({"label":"Red","cwd":core.home,"focus":false}),
+    );
+    let origin = core.request(
+        "workspace.create",
+        json!({"label":"Origin","cwd":core.home,"focus":true}),
+    );
+    let locators = raw_navigation_owners(&core, true);
+    let ordering = core.home.join("raw-occurrence-order");
+    std::fs::create_dir_all(&ordering).unwrap();
+    std::fs::write(
+        ordering.join("trailboss-plugin.toml"),
+        "id = \"fixture.raw-order\"\nname = \"Raw occurrence order\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n\
+         [[ui]]\nid = \"order\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"publish.py\"]\nstream = true\n",
+    ).unwrap();
+    std::fs::write(
+        ordering.join("publish.py"),
+        "import json,time\nprevious=None\nwhile True:\n try:\n  value=json.load(open('declaration.json'))\n  text=json.dumps(value)\n  if text!=previous:\n   print(text,flush=True)\n   previous=text\n except (OSError,ValueError): pass\n time.sleep(0.02)\n",
+    ).unwrap();
+    let publish = |reversed: bool| {
+        let mut branches: Vec<_> = [context(&blue), context(&red)]
+            .iter()
+            .zip(&locators)
+            .map(|(context, locator)| {
+                json!({
+                    "type":"row","context":context,
+                    "children":[{"type":"label","text":"Same target","role":"label"}],
+                    "menu":{"type":"column","children":[{"type":"use","name":locator}]}
+                })
+            })
+            .collect();
+        if reversed {
+            branches.reverse();
+        }
+        std::fs::write(
+            ordering.join("declaration.json"),
+            serde_json::to_vec(&json!({
+                "herdr":"widget_tree","version":1,"zones":[],
+                "fragments":[{"name":"command-palette","priority":10000,
+                    "tree":{"type":"column","children":branches}}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    publish(false);
+    core.request("plugin.link", json!({"path":ordering,"enabled":true}));
+    for plugin in ["stock-ui", "sidebar-menus"] {
+        link(&core, plugin);
+    }
+    let mut client = core.attach();
+    let native = NativeCore::default();
+    let wait_order = |client: &mut trailboss::Client, reversed: bool| {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            if let Some(declarations) = &client.declarations {
+                let actions = available(&native, declarations);
+                if actions.len() == 2 {
+                    let selected =
+                        matching(&actions, "fixture.raw-red", "create", &context(&red)).unwrap();
+                    if selected.3[0].1 == usize::from(!reversed) {
+                        return;
+                    }
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "ordered raw occurrences did not publish"
+            );
+            client.receive().unwrap();
+        }
+    };
+    wait_order(&mut client, false);
+    let mut console = console::Console::new(&core);
+    console.wait(|screen| screen.iter().any(|line| line.contains("Origin")));
+    console.text("\x1bOP");
+    console.text("Same target");
+    console.wait(|screen| {
+        screen
+            .iter()
+            .filter(|line| line.contains("Same target"))
+            .count()
+            >= 2
+    });
+    console.text("\x1b[B\t");
+    console.wait(|screen| {
+        !screen.iter().any(|line| line.contains("Commands"))
+            && screen.iter().any(|line| line.contains("<owner tail>"))
+    });
+    console.text("42  \"same title\" café");
+    console.wait(|screen| screen.iter().any(|line| line.contains("same title")));
+    publish(true);
+    wait_order(&mut client, true);
+    // This later Core event provides a visible PTY barrier after the reordered
+    // declaration has reached Core, without sleeps or private native hooks.
+    core.request(
+        "workspace.rename",
+        json!({
+            "workspace_id":origin["workspace"]["workspace_id"],"label":"Reordered"
+        }),
+    );
+    console.wait(|screen| {
+        screen.iter().any(|line| line.contains("Reordered"))
+            && screen.iter().any(|line| line.contains("same title"))
+    });
+    assert!(
+        raw_navigation_tabs(&core).is_empty(),
+        "reordering/editing invoked an owner"
+    );
+    console.text("\r");
+    console.wait(|_| !raw_navigation_tabs(&core).is_empty());
+    let tabs = raw_navigation_tabs(&core);
+    assert_eq!(tabs.len(), 1);
+    assert_eq!(tabs[0]["label"], "fixture.raw-red[42  \"same title\" café]");
+    assert_eq!(tabs[0]["workspace_id"], red["workspace"]["workspace_id"]);
+    assert_ne!(tabs[0]["workspace_id"], blue["workspace"]["workspace_id"]);
+    assert_ne!(tabs[0]["workspace_id"], origin["workspace"]["workspace_id"]);
 }

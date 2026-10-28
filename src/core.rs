@@ -35,6 +35,58 @@ struct EndpointNotice {
     message: String,
     deadline: Instant,
 }
+#[derive(Debug)]
+pub struct ArgumentInvocation {
+    boot: String,
+    invocation: u64,
+    plugin: String,
+    action: String,
+    phase: ArgumentPhase,
+}
+#[derive(Debug)]
+enum ArgumentPhase {
+    Acceptance {
+        response: Vec<u8>,
+        deadline: Instant,
+    },
+    Owner {
+        log: String,
+        next_poll: Instant,
+        limit: usize,
+        request: Option<ArgumentLogRequest>,
+    },
+    Unknown,
+}
+#[derive(Debug)]
+struct ArgumentLogRequest {
+    id: u64,
+    response: Vec<u8>,
+    deadline: Instant,
+}
+#[derive(serde::Deserialize)]
+struct ArgumentReply {
+    result: Option<ArgumentResult>,
+    error: Option<ArgumentFailure>,
+}
+#[derive(serde::Deserialize)]
+struct ArgumentFailure {
+    message: String,
+}
+#[derive(serde::Deserialize)]
+struct ArgumentResult {
+    log: Option<ArgumentLog>,
+    logs: Option<Vec<ArgumentLog>>,
+}
+// Deliberately ignore historical command/output payloads from plugin.log.list.
+#[derive(serde::Deserialize)]
+struct ArgumentLog {
+    log_id: String,
+    plugin_id: String,
+    action_id: Option<String>,
+    status: trailboss_runtime::api_schema::PluginCommandStatus,
+    exit_code: Option<i32>,
+    error: Option<String>,
+}
 #[derive(Default, Debug)]
 pub struct Core {
     interaction: Interaction,
@@ -57,6 +109,13 @@ pub struct Core {
     tab_transfer_request: Option<TabTransferRequest>,
     endpoint_notice: Option<EndpointNotice>,
     require_name: bool,
+    pub command_ui: Option<trailboss_runtime::protocol::endpoint::EndpointPluginUi>,
+    pub argument_editing: bool,
+    pub argument_pending: Option<ArgumentInvocation>,
+    pub argument_error: Option<String>,
+    pub argument_finished: bool,
+    pub argument_context: Option<Context>,
+    pub argument_invalid: bool,
 }
 pub enum Effect {
     Consumed,
@@ -64,6 +123,209 @@ pub enum Effect {
     Plugin,
 }
 impl Core {
+    pub fn clear_argument_invocation(&mut self) {
+        self.argument_pending = None;
+    }
+    pub fn begin_argument_invocation(
+        &mut self,
+        boot: &str,
+        id: u64,
+        plugin: &str,
+        action: &str,
+        now: Instant,
+    ) {
+        self.argument_pending = Some(ArgumentInvocation {
+            boot: boot.to_owned(),
+            invocation: id,
+            plugin: plugin.to_owned(),
+            action: action.to_owned(),
+            phase: ArgumentPhase::Acceptance {
+                response: Vec::new(),
+                deadline: now + Duration::from_secs(5),
+            },
+        });
+        self.argument_error = None;
+        self.argument_finished = false;
+    }
+    pub fn argument_observation_failed(&mut self) {
+        self.argument_unknown();
+    }
+    fn argument_unknown(&mut self) {
+        if let Some(pending) = &mut self.argument_pending {
+            pending.phase = ArgumentPhase::Unknown;
+        }
+        self.argument_error = Some("Owner outcome unknown; dismiss before submitting again".into());
+    }
+    pub fn argument_log_query(&mut self, now: Instant) -> Option<Value> {
+        let pending = self.argument_pending.as_mut()?;
+        match &mut pending.phase {
+            ArgumentPhase::Acceptance { deadline, .. } if now >= *deadline => {
+                self.argument_unknown();
+                None
+            }
+            ArgumentPhase::Owner {
+                request: Some(request),
+                ..
+            } if now >= request.deadline => {
+                self.argument_unknown();
+                None
+            }
+            ArgumentPhase::Owner {
+                next_poll,
+                limit,
+                request: None,
+                ..
+            } if now >= *next_poll => Some(json!({"plugin_id":pending.plugin,"limit":limit})),
+            _ => None,
+        }
+    }
+    pub fn argument_log_requested(&mut self, id: u64, now: Instant) {
+        if let Some(ArgumentInvocation {
+            phase: ArgumentPhase::Owner { request, .. },
+            ..
+        }) = &mut self.argument_pending
+        {
+            *request = Some(ArgumentLogRequest {
+                id,
+                response: Vec::new(),
+                deadline: now + Duration::from_secs(5),
+            });
+        }
+    }
+    pub fn argument_response(
+        &mut self,
+        response: &trailboss_runtime::protocol::ServerMessage,
+        boot: &str,
+        now: Instant,
+    ) {
+        use trailboss_runtime::api_schema::PluginCommandStatus;
+        let trailboss_runtime::protocol::ServerMessage::ClientShellEndpointResponseChunk {
+            boot_id,
+            request_id,
+            final_chunk,
+            data,
+        } = response
+        else {
+            return;
+        };
+        let Some(pending) = &mut self.argument_pending else {
+            return;
+        };
+        if boot_id != boot || pending.boot != boot {
+            return;
+        }
+        let acceptance = matches!(pending.phase, ArgumentPhase::Acceptance { .. });
+        let buffer = match &mut pending.phase {
+            ArgumentPhase::Acceptance { response, .. }
+                if request_id
+                    .strip_prefix("widget-action-")
+                    .and_then(|id| id.parse::<u64>().ok())
+                    == Some(pending.invocation) =>
+            {
+                response
+            }
+            ArgumentPhase::Owner {
+                request: Some(request),
+                ..
+            } if request_id
+                .strip_prefix("argument-log-")
+                .and_then(|id| id.parse::<u64>().ok())
+                == Some(request.id) =>
+            {
+                &mut request.response
+            }
+            _ => return,
+        };
+        buffer.extend_from_slice(data);
+        if !final_chunk {
+            return;
+        }
+        let reply = serde_json::from_slice::<ArgumentReply>(buffer);
+        buffer.clear();
+        let Ok(reply) = reply else {
+            self.argument_unknown();
+            return;
+        };
+        if let Some(mut error) = reply.error {
+            if acceptance {
+                self.argument_pending = None;
+                error.message.retain(|ch| !ch.is_control());
+                self.argument_error = Some(error.message);
+            } else {
+                self.argument_unknown();
+            }
+            return;
+        }
+        let Some(result) = reply.result else {
+            self.argument_unknown();
+            return;
+        };
+        let log = if acceptance {
+            result.log
+        } else {
+            let ArgumentPhase::Owner {
+                log,
+                limit,
+                next_poll,
+                request,
+                ..
+            } = &mut pending.phase
+            else {
+                return;
+            };
+            *request = None;
+            let logs = result.logs.unwrap_or_default();
+            let found = logs.into_iter().find(|entry| entry.log_id == *log);
+            if found.is_none() {
+                if *limit == 200 {
+                    self.argument_unknown();
+                    return;
+                }
+                *limit = (*limit * 2).min(200);
+                *next_poll = now + Duration::from_millis(250);
+                return;
+            }
+            found
+        };
+        let Some(log) = log else {
+            self.argument_unknown();
+            return;
+        };
+        if log.plugin_id != pending.plugin || log.action_id.as_deref() != Some(&pending.action) {
+            self.argument_unknown();
+            return;
+        }
+        match log.status {
+            PluginCommandStatus::Running => {
+                let limit = match &pending.phase {
+                    ArgumentPhase::Owner { limit, .. } => *limit,
+                    _ => 1,
+                };
+                pending.phase = ArgumentPhase::Owner {
+                    log: log.log_id,
+                    next_poll: now + Duration::from_millis(250),
+                    limit,
+                    request: None,
+                };
+            }
+            PluginCommandStatus::Failed => {
+                self.argument_pending = None;
+                let mut detail = log.error.unwrap_or_else(|| match log.exit_code {
+                    Some(code) => format!("Owner failed (exit {code})"),
+                    None => "Owner failed".into(),
+                });
+                detail.retain(|ch| !ch.is_control());
+                self.argument_error = Some(detail);
+            }
+            PluginCommandStatus::Succeeded => {
+                self.argument_pending = None;
+                self.argument_finished = true;
+                self.argument_context = None;
+                self.argument_editing = false;
+                self.input_text.clear();
+            }
+        }
+    }
     /// Acknowledges a dispatched copy request without retaining its payload.
     pub fn copy_dispatched(&mut self, now: Instant) {
         self.copy_feedback_deadline = Some(now + Duration::from_secs(2));
@@ -235,6 +497,21 @@ impl Core {
         &mut self,
         snapshot: &trailboss_runtime::protocol::ClientShellSnapshot,
     ) {
+        if let Some(context) = &self.argument_context {
+            self.argument_invalid |= context.workspace_id.as_ref().is_some_and(|id| {
+                !snapshot
+                    .workspaces
+                    .iter()
+                    .any(|workspace| &workspace.workspace_id == id)
+            }) || context
+                .tab_id
+                .as_ref()
+                .is_some_and(|id| !snapshot.tabs.iter().any(|tab| &tab.tab_id == id))
+                || context
+                    .pane_id
+                    .as_ref()
+                    .is_some_and(|id| !snapshot.panes.iter().any(|pane| &pane.pane_id == id));
+        }
         self.recent_tabs
             .retain(|id| snapshot.tabs.iter().any(|tab| &tab.tab_id == id));
         let selected = self
@@ -507,7 +784,7 @@ impl Core {
         })
     }
     pub fn editing(&self) -> bool {
-        self.interaction != Interaction::None
+        self.argument_editing || self.interaction != Interaction::None
     }
     /// Prepare a named command using the same interaction as native entrypoints.
     pub fn prepare_palette(&mut self, action: &str, context: &Context) -> Effect {
@@ -629,6 +906,12 @@ impl Core {
                 Effect::Consumed
             }
             CoreAction::Cancel => {
+                self.clear_argument_invocation();
+                self.argument_editing = false;
+                self.argument_finished = false;
+                self.argument_error = None;
+                self.argument_context = None;
+                self.argument_invalid = false;
                 self.interaction = Interaction::None;
                 self.input_text.clear();
                 Effect::Consumed
@@ -690,6 +973,16 @@ impl Core {
     }
     /// Returns None only when text belongs to the focused PTY.
     pub fn text(&mut self, text: &str) -> Option<Effect> {
+        if self.argument_editing {
+            if self.argument_pending.is_none() {
+                if text == "\x7f" || text == "\x08" {
+                    self.input_text.pop();
+                } else if text != "\r" && text != "\x1b" {
+                    self.input_text.push_str(text);
+                }
+            }
+            return Some(Effect::Consumed);
+        }
         if self.interaction == Interaction::None {
             return (!self.has_pane).then_some(Effect::Consumed);
         }
@@ -708,6 +1001,12 @@ impl Core {
     }
     /// Pasted control bytes must not submit, cancel, or erase an edit.
     pub fn paste(&mut self, text: &str) -> Option<Effect> {
+        if self.argument_editing {
+            if self.argument_pending.is_none() {
+                self.input_text.push_str(text);
+            }
+            return Some(Effect::Consumed);
+        }
         if self.interaction == Interaction::None {
             return (!self.has_pane).then_some(Effect::Consumed);
         }

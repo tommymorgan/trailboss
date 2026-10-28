@@ -90,7 +90,7 @@ fn assert_sidebar(fixture: &mut Fixture) {
     assert_eq!(action, "focus-tab");
     let mut input = fixture.client.input().unwrap();
     input
-        .invoke(&fixture.client.boot_id, plugin, action, context)
+        .invoke(&fixture.client.boot_id, plugin, action, context, None)
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     while fixture.client.focused_tab_id.as_deref() != Some(&fixture.selected_tab) {
@@ -431,7 +431,7 @@ fn collapse_and_expand_workspace() {
         let (plugin, action, context) =
             sidebar::action_at(fixture.client.declarations.as_ref().unwrap(), header).unwrap();
         input
-            .invoke(&fixture.client.boot_id, plugin, action, context)
+            .invoke(&fixture.client.boot_id, plugin, action, context, None)
             .unwrap();
         let rows = wait_sidebar(&mut fixture.client, |rows| {
             rows[header].contains("3 hidden") == collapsed

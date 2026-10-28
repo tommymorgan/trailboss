@@ -2186,6 +2186,7 @@ impl ClientShellState {
                             crate::api::schema::PluginActionInvokeParams {
                                 action_id,
                                 plugin_id: Some(plugin_id),
+                                arguments: None,
                                 context: Some(crate::api::schema::PluginInvocationContext {
                                     tab_id,
                                     workspace_id,

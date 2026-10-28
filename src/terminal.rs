@@ -771,7 +771,12 @@ impl FrameRenderer {
                             paint_text(&mut self.scratch, text, role, *tone, area)
                         }
                         Node::Leader { tone } => paint_leader(&mut self.scratch, *tone, area),
-                        Node::Input => paint_input(&mut self.scratch, &core.input_text, area),
+                        Node::Input => paint_input(
+                            &mut self.scratch,
+                            &core.input_text,
+                            area,
+                            core.argument_editing,
+                        ),
                         _ => Ok(()),
                     }
                 })();
@@ -1238,10 +1243,20 @@ fn paint_cell(
         queue!(out, Print(&cell.symbol))
     }
 }
-fn paint_input(out: &mut impl Write, text: &str, rect: Rect) -> io::Result<()> {
+fn paint_input(out: &mut impl Write, text: &str, rect: Rect, arguments: bool) -> io::Result<()> {
     if rect.width == 0 {
         return Ok(());
     }
+    let clean;
+    let text = if text.chars().any(char::is_control) {
+        clean = text
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .collect::<String>();
+        clean.as_str()
+    } else {
+        text
+    };
     let budget = usize::from(rect.width - 1);
     let mut start = text.len();
     let mut width = 0;
@@ -1254,7 +1269,11 @@ fn paint_input(out: &mut impl Write, text: &str, rect: Rect) -> io::Result<()> {
         width = next;
     }
     let visible = if text.is_empty() {
-        " type name"
+        if arguments {
+            ""
+        } else {
+            " type name"
+        }
     } else {
         &text[start..]
     };

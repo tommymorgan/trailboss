@@ -259,7 +259,7 @@ pub(super) fn draw(
                 false,
             ),
             Node::Label { text, role, tone } => paint_text(out, text, role, *tone, rect),
-            Node::Input => paint_input(out, &core.input_text, rect),
+            Node::Input => paint_input(out, &core.input_text, rect, core.argument_editing),
             Node::Leader { tone } => paint_leader(out, *tone, rect),
             _ => Ok(()),
         };

@@ -367,8 +367,21 @@ pub(super) struct Handoff {
     path: Vec<Identity>,
     selected: Identity,
     choices: Vec<(usize, ChoiceIdentity)>,
+    pub(super) arguments: bool,
+    argument_source: Option<(
+        Node,
+        trailboss_runtime::protocol::endpoint::EndpointCommandInput,
+        String,
+    )>,
+    argument_action: Option<String>,
 }
 impl Handoff {
+    pub(super) fn selected_action(&self) -> &str {
+        self.argument_action
+            .as_deref()
+            .or(self.selected.action.as_deref())
+            .expect("captured command action")
+    }
     fn current_tree<'a>(&self, core: &Core, declarations: &'a Declarations) -> Option<&'a Node> {
         let view = view_at(core, declarations, &self.provider, &self.path)?;
         let mut entries = view
@@ -379,6 +392,9 @@ impl Handoff {
         if entries.next().is_some() {
             return None;
         }
+        if self.arguments {
+            return Some(entry.node);
+        }
         match entry.node {
             Node::Row {
                 menu: Some(menu), ..
@@ -387,6 +403,17 @@ impl Handoff {
         }
     }
     pub(super) fn valid(&self, core: &Core, declarations: &Declarations, viewport: Rect) -> bool {
+        if let Some((tree, input, boot)) = &self.argument_source {
+            return !core.argument_invalid && self.current_tree(core, declarations) == Some(tree)
+                && core.fragment(declarations, &input.fragment_name).is_some_and(|(plugin, node)| {
+                    plugin == self.plugin && matches!(node, Node::Row { action: Some(action), .. } if action == self.selected_action())
+                })
+                && core.command_ui.as_ref().is_some_and(|ui| {
+                    &ui.boot_id == boot && ui.ui.iter().any(|item| {
+                        item.plugin_id == self.plugin && item.command_inputs.contains(input)
+                    })
+                });
+        }
         self.current_tree(core, declarations).is_some_and(|tree| {
             *tree == self.tree
                 && (!self.input || self.choices_match(core, declarations, tree, viewport))
@@ -398,6 +425,42 @@ impl Handoff {
         declarations: &Declarations,
         viewport: Rect,
     ) -> bool {
+        if self.arguments {
+            let valid = self.valid(core, declarations, viewport);
+            if let Node::Column { children } = &mut self.tree {
+                let status = if !valid {
+                    Some((
+                        "Command source or target changed; Escape to cancel",
+                        "danger",
+                    ))
+                } else if let Some(error) = core.argument_error.as_deref() {
+                    Some((error, "danger"))
+                } else if core.argument_pending.is_some() {
+                    Some(("Submitting…", "status"))
+                } else {
+                    None
+                };
+                let previous = children.last().and_then(|node| match node {
+                    Node::Label { text, role, .. } if role == "danger" || role == "status" => {
+                        Some((text.as_str(), role.as_str()))
+                    }
+                    _ => None,
+                });
+                if previous != status {
+                    if previous.is_some() {
+                        children.pop();
+                    }
+                    if let Some((text, role)) = status {
+                        children.push(Node::Label {
+                            text: text.into(),
+                            role: role.into(),
+                            tone: None,
+                        });
+                    }
+                }
+            }
+            return valid;
+        }
         let Some(tree) = self.current_tree(core, declarations) else {
             return false;
         };
@@ -600,6 +663,7 @@ impl Palette {
         core: &Core,
         declarations: &Declarations,
         viewport: Rect,
+        accept: bool,
     ) -> (Response, bool) {
         if self.stale {
             self.stale = false;
@@ -614,6 +678,76 @@ impl Palette {
         let Node::Row { action, menu, .. } = entry.node else {
             return (Response::Consumed, false);
         };
+        let issued = entry
+            .command_locator
+            .and_then(|name| core.fragment(declarations, name));
+        let input = issued.and_then(|(owner, node)| {
+            let Node::Row {
+                action: Some(action),
+                ..
+            } = node
+            else {
+                return None;
+            };
+            core.command_ui.as_ref().and_then(|ui| {
+                ui.ui
+                    .iter()
+                    .filter(|item| item.plugin_id == owner)
+                    .flat_map(|item| &item.command_inputs)
+                    .find(|input| {
+                        Some(input.fragment_name.as_str()) == entry.command_locator
+                            && matches!(
+                                input.argument_input,
+                                Some(trailboss_runtime::api_schema::PluginArgumentInput::RawTail)
+                            )
+                    })
+                    .map(|input| (input, ui.boot_id.as_str(), owner, action))
+            })
+        });
+        if let Some((input, boot, owner, issued_action)) = input {
+            let selected = entry.identity();
+            let context = entry.context(&self.path, &self.context).clone();
+            let action = Action {
+                plugin: owner.into(),
+                action: issued_action.clone(),
+                context: context.clone(),
+            };
+            let source = entry.node;
+            let mut children = vec![Node::Label {
+                text: input.title.clone(),
+                role: "heading".into(),
+                tone: None,
+            }];
+            if let Some(hint) = &input.argument_hint {
+                children.push(Node::Label {
+                    text: hint.clone(),
+                    role: "muted".into(),
+                    tone: None,
+                });
+            }
+            children.push(Node::Input);
+            self.handoff = Some(Handoff {
+                plugin: owner.into(),
+                tree: Node::Column { children },
+                context,
+                input: true,
+                provider: self.provider.clone(),
+                path: self.path.clone(),
+                selected,
+                choices: Vec::new(),
+                arguments: true,
+                argument_source: Some((source.clone(), input.clone(), boot.into())),
+                argument_action: Some(issued_action.clone()),
+            });
+            return (
+                Response::Arguments(action, (!accept).then(String::new)),
+                true,
+            );
+        }
+        if accept {
+            self.query = entry.label.clone();
+            return (Response::Consumed, false);
+        }
         let mut child_view = View::default();
         if let Some(menu) = menu {
             collect(
@@ -677,6 +811,9 @@ impl Palette {
                 path: std::mem::take(&mut self.path),
                 selected: entry.identity(),
                 choices,
+                arguments: false,
+                argument_source: None,
+                argument_action: None,
             });
             return (response, true);
         }
@@ -718,8 +855,8 @@ impl Palette {
         {
             return self.back();
         }
-        if key.code == KeyCode::Enter {
-            return self.choose(core, declarations, viewport);
+        if matches!(key.code, KeyCode::Enter | KeyCode::Tab) {
+            return self.choose(core, declarations, viewport, key.code == KeyCode::Tab);
         }
         let count = self
             .view(core, declarations)
@@ -739,7 +876,7 @@ impl Palette {
                     }
                 }
             }
-            KeyCode::Down | KeyCode::Tab | KeyCode::PageDown => {
+            KeyCode::Down | KeyCode::PageDown => {
                 let target = (self.selected
                     + if key.code == KeyCode::PageDown {
                         rows
@@ -827,7 +964,7 @@ impl Palette {
             {
                 self.selected = index;
                 self.selected_id = None;
-                return self.choose(core, declarations, viewport);
+                return self.choose(core, declarations, viewport, false);
             }
         }
         (Response::Consumed, false)

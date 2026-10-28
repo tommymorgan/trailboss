@@ -1024,6 +1024,8 @@ async fn client_shell_receives_plugin_ui_rows_with_snapshot() {
         build: Vec::new(),
         startup: Vec::new(),
         actions: vec![crate::api::schema::PluginManifestAction {
+            argument_input: None,
+            argument_hint: None,
             id: "focus".into(),
             title: "Focus review".into(),
             description: None,
@@ -1120,6 +1122,8 @@ async fn client_shell_receives_dynamic_plugin_ui_rows() {
         build: Vec::new(),
         startup: Vec::new(),
         actions: vec![crate::api::schema::PluginManifestAction {
+            argument_input: None,
+            argument_hint: None,
             id: "focus-tab".into(),
             title: "Focus tab".into(),
             description: None,
@@ -1151,6 +1155,7 @@ async fn client_shell_receives_dynamic_plugin_ui_rows() {
         .insert(plugin.plugin_id.clone(), plugin);
     let rows = vec![
         crate::protocol::endpoint::EndpointPluginUiItem {
+            command_inputs: Vec::new(),
             declaration: None,
             plugin_id: "tree.plugin".into(),
             ui_id: "tree".into(),
@@ -1162,6 +1167,7 @@ async fn client_shell_receives_dynamic_plugin_ui_rows() {
             segments: Vec::new(),
         },
         crate::protocol::endpoint::EndpointPluginUiItem {
+            command_inputs: Vec::new(),
             declaration: None,
             plugin_id: "tree.plugin".into(),
             ui_id: "tree".into(),

@@ -3585,6 +3585,12 @@
             "action_id": {
               "type": "string"
             },
+            "arguments": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "context": {
               "anyOf": [
                 {
@@ -9032,6 +9038,22 @@
             "action_id": {
               "type": "string"
             },
+            "argument_hint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "argument_input": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/PluginArgumentInput"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "command": {
               "items": {
                 "type": "string"
@@ -9073,6 +9095,34 @@
             "command"
           ],
           "type": "object"
+        },
+        "PluginArgumentInput": {
+          "oneOf": [
+            {
+              "properties": {
+                "kind": {
+                  "const": "raw_tail",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "unknown",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            }
+          ]
         },
         "PluginCommandLogInfo": {
           "properties": {
@@ -9270,6 +9320,22 @@
         },
         "PluginManifestAction": {
           "properties": {
+            "argument_hint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "argument_input": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/PluginArgumentInput"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "command": {
               "items": {
                 "type": "string"
@@ -10805,6 +10871,12 @@
                 "boot_id": {
                   "type": "string"
                 },
+                "capabilities": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
                 "commands": {
                   "items": {
                     "$ref": "#/schemas/success_response/$defs/UiCommandInfo"
@@ -11248,6 +11320,22 @@
         },
         "UiCommandInfo": {
           "properties": {
+            "argument_hint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "argument_input": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/PluginArgumentInput"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "contexts": {
               "items": {
                 "$ref": "#/schemas/success_response/$defs/PluginActionContext"

@@ -642,6 +642,7 @@ fn plugin_action_invoke(args: &[String]) -> std::io::Result<i32> {
     }
 
     print_plugin_response(Method::PluginActionInvoke(PluginActionInvokeParams {
+        arguments: None,
         action_id: action_id.clone(),
         plugin_id,
         context: Some(PluginInvocationContext {

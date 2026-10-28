@@ -1023,6 +1023,8 @@ fn plugin_link_list_unlink_round_trip() {
         }],
         startup: vec![],
         actions: vec![PluginManifestAction {
+            argument_input: None,
+            argument_hint: None,
             id: "bootstrap".into(),
             title: "Bootstrap worktree".into(),
             description: None,
@@ -1408,6 +1410,7 @@ fn plugin_action_list_and_invoke_round_trips() {
     let invoke = Request {
         id: "req_plugin_action_invoke".into(),
         method: Method::PluginActionInvoke(PluginActionInvokeParams {
+            arguments: None,
             plugin_id: Some("example.issue-flow".into()),
             action_id: "assign-issue".into(),
             context: None,
@@ -1419,6 +1422,8 @@ fn plugin_action_list_and_invoke_round_trips() {
     assert_eq!(restored, invoke);
 
     let action_info = PluginActionInfo {
+        argument_input: None,
+        argument_hint: None,
         plugin_id: "example.issue-flow".into(),
         action_id: "assign-issue".into(),
         title: "Assign Issue".into(),

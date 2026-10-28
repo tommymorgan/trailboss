@@ -40,6 +40,9 @@ impl App {
             id,
             ResponseResult::UiCommandList {
                 boot_id: self.state.command_boot_id.clone(),
+                capabilities: vec![
+                    crate::protocol::endpoint::PLUGIN_ACTION_ARGUMENTS_CAPABILITY.to_owned(),
+                ],
                 commands,
             },
         )
@@ -214,7 +217,13 @@ pub(crate) fn projection(
         return Ok((Vec::new(), ordinary));
     }
     let mut commands = Vec::new();
-    let mut owners: BTreeMap<String, Vec<Fragment>> = BTreeMap::new();
+    let mut owners: BTreeMap<
+        String,
+        Vec<(
+            Fragment,
+            Option<crate::protocol::endpoint::EndpointCommandInput>,
+        )>,
+    > = BTreeMap::new();
     let mut issued = HashSet::new();
     let mut publish =
         |owner: &str, mut command: UiCommandInfo, tree: Option<Node>| -> Result<(), String> {
@@ -224,11 +233,21 @@ pub(crate) fn projection(
             }
             command.fragment_name = name;
             if let Some(tree) = tree {
-                owners.entry(owner.to_owned()).or_default().push(Fragment {
-                    name: command.fragment_name.clone(),
-                    priority: 0,
-                    tree,
-                });
+                let input = (command.argument_input.is_some() || command.argument_hint.is_some())
+                    .then(|| crate::protocol::endpoint::EndpointCommandInput {
+                        fragment_name: command.fragment_name.clone(),
+                        title: command_label(&command.title),
+                        argument_input: command.argument_input.clone(),
+                        argument_hint: command.argument_hint.as_deref().map(command_label),
+                    });
+                owners.entry(owner.to_owned()).or_default().push((
+                    Fragment {
+                        name: command.fragment_name.clone(),
+                        priority: 0,
+                        tree,
+                    },
+                    input,
+                ));
             }
             commands.push(command);
             Ok(())
@@ -262,6 +281,8 @@ pub(crate) fn projection(
         publish(
             "trailboss.core",
             UiCommandInfo {
+                argument_input: None,
+                argument_hint: None,
                 key: UiCommandKey::Core {
                     action_id: action.to_owned(),
                     mode: descriptor.focus_mode.map(|mode| match mode {
@@ -326,6 +347,8 @@ pub(crate) fn projection(
             publish(
                 &plugin.plugin_id,
                 UiCommandInfo {
+                    argument_input: action.argument_input.clone(),
+                    argument_hint: action.argument_hint.clone(),
                     key: UiCommandKey::Plugin {
                         plugin_id: plugin.plugin_id.clone(),
                         action_id: action.id.clone(),
@@ -349,8 +372,15 @@ pub(crate) fn projection(
     for (owner, fragments) in owners {
         let mut fragments = fragments.into_iter();
         for chunk in 0usize.. {
-            let fragments: Vec<_> = fragments.by_ref().take(128).collect();
-            if fragments.is_empty() {
+            let mut chunk_fragments = Vec::with_capacity(fragments.len().min(128));
+            let mut command_inputs = Vec::new();
+            for (fragment, input) in fragments.by_ref().take(128) {
+                chunk_fragments.push(fragment);
+                if let Some(input) = input {
+                    command_inputs.push(input);
+                }
+            }
+            if chunk_fragments.is_empty() {
                 break;
             }
             let ui_id = format!("trailboss.command.v1:{chunk}");
@@ -360,6 +390,7 @@ pub(crate) fn projection(
                 );
             }
             generated.push(EndpointPluginUiItem {
+                command_inputs,
                 plugin_id: owner.clone(),
                 ui_id,
                 title: String::new(),
@@ -373,7 +404,7 @@ pub(crate) fn projection(
                     version: 1,
                     zones: Vec::new(),
                     composition: None,
-                    fragments,
+                    fragments: chunk_fragments,
                 }),
             });
         }

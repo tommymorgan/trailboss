@@ -93,7 +93,7 @@ TRAILBOSS_TEST_LEGACY_CORE=/absolute/path/to/alias-blind-trailboss \
 ## Command discovery for UI plugins
 
 The socket API method `ui.command.list` takes empty parameters and returns the
-current `boot_id` and `commands`. It includes user-facing Core commands and
+current `boot_id`, `capabilities` and `commands`. It includes user-facing Core commands and
 actions from enabled, platform-compatible plugin manifests; plugins do not
 register a second command catalog.
 
@@ -110,8 +110,38 @@ boot-scoped fragment identity and original action owner.
 
 Core publishes the interaction tree under its actual owner. Selection keeps
 the existing native name, confirmation, focus and detach flows, or invokes
-the original plugin action. The generation-1 declaration protocol and
-`plugin.action.list` / `plugin.action.invoke` remain unchanged.
+the original plugin action. Argument metadata uses optional JSON fields in the
+existing generation-1 declaration protocol; the binary frame layout is unchanged.
+
+An action can declare `argument_input = { kind = "raw_tail" }` and an optional
+`argument_hint` in its manifest. The catalog retains the owner's original title
+and hint. The matching endpoint projection carries bounded, display-safe metadata
+for the issued command fragment. Both the catalog and endpoint welcome advertise
+`plugin_action_arguments_v1`; missing fields remain compatible with legacy clients.
+
+In the native palette, **Tab** accepts a fuzzy result and opens its raw-argument
+editor without invoking the action. The canonical hint appears only when the
+owner provides one. **Enter** executes the selected action: directly from search
+with an explicit empty tail, or from the editor with its current value.
+**Escape** cancels an unsubmitted draft. The editor retains its captured command
+and destination rather than following later focus changes; observed owner,
+destination or Core-boot invalidation prevents submission.
+
+`plugin.action.invoke` accepts an optional `arguments` string for raw-tail actions.
+Omitting it preserves legacy behavior; `""` explicitly supplies an empty tail.
+Other action kinds reject a supplied value before dispatch. Spawned handlers get
+the JSON-encoded string in `HERDR_PLUGIN_ARGUMENTS_JSON`; legacy invocations remove
+that variable rather than inheriting it. Stream handlers receive the optional
+top-level `arguments` string in their action envelope. Neither path changes the
+manifest argv or parses the tail as shell arguments.
+
+The native editor prevents duplicate submissions until the accepted owner's
+command log reports success or failure. API acceptance alone does not complete
+the interaction. A known API rejection or owner failure retains the draft for
+correction and an explicit retry. An unknown outcome retains the draft and
+blocks resubmission until the interaction is dismissed; it is never retried
+automatically. Escape after dispatch dismisses local tracking without cancelling
+the owner's work. A late result cannot overwrite a new draft.
 
 A plugin action may set `confirmation_fragment` to one of its own ordinary
 confirmation exports. The export must contain labels and exactly two terminal

@@ -793,6 +793,7 @@ for line in sys.stdin:
                 &selected.plugin,
                 &selected.action,
                 &selected.context,
+                None,
             )
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1118,6 +1119,7 @@ fn selected_blue_refresh_use_invokes_only_its_owner_once_on_captured_target() {
             &selected.plugin,
             &selected.action,
             &selected.context,
+            None,
         )
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -2428,14 +2430,6 @@ fn palette_discovery_finds_and_runs_independent_inventory_without_sidebar_focus(
             None
         };
         let mut console = console::Console::new(&core);
-        core.request(
-            "pane.send_text",
-            json!({"pane_id":pane,"text":"printf 'PALETTE_OWNED_READY\\n'\n"}),
-        );
-        console.wait(|rows| {
-            rows.iter()
-                .any(|row| row.starts_with("PALETTE_OWNED_READY"))
-        });
         let mut observer = core.attach();
         let deadline = Instant::now() + Duration::from_secs(8);
         loop {
@@ -2523,6 +2517,16 @@ fn palette_discovery_finds_and_runs_independent_inventory_without_sidebar_focus(
             "sidebar must no longer own the default palette"
         );
         drop(observer);
+        // Observe a later Surface update on this native connection only after
+        // Core published the palette, so F1 cannot race its declarations.
+        core.request(
+            "pane.send_text",
+            json!({"pane_id":pane,"text":"printf 'PALETTE_OWNED_READY\\n'\n"}),
+        );
+        console.wait(|rows| {
+            rows.iter()
+                .any(|row| row.starts_with("PALETTE_OWNED_READY"))
+        });
         if mode == Some("previous") {
             core.request("tab.focus", json!({"tab_id":other["tab"]["tab_id"]}));
             std::thread::sleep(Duration::from_millis(200));
@@ -5065,6 +5069,7 @@ fn c20_native_nested_use_dispatches_explicit_child_scope_after_other_focus() {
             &selected.plugin,
             &selected.action,
             &selected.context,
+            None,
         )
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -5478,6 +5483,7 @@ fn unusual_title_native_invocations(titles: [String; 3], display: [String; 2]) {
                 &selected.plugin,
                 &selected.action,
                 &selected.context,
+                None,
             )
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -5880,6 +5886,7 @@ fn confirmation_locator_refresh(captured_scope: bool) {
             &selected.plugin,
             &selected.action,
             &selected.context,
+            None,
         )
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -6000,6 +6007,7 @@ fn large_catalog_keeps_every_owner_action_and_unrelated_core_commands_searchable
                     &action.plugin,
                     &action.action,
                     &action.context,
+                    None,
                 )
                 .unwrap();
         }
@@ -6196,33 +6204,135 @@ fn palette_observer_and_catalog_follow_the_api_socket_override() {
     use std::process::{Command, Stdio};
     use trailboss_runtime::protocol::widgets::{Declaration, Node};
     let core = support::Core::new();
-    core.request(
-        "workspace.create",
-        json!({"label":"OverrideTarget","cwd":core.home,"focus":true}),
+    let inherited = support::Core::new();
+    for (session, label, plugin) in [
+        (&core, "OverrideTarget", "fixture.selected-session"),
+        (&inherited, "InheritedTarget", "fixture.inherited-session"),
+    ] {
+        session.request(
+            "workspace.create",
+            json!({"label":label,"cwd":session.home,"focus":true}),
+        );
+        let owner = session.home.join("argument-owner");
+        std::fs::create_dir_all(&owner).unwrap();
+        std::fs::write(owner.join("trailboss-plugin.toml"), format!(
+            "id = {plugin:?}\nname = \"Session argument owner\"\nversion = \"1.0.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"raw\"\ntitle = {label:?}\nargument_input = {{ kind = \"raw_tail\" }}\nargument_hint = \"[session name]\"\ncommand = [\"true\"]\n"
+        )).unwrap();
+        session.request("plugin.link", json!({"path":owner,"enabled":true}));
+    }
+    let api = core
+        .home
+        .join(format!("trailboss/sessions/{}/trailboss.sock", core.name));
+    let selected_environment = |command: &mut Command| {
+        for key in support::HOMES {
+            command.env(key, &inherited.home);
+        }
+        for (key, _) in std::env::vars_os().filter(|(key, _)| {
+            let key = key.to_string_lossy();
+            key.starts_with("HERDR_") || key.starts_with("TRAILBOSS_")
+        }) {
+            command.env_remove(key);
+        }
+        command
+            .env("TRAILBOSS_SESSION", &inherited.name)
+            .env(
+                "HERDR_CLIENT_SOCKET_PATH",
+                inherited.home.join(format!(
+                    "trailboss/sessions/{}/trailboss-client.sock",
+                    inherited.name
+                )),
+            )
+            .env("HERDR_SOCKET_PATH", &api);
+    };
+    // Use the independent consumer's real JSON API decoder with the resolved
+    // environment, not a direct request to an implicitly selected test Core.
+    let mut probe = Command::new("python3");
+    selected_environment(&mut probe);
+    let output = probe
+        .args(["-B", "-c", "import json, os, sys; sys.path.insert(0, sys.argv[1]); from command_consumer import catalog; print(json.dumps(catalog(os.environ['HERDR_SOCKET_PATH'])))"])
+        .arg(format!("{}/tests/support", env!("CARGO_MANIFEST_DIR")))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let catalog: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let inherited_catalog = inherited.request("ui.command.list", json!({}));
+    assert_ne!(catalog["boot_id"], inherited_catalog["boot_id"]);
+    assert!(catalog["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("plugin_action_arguments_v1")));
+    let selected_command = catalog["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["key"]["plugin_id"] == "fixture.selected-session")
+        .expect("selected socket must discover its own owner");
+    assert!(!catalog["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command["key"]["plugin_id"] == "fixture.inherited-session"));
+    assert!(inherited_catalog["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command["key"]["plugin_id"] == "fixture.inherited-session"));
+    assert!(!inherited_catalog["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command["key"]["plugin_id"] == "fixture.selected-session"));
+    assert_eq!(
+        selected_command["argument_input"],
+        json!({"kind":"raw_tail"})
+    );
+    assert_eq!(selected_command["argument_hint"], "[session name]");
+    let mut client = core.attach();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.command_ui.as_ref().is_none_or(|ui| {
+        !ui.ui.iter().any(|item| {
+            item.plugin_id == "fixture.selected-session"
+                && item
+                    .command_inputs
+                    .iter()
+                    .any(|input| input.fragment_name == selected_command["fragment_name"])
+        })
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "selected command input projection missing"
+        );
+        client.receive().unwrap();
+    }
+    let ui = client.command_ui.as_ref().unwrap();
+    let snapshot = client.snapshot.as_ref().unwrap();
+    assert_eq!(ui.boot_id, catalog["boot_id"]);
+    assert_eq!(ui.boot_id, snapshot.boot_id);
+    assert_eq!(ui.revision, snapshot.revision);
+    assert!(!ui
+        .ui
+        .iter()
+        .any(|item| item.plugin_id == "fixture.inherited-session"));
+    let input = ui
+        .ui
+        .iter()
+        .filter(|item| item.plugin_id == "fixture.selected-session")
+        .flat_map(|item| &item.command_inputs)
+        .find(|input| input.fragment_name == selected_command["fragment_name"])
+        .unwrap();
+    assert_eq!(input.title, "OverrideTarget");
+    assert_eq!(input.argument_hint.as_deref(), Some("[session name]"));
+    assert_eq!(
+        serde_json::to_value(&input.argument_input).unwrap(),
+        json!({"kind":"raw_tail"})
     );
     let mut command = Command::new(env!("CARGO_BIN_EXE_trailboss-command-palette"));
-    for key in support::HOMES {
-        command.env(key, &core.home);
-    }
-    for (key, _) in std::env::vars_os().filter(|(key, _)| {
-        let key = key.to_string_lossy();
-        key.starts_with("HERDR_") || key.starts_with("TRAILBOSS_")
-    }) {
-        command.env_remove(key);
-    }
-    command
-        .env("TRAILBOSS_SESSION", "wrong-session")
-        .env(
-            "HERDR_CLIENT_SOCKET_PATH",
-            core.home.join("wrong-client.sock"),
-        )
-        .env(
-            "HERDR_SOCKET_PATH",
-            core.home
-                .join(format!("trailboss/sessions/{}/trailboss.sock", core.name)),
-        )
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    selected_environment(&mut command);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn().unwrap();
     let stdout = child.stdout.take().unwrap();
     let (send, receive) = std::sync::mpsc::channel();
@@ -6242,9 +6352,17 @@ fn palette_observer_and_catalog_follow_the_api_socket_override() {
         .unwrap_or_else(|error| panic!("override palette publication: {error}; {output:?}"));
     let mut nodes: Vec<_> = declaration.fragments.iter().map(|f| &f.tree).collect();
     let mut target_visible = false;
+    let mut selected_use = false;
     while let Some(node) = nodes.pop() {
         match node {
-            Node::Label { text, .. } => target_visible |= text == "OverrideTarget",
+            Node::Label { text, .. } => {
+                target_visible |= text == "OverrideTarget";
+                assert_ne!(text, "InheritedTarget");
+            }
+            Node::Use { name } => {
+                selected_use |=
+                    name.as_str() == selected_command["fragment_name"].as_str().unwrap();
+            }
             Node::Column { children }
             | Node::Row { children, .. }
             | Node::List { entries: children } => nodes.extend(children),
@@ -6259,6 +6377,467 @@ fn palette_observer_and_catalog_follow_the_api_socket_override() {
     }
     assert!(
         target_visible,
-        "publication must describe the API-selected Core, not the inherited session"
+        "palette observer must use the API-selected Core"
     );
+    assert!(
+        selected_use,
+        "palette must use the selected catalog's canonical command"
+    );
+}
+
+#[test]
+fn raw_arguments_create_owned_tabs_without_losing_empty_quotes_spaces_or_unicode() {
+    use std::os::unix::fs::PermissionsExt;
+    for stream in [false, true] {
+        // Seed only the child Core, never the parallel test runner's environment.
+        let name = format!(
+            "arg-{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let home = std::env::temp_dir().join(&name);
+        std::fs::create_dir_all(&home).unwrap();
+        let launcher = home.join("core-with-inherited-arguments");
+        std::fs::write(&launcher, format!(
+            "#!/bin/sh\nexport HERDR_PLUGIN_ARGUMENTS_JSON='\"inherited poison\"'\nexec '{}' \"$@\"\n",
+            support::executable().display()
+        )).unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let core = support::Core::launch_with_executable(home, name, launcher);
+        let target = core.request(
+            "workspace.create",
+            json!({"label":"Argument target","cwd":core.home,"focus":true}),
+        );
+        let other = core.request(
+            "workspace.create",
+            json!({"label":"Unrelated focus","cwd":core.home,"focus":true}),
+        );
+        let owner = core.home.join("argument-owner");
+        std::fs::create_dir_all(&owner).unwrap();
+        let mut manifest = "id = \"fixture.arguments\"\nname = \"Argument owner\"\nversion = \"1.0.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"create\"\ntitle = \"Create from tail\"\nargument_input = { kind = \"raw_tail\" }\ncommand = [\"python3\", \"owner.py\", \"spawn\"]\n".to_owned();
+        if stream {
+            manifest.push_str("[[ui]]\nid = \"owner\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"owner.py\", \"stream\"]\nstream = true\nstream_actions = true\n");
+        }
+        std::fs::write(owner.join("trailboss-plugin.toml"), manifest).unwrap();
+        std::fs::write(owner.join("owner.py"), r#"import json,os,socket,sys
+def create(context, present, tail):
+    label = 'Present[' + tail + ']' if present else 'Absent'
+    request = {'id':'owned-tail','method':'tab.create','params':{
+        'workspace_id':context['workspace_id'],'label':label,'focus':False}}
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.settimeout(5)
+        connection.connect(os.environ['HERDR_SOCKET_PATH'])
+        connection.sendall((json.dumps(request)+'\n').encode())
+        reply = json.loads(connection.makefile('rb').readline())
+        assert 'error' not in reply, reply
+if sys.argv[1] == 'stream':
+    print(json.dumps({'herdr':'widget_tree','version':1,'zones':[],'fragments':[
+        {'name':'fixture.arguments.ready','priority':0,'tree':{'type':'label','role':'label','text':'Ready'}}]}),flush=True)
+    for line in sys.stdin:
+        envelope=json.loads(line)
+        create(envelope['context'], 'arguments' in envelope, envelope.get('arguments'))
+        print(json.dumps({'herdr':'action_result','id':envelope['id'],'ok':True}),flush=True)
+else:
+    present = 'HERDR_PLUGIN_ARGUMENTS_JSON' in os.environ
+    create(json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON']), present,
+           json.loads(os.environ['HERDR_PLUGIN_ARGUMENTS_JSON']) if present else None)
+"#).unwrap();
+        core.request("plugin.link", json!({"path":owner,"enabled":true}));
+        let mut client = core.attach();
+        if stream {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while client.declarations.as_ref().is_none_or(|declarations| {
+                NativeCore::default()
+                    .fragment(declarations, "fixture.arguments.ready")
+                    .is_none()
+            }) {
+                assert!(
+                    Instant::now() < deadline,
+                    "owner stream did not become ready"
+                );
+                client.receive().unwrap();
+            }
+        }
+        let tails = [
+            None,
+            Some(""),
+            Some("  \"quoted value\"  C:\\work\\note café 界 🦀  "),
+        ];
+        for tail in tails {
+            let mut params = json!({"plugin_id":"fixture.arguments","action_id":"create",
+                "context":{"workspace_id":target["workspace"]["workspace_id"],
+                    "tab_id":target["tab"]["tab_id"],"pane_id":target["root_pane"]["pane_id"]}});
+            if let Some(tail) = tail {
+                params["arguments"] = json!(tail);
+            }
+            core.request("plugin.action.invoke", params);
+            let expected = tail
+                .map(|tail| format!("Present[{tail}]"))
+                .unwrap_or_else(|| "Absent".into());
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let snapshot = core.request("session.snapshot", json!({}));
+                let tabs = snapshot["snapshot"]["tabs"].as_array().unwrap();
+                if tabs.iter().any(|tab| {
+                    tab["label"] == expected
+                        && tab["workspace_id"] == target["workspace"]["workspace_id"]
+                }) {
+                    assert!(!tabs.iter().any(|tab| tab["label"] == expected
+                        && tab["workspace_id"] == other["workspace"]["workspace_id"]));
+                    break;
+                }
+                assert!(Instant::now() < deadline, "owner failed to create {expected:?}; stream={stream}; snapshot={snapshot}; logs={}", core.request("plugin.log.list", json!({"limit":20})));
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let snapshot = core.request("session.snapshot", json!({}));
+        assert_eq!(
+            snapshot["snapshot"]["tabs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|tab| tab["workspace_id"] == target["workspace"]["workspace_id"])
+                .count(),
+            4,
+            "each invocation must create exactly one tab, with no fallback or duplicate dispatch"
+        );
+    }
+}
+
+#[test]
+fn unsupported_argument_descriptors_reject_before_owner_resource_operations() {
+    use trailboss_runtime::{
+        api_client::{ApiClient, ConnectionTarget},
+        api_schema::Request,
+    };
+    let core = support::Core::new();
+    let owner = core.home.join("unsupported-argument-owner");
+    std::fs::create_dir_all(&owner).unwrap();
+    std::fs::write(owner.join("trailboss-plugin.toml"),
+        "id = \"fixture.unsupported-arguments\"\nname = \"Unsupported arguments\"\nversion = \"1.0.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"legacy\"\ntitle = \"Legacy\"\ncommand = [\"python3\", \"owner.py\"]\n[[actions]]\nid = \"future\"\ntitle = \"Future descriptor\"\nargument_input = { kind = \"future_input\" }\ncommand = [\"python3\", \"owner.py\"]\n").unwrap();
+    std::fs::write(
+        owner.join("owner.py"),
+        r#"import json,os,socket
+with socket.socket(socket.AF_UNIX) as connection:
+    connection.settimeout(5)
+    connection.connect(os.environ['HERDR_SOCKET_PATH'])
+    connection.sendall((json.dumps({'id':'forbidden-effect','method':'workspace.create',
+        'params':{'label':'Owner operation happened','focus':False}})+'\n').encode())
+    assert 'error' not in json.loads(connection.makefile('rb').readline())
+"#,
+    )
+    .unwrap();
+    core.request("plugin.link", json!({"path":owner,"enabled":true}));
+    let before = core.request("session.snapshot", json!({}));
+    let api = ApiClient::for_target(ConnectionTarget::SocketPath(
+        core.home
+            .join(format!("trailboss/sessions/{}/trailboss.sock", core.name)),
+    ));
+    for action in ["legacy", "future"] {
+        for tail in ["", "not accepted"] {
+            let request: Request = serde_json::from_value(json!({"id":"reject-arguments","method":"plugin.action.invoke",
+                "params":{"plugin_id":"fixture.unsupported-arguments","action_id":action,"arguments":tail}})).unwrap();
+            let reply = api
+                .request_value_with_timeout(&request, Duration::from_secs(5))
+                .unwrap();
+            assert_eq!(
+                reply["error"]["code"], "unsupported_plugin_arguments",
+                "{reply}"
+            );
+        }
+    }
+    assert_eq!(
+        core.request("session.snapshot", json!({}))["snapshot"]["workspaces"],
+        before["snapshot"]["workspaces"]
+    );
+    assert!(
+        core.request("plugin.log.list", json!({"limit":20}))["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|log| log["action_id"].is_null()),
+        "rejection must precede even scheduling an owner action"
+    );
+    // A successful legacy call is an ordering barrier and proves the fixture
+    // really can perform the operation the rejected requests must not perform.
+    core.request(
+        "plugin.action.invoke",
+        json!({"plugin_id":"fixture.unsupported-arguments","action_id":"legacy"}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = core.request("session.snapshot", json!({}));
+        let count = snapshot["snapshot"]["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|workspace| workspace["label"] == "Owner operation happened")
+            .count();
+        if count > 0 {
+            assert_eq!(count, 1);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "legacy fixture could not create its resource"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn argument_catalog_preserves_owner_text_but_projects_safe_optional_input_metadata() {
+    use trailboss_runtime::{api_schema::UiCommandInfo, protocol::endpoint::EndpointPluginUi};
+    let core = support::Core::new();
+    core.request(
+        "workspace.create",
+        json!({"label":"Metadata target","cwd":core.home,"focus":true}),
+    );
+    let owner = core.home.join("argument-metadata-owner");
+    std::fs::create_dir_all(&owner).unwrap();
+    let title = "Create\n界";
+    let hint = "\"name\"  [café]\tmore";
+    std::fs::write(owner.join("trailboss-plugin.toml"), format!(
+        "id = \"fixture.argument-metadata\"\nname = \"Argument metadata\"\nversion = \"1.0.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"raw\"\ntitle = {title:?}\nargument_input = {{ kind = \"raw_tail\" }}\nargument_hint = {hint:?}\ncommand = [\"true\"]\n[[actions]]\nid = \"no-hint\"\ntitle = \"No hint\"\nargument_input = {{ kind = \"raw_tail\" }}\ncommand = [\"true\"]\n[[actions]]\nid = \"legacy\"\ntitle = \"Legacy\"\ncommand = [\"true\"]\n"
+    )).unwrap();
+    core.request("plugin.link", json!({"path":owner,"enabled":true}));
+    let catalog = core.request("ui.command.list", json!({}));
+    assert!(catalog["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("plugin_action_arguments_v1")));
+    let command = |action: &str| {
+        catalog["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| {
+                command["key"]["plugin_id"] == "fixture.argument-metadata"
+                    && command["key"]["action_id"] == action
+            })
+            .unwrap()
+    };
+    assert_eq!(command("raw")["title"], title);
+    assert_eq!(command("raw")["argument_hint"], hint);
+    assert_eq!(command("raw")["argument_input"], json!({"kind":"raw_tail"}));
+    assert!(command("no-hint").get("argument_hint").is_none());
+    assert!(command("legacy").get("argument_input").is_none());
+    let mut legacy_command = command("raw").clone();
+    legacy_command
+        .as_object_mut()
+        .unwrap()
+        .remove("argument_input");
+    legacy_command
+        .as_object_mut()
+        .unwrap()
+        .remove("argument_hint");
+    let legacy_command: UiCommandInfo = serde_json::from_value(legacy_command).unwrap();
+    assert!(legacy_command.argument_input.is_none() && legacy_command.argument_hint.is_none());
+
+    let mut client = core.attach();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.command_ui.as_ref().is_none_or(|ui| {
+        !ui.ui.iter().any(|item| {
+            item.plugin_id == "fixture.argument-metadata"
+                && item
+                    .command_inputs
+                    .iter()
+                    .any(|input| input.fragment_name == command("raw")["fragment_name"])
+        })
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "capable endpoint did not receive command input metadata"
+        );
+        client.receive().unwrap();
+    }
+    let ui = client.command_ui.as_ref().unwrap();
+    let snapshot = client.snapshot.as_ref().unwrap();
+    assert_eq!(ui.boot_id, catalog["boot_id"]);
+    assert_eq!(ui.boot_id, snapshot.boot_id);
+    assert_eq!(ui.revision, snapshot.revision);
+    let inputs: Vec<_> = ui
+        .ui
+        .iter()
+        .filter(|item| item.plugin_id == "fixture.argument-metadata")
+        .flat_map(|item| &item.command_inputs)
+        .collect();
+    let raw = inputs
+        .iter()
+        .find(|input| input.fragment_name == command("raw")["fragment_name"])
+        .unwrap();
+    assert_eq!(raw.title, "Create\\n界");
+    assert_eq!(
+        raw.argument_hint.as_deref(),
+        Some("\"name\"  [café]\\tmore")
+    );
+    assert_eq!(
+        serde_json::to_value(&raw.argument_input).unwrap(),
+        json!({"kind":"raw_tail"})
+    );
+    let no_hint = inputs
+        .iter()
+        .find(|input| input.fragment_name == command("no-hint")["fragment_name"])
+        .unwrap();
+    assert!(
+        no_hint.argument_hint.is_none(),
+        "missing hints must not become inferred syntax"
+    );
+    assert!(!inputs
+        .iter()
+        .any(|input| input.fragment_name == command("legacy")["fragment_name"]));
+    // Old endpoint payloads omit the entire extension. They must still decode,
+    // retaining their existing declaration and revision/boot identity.
+    let mut old_payload = serde_json::to_value(ui).unwrap();
+    for item in old_payload["ui"].as_array_mut().unwrap() {
+        item.as_object_mut().unwrap().remove("command_inputs");
+    }
+    let old_ui: EndpointPluginUi = serde_json::from_value(old_payload).unwrap();
+    assert_eq!(old_ui.boot_id, ui.boot_id);
+    assert_eq!(old_ui.revision, ui.revision);
+    for (old, current) in old_ui.ui.iter().zip(&ui.ui) {
+        assert!(old.command_inputs.is_empty());
+        assert_eq!(old.declaration, current.declaration);
+    }
+    let mut old_catalog = catalog.clone();
+    old_catalog.as_object_mut().unwrap().remove("capabilities");
+    for command in old_catalog["commands"].as_array_mut().unwrap() {
+        command.as_object_mut().unwrap().remove("argument_input");
+        command.as_object_mut().unwrap().remove("argument_hint");
+    }
+    let old_catalog: trailboss_runtime::api_schema::ResponseResult =
+        serde_json::from_value(old_catalog).unwrap();
+    let trailboss_runtime::api_schema::ResponseResult::UiCommandList {
+        boot_id,
+        capabilities,
+        commands,
+    } = old_catalog
+    else {
+        panic!("older catalog lost its response identity");
+    };
+    assert_eq!(boot_id, ui.boot_id);
+    assert!(
+        capabilities.is_empty(),
+        "absence must not imply raw argument capability"
+    );
+    assert!(commands
+        .iter()
+        .all(|command| command.argument_input.is_none() && command.argument_hint.is_none()));
+
+    // Downgrade only optional extension fields on actual Core frames. Both
+    // cases traverse the native client's real generation-1 socket decoder:
+    // metadata without negotiation, and negotiation without metadata.
+    for omit_capability in [true, false] {
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use trailboss_runtime::protocol::{self, endpoint::*, ClientMessage, ServerMessage};
+        let socket = core
+            .home
+            .join(format!("older-endpoint-{omit_capability}.sock"));
+        let listener = UnixListener::bind(&socket).unwrap();
+        let upstream = core.home.join(format!(
+            "trailboss/sessions/{}/trailboss-client.sock",
+            core.name
+        ));
+        let raw_locator = command("raw")["fragment_name"].as_str().unwrap().to_owned();
+        let relay = std::thread::spawn(move || {
+            let (mut downstream, _) = listener.accept().unwrap();
+            downstream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut upstream = UnixStream::connect(upstream).unwrap();
+            upstream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let hello: ClientMessage =
+                protocol::read_message(&mut downstream, protocol::MAX_GRAPHICS_FRAME_SIZE).unwrap();
+            protocol::write_message(&mut upstream, &hello).unwrap();
+            let mut snapshot_pair = None;
+            let mut ui_pair = None;
+            let mut welcome_seen = false;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                assert!(
+                    Instant::now() < deadline,
+                    "older endpoint fixture never paired"
+                );
+                let mut message: ServerMessage =
+                    protocol::read_message(&mut upstream, protocol::MAX_GRAPHICS_FRAME_SIZE)
+                        .unwrap();
+                if let ServerMessage::EndpointControl { kind, data } = &mut message {
+                    let mut payload: Value = serde_json::from_str(data).unwrap();
+                    if kind == ENDPOINT_WELCOME_KIND {
+                        assert!(payload["capabilities"]
+                            .as_array()
+                            .unwrap()
+                            .contains(&json!("plugin_action_arguments_v1")));
+                        welcome_seen = true;
+                        if omit_capability {
+                            payload.as_object_mut().unwrap().remove("capabilities");
+                        }
+                    } else if kind == ENDPOINT_SNAPSHOT_KIND {
+                        snapshot_pair =
+                            Some((payload["boot_id"].clone(), payload["revision"].clone()));
+                    } else if kind == PLUGIN_UI_KIND {
+                        // Require real canonical input metadata before removing
+                        // anything; an empty upstream cannot satisfy this case.
+                        let has_raw = payload["ui"].as_array().unwrap().iter().any(|item| {
+                            item["plugin_id"] == "fixture.argument-metadata"
+                                && item["command_inputs"].as_array().is_some_and(|inputs| {
+                                    inputs
+                                        .iter()
+                                        .any(|input| input["fragment_name"] == raw_locator)
+                                })
+                        });
+                        if has_raw {
+                            ui_pair =
+                                Some((payload["boot_id"].clone(), payload["revision"].clone()));
+                        }
+                        if !omit_capability {
+                            for item in payload["ui"].as_array_mut().unwrap() {
+                                item.as_object_mut().unwrap().remove("command_inputs");
+                            }
+                        }
+                    }
+                    *data = payload.to_string();
+                }
+                protocol::write_message(&mut downstream, &message).unwrap();
+                if welcome_seen && ui_pair == snapshot_pair {
+                    if let Some(pair) = ui_pair.take() {
+                        return pair;
+                    }
+                }
+            }
+        });
+        let mut older = trailboss::Client::attach(&socket, 80, 24).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while older.command_ui.is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "older native client did not pair projection"
+            );
+            older.receive().unwrap();
+        }
+        let (boot, revision) = relay.join().unwrap();
+        let old_ui = older.command_ui.as_ref().unwrap();
+        assert_eq!(old_ui.boot_id, boot);
+        assert_eq!(old_ui.boot_id, catalog["boot_id"]);
+        assert_eq!(json!(old_ui.revision), revision);
+        assert_eq!(old_ui.revision, older.snapshot.as_ref().unwrap().revision);
+        assert!(
+            old_ui.ui.iter().all(|item| item.command_inputs.is_empty()),
+            "optional fields alone must not infer raw argument entry"
+        );
+        let declarations = older.declarations.as_ref().unwrap();
+        assert!(
+            NativeCore::default()
+                .fragment(
+                    declarations,
+                    command("raw")["fragment_name"].as_str().unwrap()
+                )
+                .is_some(),
+            "legacy command remains usable without inferred argument metadata"
+        );
+    }
 }

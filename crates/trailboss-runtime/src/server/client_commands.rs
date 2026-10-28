@@ -37,6 +37,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "pane.swap",
     "pane.zoom",
     "plugin.action.invoke",
+    "plugin.log.list",
     "product_announcement.dismiss",
     "release_notes.dismiss",
     "server.reload_config",

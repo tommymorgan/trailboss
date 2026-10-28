@@ -2410,6 +2410,7 @@ dependencies = [
  "ghostty-vt",
  "jsonschema",
  "portable-pty",
+ "serde",
  "serde_json",
  "tracing",
  "trailboss-runtime",

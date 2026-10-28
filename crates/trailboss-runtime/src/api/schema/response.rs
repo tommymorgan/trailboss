@@ -256,6 +256,8 @@ pub enum ResponseResult {
     },
     UiCommandList {
         boot_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
         commands: Vec<super::plugins::UiCommandInfo>,
     },
     PluginActionList {

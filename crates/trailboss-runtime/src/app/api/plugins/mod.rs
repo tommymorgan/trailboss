@@ -224,10 +224,23 @@ impl App {
         ) {
             return encode_error(id, code, message);
         }
-        let context = self.merge_plugin_context(params.context, &id);
-        if let Some(forwarded) =
-            self.try_forward_plugin_action(&plugin, &action.action_id, &action.command, &context)
+        if params.arguments.is_some()
+            && action.argument_input != Some(crate::api::schema::PluginArgumentInput::RawTail)
         {
+            return encode_error(
+                id,
+                "unsupported_plugin_arguments",
+                "action does not support raw arguments",
+            );
+        }
+        let context = self.merge_plugin_context(params.context, &id);
+        if let Some(forwarded) = self.try_forward_plugin_action(
+            &plugin,
+            &action.action_id,
+            &action.command,
+            &context,
+            params.arguments.as_deref(),
+        ) {
             return match forwarded {
                 Ok(log) => encode_success(
                     id,
@@ -247,6 +260,7 @@ impl App {
             action.command.clone(),
             &context,
             None,
+            params.arguments.as_deref(),
         ) {
             Ok(log) => log,
             Err((code, message)) => return encode_error(id, code, message),
@@ -282,9 +296,13 @@ impl App {
         let mut context = self.current_plugin_context("keybinding");
         context.invocation_source = Some("keybinding".to_string());
         context.selected_text = selected_text;
-        if let Some(forwarded) =
-            self.try_forward_plugin_action(&plugin, &action.action_id, &action.command, &context)
-        {
+        if let Some(forwarded) = self.try_forward_plugin_action(
+            &plugin,
+            &action.action_id,
+            &action.command,
+            &context,
+            None,
+        ) {
             return match forwarded {
                 Ok(_) => Ok(()),
                 Err((_, message)) => Err(message),
@@ -296,6 +314,7 @@ impl App {
             None,
             action.command,
             &context,
+            None,
             None,
         )
         .map(|_| ())
@@ -447,6 +466,7 @@ impl App {
             None,
             action.command,
             &context,
+            None,
             None,
         )
         .map(|_| true)
@@ -856,6 +876,7 @@ pub(crate) fn sidebar_ui_rows(
                 continue;
             }
             rows.push(crate::protocol::endpoint::EndpointPluginUiItem {
+                command_inputs: Vec::new(),
                 declaration: None,
                 plugin_id: plugin.plugin_id.clone(),
                 ui_id: entry.id.clone(),
@@ -882,6 +903,8 @@ fn manifest_action_info(
     action: &PluginManifestAction,
 ) -> PluginActionInfo {
     PluginActionInfo {
+        argument_input: action.argument_input.clone(),
+        argument_hint: action.argument_hint.clone(),
         plugin_id: plugin_id.to_string(),
         action_id: action.id.clone(),
         title: action.title.clone(),
@@ -2899,6 +2922,7 @@ command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{}'; sleep 1"]
         let invoke = app.handle_api_request(Request {
             id: "invoke".into(),
             method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                arguments: None,
                 plugin_id: Some("example.worktree-bootstrap".into()),
                 action_id: "bootstrap".into(),
                 context: Some(PluginInvocationContext {
@@ -2985,6 +3009,7 @@ command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{}'; sleep 1"]
         let invoke = app.handle_api_request(Request {
             id: "invoke".into(),
             method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                arguments: None,
                 plugin_id: Some("example.worktree-bootstrap".into()),
                 action_id: "bootstrap".into(),
                 context: None,
@@ -3151,6 +3176,7 @@ command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{}'; sleep 1"]
             command,
             &app.current_plugin_context("lease-test"),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -3212,6 +3238,7 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_ACTION_ID\""]
         let invoke = app.handle_api_request(Request {
             id: "invoke-runner".into(),
             method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                arguments: None,
                 plugin_id: Some("example.runner".into()),
                 action_id: "run".into(),
                 context: None,
@@ -3279,6 +3306,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
         let invoke = app.handle_api_request(Request {
             id: "invoke-runner".into(),
             method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                arguments: None,
                 plugin_id: Some("example.action-paths".into()),
                 action_id: "run".into(),
                 context: None,
@@ -3480,6 +3508,7 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
         let invoke = app.handle_api_request(Request {
             id: "invoke-limit".into(),
             method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                arguments: None,
                 plugin_id: Some("example.worktree-bootstrap".into()),
                 action_id: "bootstrap".into(),
                 context: None,
@@ -3888,6 +3917,7 @@ command = ["show-ctx"]
         let invoke = app.handle_api_request(Request {
             id: "invoke-context".into(),
             method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                arguments: None,
                 plugin_id: Some("example.context".into()),
                 action_id: "show".into(),
                 context: None,
@@ -3950,6 +3980,7 @@ command = ["show-ctx"]
         let invoke = app.handle_api_request(Request {
             id: "invoke-disabled".into(),
             method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                arguments: None,
                 plugin_id: Some("example.worktree-bootstrap".into()),
                 action_id: "bootstrap".into(),
                 context: None,
@@ -4365,6 +4396,7 @@ command = ["act"]
         let invoke = app.handle_api_request(Request {
             id: "invoke".into(),
             method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                arguments: None,
                 plugin_id: Some("example.reject".into()),
                 action_id: "act".into(),
                 context: None,
@@ -4431,6 +4463,7 @@ command = ["act"]
         let invoke = app.handle_api_request(Request {
             id: "invoke".into(),
             method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                arguments: None,
                 plugin_id: Some("example.override".into()),
                 action_id: "act".into(),
                 context: None,
@@ -4491,6 +4524,7 @@ command = ["act"]
         let invoke = app.handle_api_request(Request {
             id: "invoke".into(),
             method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                arguments: None,
                 plugin_id: Some("example.nodecl".into()),
                 action_id: "act".into(),
                 context: None,

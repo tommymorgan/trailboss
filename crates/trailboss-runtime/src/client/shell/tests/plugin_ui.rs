@@ -5,6 +5,7 @@ use crate::protocol::endpoint::{EndpointPluginUi, EndpointPluginUiItem, Endpoint
 fn plugin_rows() -> Vec<EndpointPluginUiItem> {
     vec![
         EndpointPluginUiItem {
+            command_inputs: Vec::new(),
             declaration: None,
             plugin_id: "example.ui".into(),
             ui_id: "review".into(),
@@ -16,6 +17,7 @@ fn plugin_rows() -> Vec<EndpointPluginUiItem> {
             segments: Vec::new(),
         },
         EndpointPluginUiItem {
+            command_inputs: Vec::new(),
             declaration: None,
             plugin_id: "example.ui".into(),
             ui_id: "zoom".into(),
@@ -52,6 +54,7 @@ fn state_with_many_plugin_rows(count: usize, focused_tab: Option<&str>) -> Clien
     state.sidebar_collapsed = false;
     let rows = (0..count)
         .map(|index| EndpointPluginUiItem {
+            command_inputs: Vec::new(),
             declaration: None,
             plugin_id: "example.ui".into(),
             ui_id: "tree".into(),
@@ -196,6 +199,7 @@ fn clicking_dynamic_row_sends_row_context() {
             boot_id: "boot-1".into(),
             revision: 1,
             ui: vec![EndpointPluginUiItem {
+                command_inputs: Vec::new(),
                 declaration: None,
                 plugin_id: "tree.plugin".into(),
                 ui_id: "tree".into(),
@@ -241,6 +245,7 @@ fn focused_tab_row_carries_active_row_background() {
     state.set_pane_surface(surface());
     let row =
         |ui_id: &str, tab_id: Option<&str>, workspace_id: Option<&str>| EndpointPluginUiItem {
+            command_inputs: Vec::new(),
             declaration: None,
             plugin_id: "tree.plugin".into(),
             ui_id: ui_id.into(),
@@ -292,6 +297,7 @@ fn workspace_header_carries_focus_background_when_focused_tab_row_is_absent() {
             boot_id: "boot-1".into(),
             revision: 1,
             ui: vec![EndpointPluginUiItem {
+                command_inputs: Vec::new(),
                 declaration: None,
                 plugin_id: "tree.plugin".into(),
                 ui_id: "header".into(),
@@ -333,6 +339,7 @@ fn segments_render_with_role_colors_and_unknown_roles_fall_back() {
             revision: 1,
             ui: vec![
                 EndpointPluginUiItem {
+                    command_inputs: Vec::new(),
                     declaration: None,
                     plugin_id: "tree.plugin".into(),
                     ui_id: "cluster".into(),
@@ -351,6 +358,7 @@ fn segments_render_with_role_colors_and_unknown_roles_fall_back() {
                     ],
                 },
                 EndpointPluginUiItem {
+                    command_inputs: Vec::new(),
                     declaration: None,
                     plugin_id: "tree.plugin".into(),
                     ui_id: "unknown-role".into(),
@@ -418,6 +426,7 @@ fn bg_segment_role_paints_the_row_background() {
             boot_id: "boot-1".into(),
             revision: 1,
             ui: vec![EndpointPluginUiItem {
+                command_inputs: Vec::new(),
                 declaration: None,
                 plugin_id: "lime.plugin".into(),
                 ui_id: "tree".into(),
@@ -475,6 +484,7 @@ fn footer_role_rows_pin_to_the_footer_line_and_replace_the_default_footer() {
             revision: 1,
             ui: vec![
                 EndpointPluginUiItem {
+                    command_inputs: Vec::new(),
                     declaration: None,
                     plugin_id: "tree.plugin".into(),
                     ui_id: "tree".into(),
@@ -486,6 +496,7 @@ fn footer_role_rows_pin_to_the_footer_line_and_replace_the_default_footer() {
                     segments: Vec::new(),
                 },
                 EndpointPluginUiItem {
+                    command_inputs: Vec::new(),
                     declaration: None,
                     plugin_id: "tree.plugin".into(),
                     ui_id: "tree".into(),
@@ -571,6 +582,7 @@ fn leader_rows_fill_with_dots_and_right_align_the_cluster() {
             boot_id: "boot-1".into(),
             revision: 1,
             ui: vec![EndpointPluginUiItem {
+                command_inputs: Vec::new(),
                 declaration: None,
                 plugin_id: "tree.plugin".into(),
                 ui_id: "tree".into(),
@@ -616,6 +628,7 @@ fn focused_plugin_row_renders_bold() {
             boot_id: "boot-1".into(),
             revision: 2,
             ui: vec![EndpointPluginUiItem {
+                command_inputs: Vec::new(),
                 declaration: None,
                 plugin_id: "example.ui".into(),
                 ui_id: "review".into(),

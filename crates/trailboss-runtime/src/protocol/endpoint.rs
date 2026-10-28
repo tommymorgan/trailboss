@@ -21,6 +21,7 @@ pub const SURFACE_CODEC_V1: &str = "shell.surface.v1";
 pub const INPUT_CODEC_V1: &str = "shell.input.semantic.v1";
 pub const BLOB_CODEC_V1: &str = "shell.blob.v1";
 pub const SURFACE_INTEREST_CAPABILITY: &str = "surface_interest";
+pub const PLUGIN_ACTION_ARGUMENTS_CAPABILITY: &str = "plugin_action_arguments_v1";
 pub const PRESENTATION_EFFECTS_FENCE_CAPABILITY: &str = "presentation_effects_fence";
 pub const PRESENTATION_EFFECTS_SYNC_KIND: &str = "endpoint.presentation.sync.v1";
 pub const PRESENTATION_EFFECTS_READY_KIND: &str = "endpoint.presentation.ready.v1";
@@ -108,10 +109,22 @@ pub struct EndpointPluginUiSegment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointCommandInput {
+    pub fragment_name: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_input: Option<crate::api::schema::PluginArgumentInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointPluginUiItem {
     pub plugin_id: String,
     pub ui_id: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command_inputs: Vec<EndpointCommandInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -227,6 +240,7 @@ impl EndpointServerWelcome {
             blob_codec: BLOB_CODEC_V1.into(),
             methods,
             capabilities: vec![
+                PLUGIN_ACTION_ARGUMENTS_CAPABILITY.into(),
                 super::surface_reuse::CAPABILITY.into(),
                 super::surface_delta::CAPABILITY.into(),
                 super::surface_scroll::CAPABILITY.into(),
