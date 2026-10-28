@@ -199,6 +199,180 @@ pub struct AgentPromptParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<AgentPromptWaitOptions>,
 }
+
+/// Stable native context, independent of display location or tab names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationContext {
+    pub conversation_id: String,
+    pub reset_entry_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationBinding {
+    pub terminal_id: String,
+    pub conversation_id: String,
+    pub reset_entry_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentConversationReadParams {
+    pub terminal_id: String,
+    pub expected_context: Option<ConversationContext>,
+    pub cursor: Option<String>,
+    #[serde(default = "default_conversation_page_bytes")]
+    pub max_bytes: usize,
+}
+
+fn default_conversation_page_bytes() -> usize {
+    65_536
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationReplyStyle {
+    Brief,
+    Expanded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentConversationSubmitParams {
+    pub binding: ConversationBinding,
+    pub reporter_epoch: String,
+    pub context_epoch: String,
+    pub input_id: String,
+    pub text: String,
+    pub reply_style: ConversationReplyStyle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentConversationInputStatusParams {
+    pub binding: ConversationBinding,
+    pub reporter_epoch: String,
+    pub input_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentConversationAbortParams {
+    pub binding: ConversationBinding,
+    pub reporter_epoch: String,
+    pub context_epoch: String,
+    pub work_fence: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum ConversationResult {
+    Read(ConversationReadResult),
+    Input(ConversationInputResult),
+    Abort(ConversationAbortResult),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ConversationReadResult {
+    pub contract_version: u32,
+    pub binding: ConversationBinding,
+    pub reporter_epoch: String,
+    pub context_epoch: String,
+    pub work: ConversationWork,
+    pub capabilities: Vec<String>,
+    pub mode: ConversationReadMode,
+    pub reset_reason: Option<String>,
+    pub snapshot_tip_id: Option<String>,
+    pub records: Vec<ConversationRecord>,
+    pub next_cursor: Option<String>,
+    pub baseline_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationReadMode {
+    Snapshot,
+    Delta,
+    Unchanged,
+    Reset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ConversationWork {
+    pub state: ConversationWorkState,
+    pub fence: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationWorkState {
+    Working,
+    NotWorking,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ConversationRecord {
+    pub entry_id: String,
+    pub parent_id: Option<String>,
+    pub role: ConversationRole,
+    pub stop_reason: Option<String>,
+    pub has_tool_calls: Option<bool>,
+    pub text_total_bytes: usize,
+    pub text_offset_bytes: usize,
+    pub text: String,
+    pub entry_end: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationRole {
+    User,
+    Assistant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ConversationInputResult {
+    pub input_id: String,
+    pub binding: ConversationBinding,
+    pub reporter_epoch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_epoch: Option<String>,
+    pub status: ConversationInputState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_style: Option<ConversationReplyStyle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationInputState {
+    Dispatching,
+    AcceptedByReporter,
+    RejectedBeforeDispatch,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ConversationAbortResult {
+    pub binding: ConversationBinding,
+    pub reporter_epoch: String,
+    pub context_epoch: String,
+    pub status: ConversationAbortState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationAbortState {
+    Acknowledged,
+    NotWorking,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentChatSubmitParams {
     pub target: String,

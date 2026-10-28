@@ -1362,6 +1362,116 @@
           ],
           "type": "object"
         },
+        "AgentConversationAbortParams": {
+          "additionalProperties": false,
+          "properties": {
+            "binding": {
+              "$ref": "#/schemas/request/$defs/ConversationBinding"
+            },
+            "context_epoch": {
+              "type": "string"
+            },
+            "reporter_epoch": {
+              "type": "string"
+            },
+            "work_fence": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "binding",
+            "reporter_epoch",
+            "context_epoch",
+            "work_fence"
+          ],
+          "type": "object"
+        },
+        "AgentConversationInputStatusParams": {
+          "additionalProperties": false,
+          "properties": {
+            "binding": {
+              "$ref": "#/schemas/request/$defs/ConversationBinding"
+            },
+            "input_id": {
+              "type": "string"
+            },
+            "reporter_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "binding",
+            "reporter_epoch",
+            "input_id"
+          ],
+          "type": "object"
+        },
+        "AgentConversationReadParams": {
+          "additionalProperties": false,
+          "properties": {
+            "cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "expected_context": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/ConversationContext"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "max_bytes": {
+              "default": 65536,
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "terminal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id"
+          ],
+          "type": "object"
+        },
+        "AgentConversationSubmitParams": {
+          "additionalProperties": false,
+          "properties": {
+            "binding": {
+              "$ref": "#/schemas/request/$defs/ConversationBinding"
+            },
+            "context_epoch": {
+              "type": "string"
+            },
+            "input_id": {
+              "type": "string"
+            },
+            "reply_style": {
+              "$ref": "#/schemas/request/$defs/ConversationReplyStyle"
+            },
+            "reporter_epoch": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "binding",
+            "reporter_epoch",
+            "context_epoch",
+            "input_id",
+            "text",
+            "reply_style"
+          ],
+          "type": "object"
+        },
         "AgentPromptParams": {
           "properties": {
             "target": {
@@ -1923,6 +2033,54 @@
             "command_id"
           ],
           "type": "object"
+        },
+        "ConversationBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "conversation_id": {
+              "type": "string"
+            },
+            "reset_entry_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "terminal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id",
+            "conversation_id"
+          ],
+          "type": "object"
+        },
+        "ConversationContext": {
+          "additionalProperties": false,
+          "description": "Stable native context, independent of display location or tab names.",
+          "properties": {
+            "conversation_id": {
+              "type": "string"
+            },
+            "reset_entry_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "conversation_id"
+          ],
+          "type": "object"
+        },
+        "ConversationReplyStyle": {
+          "enum": [
+            "brief",
+            "expanded"
+          ],
+          "type": "string"
         },
         "EmptyParams": {
           "type": "object"
@@ -5705,6 +5863,70 @@
         {
           "properties": {
             "method": {
+              "const": "agent.conversation.read",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentConversationReadParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.conversation.submit",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentConversationSubmitParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.conversation.input_status",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentConversationInputStatusParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.conversation.abort",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentConversationAbortParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.shutdown",
               "type": "string"
             },
@@ -7206,6 +7428,307 @@
             "applied",
             "partial",
             "failed"
+          ],
+          "type": "string"
+        },
+        "ConversationAbortResult": {
+          "properties": {
+            "binding": {
+              "$ref": "#/schemas/success_response/$defs/ConversationBinding"
+            },
+            "context_epoch": {
+              "type": "string"
+            },
+            "reporter_epoch": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/ConversationAbortState"
+            }
+          },
+          "required": [
+            "binding",
+            "reporter_epoch",
+            "context_epoch",
+            "status"
+          ],
+          "type": "object"
+        },
+        "ConversationAbortState": {
+          "enum": [
+            "acknowledged",
+            "not_working"
+          ],
+          "type": "string"
+        },
+        "ConversationBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "conversation_id": {
+              "type": "string"
+            },
+            "reset_entry_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "terminal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id",
+            "conversation_id"
+          ],
+          "type": "object"
+        },
+        "ConversationInputResult": {
+          "properties": {
+            "binding": {
+              "$ref": "#/schemas/success_response/$defs/ConversationBinding"
+            },
+            "context_epoch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "input_id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "receipt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reply_style": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/ConversationReplyStyle"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reporter_epoch": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/ConversationInputState"
+            }
+          },
+          "required": [
+            "input_id",
+            "binding",
+            "reporter_epoch",
+            "status"
+          ],
+          "type": "object"
+        },
+        "ConversationInputState": {
+          "enum": [
+            "dispatching",
+            "accepted_by_reporter",
+            "rejected_before_dispatch",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "ConversationReadMode": {
+          "enum": [
+            "snapshot",
+            "delta",
+            "unchanged",
+            "reset"
+          ],
+          "type": "string"
+        },
+        "ConversationReadResult": {
+          "properties": {
+            "baseline_cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "binding": {
+              "$ref": "#/schemas/success_response/$defs/ConversationBinding"
+            },
+            "capabilities": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "context_epoch": {
+              "type": "string"
+            },
+            "contract_version": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "has_more": {
+              "type": "boolean"
+            },
+            "mode": {
+              "$ref": "#/schemas/success_response/$defs/ConversationReadMode"
+            },
+            "next_cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "records": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ConversationRecord"
+              },
+              "type": "array"
+            },
+            "reporter_epoch": {
+              "type": "string"
+            },
+            "reset_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "snapshot_tip_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "work": {
+              "$ref": "#/schemas/success_response/$defs/ConversationWork"
+            }
+          },
+          "required": [
+            "contract_version",
+            "binding",
+            "reporter_epoch",
+            "context_epoch",
+            "work",
+            "capabilities",
+            "mode",
+            "records",
+            "has_more"
+          ],
+          "type": "object"
+        },
+        "ConversationRecord": {
+          "properties": {
+            "entry_end": {
+              "type": "boolean"
+            },
+            "entry_id": {
+              "type": "string"
+            },
+            "has_tool_calls": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "$ref": "#/schemas/success_response/$defs/ConversationRole"
+            },
+            "stop_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "text_offset_bytes": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text_total_bytes": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "entry_id",
+            "role",
+            "text_total_bytes",
+            "text_offset_bytes",
+            "text",
+            "entry_end"
+          ],
+          "type": "object"
+        },
+        "ConversationReplyStyle": {
+          "enum": [
+            "brief",
+            "expanded"
+          ],
+          "type": "string"
+        },
+        "ConversationResult": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/success_response/$defs/ConversationReadResult"
+            },
+            {
+              "$ref": "#/schemas/success_response/$defs/ConversationInputResult"
+            },
+            {
+              "$ref": "#/schemas/success_response/$defs/ConversationAbortResult"
+            }
+          ]
+        },
+        "ConversationRole": {
+          "enum": [
+            "user",
+            "assistant"
+          ],
+          "type": "string"
+        },
+        "ConversationWork": {
+          "properties": {
+            "fence": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "$ref": "#/schemas/success_response/$defs/ConversationWorkState"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        "ConversationWorkState": {
+          "enum": [
+            "working",
+            "not_working",
+            "unknown"
           ],
           "type": "string"
         },
@@ -10107,6 +10630,23 @@
                 },
                 "type": {
                   "const": "agent_turn_aborted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "result"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Versioned reporter-native conversation payload (contract_version = 1).",
+              "properties": {
+                "result": {
+                  "$ref": "#/schemas/success_response/$defs/ConversationResult"
+                },
+                "type": {
+                  "const": "agent_conversation",
                   "type": "string"
                 }
               },

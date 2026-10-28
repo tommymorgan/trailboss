@@ -406,6 +406,10 @@ pub(super) struct ControlReply {
     pub(super) reason: String,
     #[serde(default)]
     pub(super) turn_id: Option<String>,
+    #[serde(default)]
+    pub(super) result: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(super) error: Option<serde_json::Value>,
 }
 
 /// The identity facts a reporter control op needs; restart preparation adds
@@ -866,7 +870,7 @@ fn read_control_reply(
         match stream.read(&mut buffer) {
             Ok(0) => return Err("control_closed_before_reply".into()),
             Ok(count) => {
-                if reply.len() + count > FRAME_LIMIT {
+                if reply.len() + count > 65_536 {
                     return Err("control_reply_too_large".into());
                 }
                 reply.extend_from_slice(&buffer[..count]);

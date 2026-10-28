@@ -35,6 +35,62 @@ struct ControlCheck {
 }
 
 impl App {
+    /// Resolve Core-owned terminal identity before leaving the UI thread.
+    pub(super) fn start_agent_conversation(
+        &mut self,
+        id: String,
+        respond_to: Sender<String>,
+        operation: &'static str,
+        terminal_id: &str,
+        params: serde_json::Value,
+    ) {
+        let input_id = params.get("input_id").cloned();
+        let fail = |reason: &str, invocation: &str| {
+            conversation_error(&id, reason, invocation, input_id.clone())
+        };
+        if terminal_id.is_empty() || terminal_id.len() > 256 || id.len() > 256 {
+            let _ = respond_to.send(fail("invalid_params", "not_started"));
+            return;
+        }
+        // Legacy agent targets are names/locators. This contract accepts only
+        // Core's exact terminal handle, including after supported tab moves.
+        let admission = (|| {
+            if !cfg!(target_os = "linux") {
+                return None;
+            }
+            let resolved = self.resolve_terminal_target(terminal_id).ok()?;
+            if resolved.terminal_id != terminal_id {
+                return None;
+            }
+            let agent = self.agent_info(resolved.ws_idx, resolved.pane_id)?;
+            self.reconcile_managed_agent_target(&agent.pane_id);
+            let agent = self.agent_info(resolved.ws_idx, resolved.pane_id)?;
+            Some(ControlCheck {
+                target: terminal_id.to_owned(),
+                shell_pid: self.agent_shell_pid(&agent)?,
+                session_path: exact_session_path(&agent)?,
+            })
+        })();
+        let Some(check) = admission else {
+            let _ = respond_to.send(fail("structured_unavailable", "not_started"));
+            return;
+        };
+        let failure_tx = respond_to.clone();
+        let failure_id = id.clone();
+        let spawned = crate::thread_spawn::spawn_named("trailboss-conversation", move || {
+            let response = conversation_roundtrip(&id, &check, operation, params);
+            let _ = respond_to.send(response);
+        });
+        if spawned.is_err() {
+            let _ = failure_tx.send(conversation_error(
+                &failure_id,
+                "structured_unavailable",
+                "not_started",
+                None,
+            ));
+        }
+    }
+
     pub(super) fn start_agent_chat_submit(
         &mut self,
         id: String,
@@ -377,6 +433,110 @@ fn skip_error(reply: &ControlReply) -> (String, String) {
     ("control_skipped".into(), reply.reason.clone())
 }
 
+fn conversation_error(
+    id: &str,
+    reason: &str,
+    invocation: &str,
+    input_id: Option<serde_json::Value>,
+) -> String {
+    let mut error = serde_json::json!({
+        "code": reason, "message": reason, "reason": reason, "invocation": invocation
+    });
+    if let Some(input_id) = input_id {
+        error["input_id"] = input_id;
+    }
+    serde_json::json!({"id": id, "error": error}).to_string()
+}
+
+fn conversation_roundtrip(
+    id: &str,
+    check: &ControlCheck,
+    operation: &str,
+    params: serde_json::Value,
+) -> String {
+    let input_id = params.get("input_id").cloned();
+    let fail = |reason: &str, invocation: &str| {
+        conversation_error(id, reason, invocation, input_id.clone())
+    };
+    let target = match prepare_control_target(check.shell_pid, &check.session_path) {
+        Ok(target) => target,
+        Err(_) => return fail("structured_unavailable", "not_started"),
+    };
+    let request = serde_json::json!({
+        "operation": operation, "pid": target.omp.pid, "pane_id": target.pane_identity,
+        "session_path": check.session_path, "terminal_id": check.target, "request_id": id, "params": params
+    });
+    if serde_json::to_vec(&request).map_or(true, |frame| frame.len() + 1 > CHAT_FRAME_LIMIT) {
+        return fail("request_too_large", "not_started");
+    }
+    if matches!(operation, "conversation_submit" | "conversation_abort") {
+        let probe = serde_json::json!({
+            "operation": "conversation_capabilities", "pid": target.omp.pid,
+            "pane_id": target.pane_identity, "session_path": check.session_path,
+            "terminal_id": check.target, "request_id": id,
+            "params": {"binding": request["params"]["binding"], "reporter_epoch": request["params"]["reporter_epoch"]}
+        });
+        let capability = match control_roundtrip(&target, probe, CHAT_FRAME_LIMIT, CONTROL_TIMEOUT)
+        {
+            Ok(reply) if reply.status == "conversation" => reply.result,
+            _ => None,
+        };
+        let Some(capability) = capability else {
+            // Only the read-only probe was written; mutation invocation has not started.
+            return fail("structured_unavailable", "not_started");
+        };
+        let needed: &[&str] = if operation == "conversation_submit" {
+            &["guarded_submit_v1", "input_status_v1", "reply_style_v1"]
+        } else {
+            &["guarded_abort_v1"]
+        };
+        if capability["contract_version"] != 1
+            || !capability["capabilities"].as_array().is_some_and(|items| {
+                needed
+                    .iter()
+                    .all(|needed| items.iter().any(|item| item.as_str() == Some(*needed)))
+            })
+        {
+            return fail("structured_unavailable", "not_started");
+        }
+        if capability["binding"] != request["params"]["binding"] {
+            return fail("binding_mismatch", "not_started");
+        }
+        if capability["reporter_epoch"] != request["params"]["reporter_epoch"] {
+            return fail("reporter_changed", "not_started");
+        }
+        if capability["context_epoch"] != request["params"]["context_epoch"] {
+            return fail("context_changed", "not_started");
+        }
+        // Reporter/native admission rechecks these facts atomically; this probe is
+        // compatibility admission, not a substitute for the native guard/fence.
+    }
+    match control_roundtrip(&target, request, CHAT_FRAME_LIMIT, CONTROL_TIMEOUT) {
+        Ok(reply) => {
+            if let Some(error) = reply.error {
+                return serde_json::json!({"id":id,"error":error}).to_string();
+            }
+            if reply.status == "conversation" {
+                if let Some(result) = reply
+                    .result
+                    .and_then(|value| serde_json::from_value(value).ok())
+                {
+                    return encode_success(
+                        id.to_owned(),
+                        ResponseResult::AgentConversation { result },
+                    );
+                }
+            }
+            // A pre-capability reporter rejects unknown operations before invocation.
+            if reply.status == "skipped" && reply.reason == "invalid-request" {
+                return fail("structured_unavailable", "not_started");
+            }
+            fail("invalid_control_response", "unknown")
+        }
+        Err(_) => fail("transport_lost", "unknown"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,6 +546,8 @@ mod tests {
             status: status.into(),
             reason: reason.into(),
             turn_id: turn_id.map(str::to_owned),
+            result: None,
+            error: None,
         }
     }
 

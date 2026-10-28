@@ -1198,7 +1198,13 @@ impl App {
                     "agent.prompt is handled asynchronously by the app runtime",
                 );
             }
-            Method::AgentChatSubmit(_) | Method::AgentTurnAbort(_) | Method::AgentShutdown(_) => {
+            Method::AgentConversationRead(_)
+            | Method::AgentConversationSubmit(_)
+            | Method::AgentConversationInputStatus(_)
+            | Method::AgentConversationAbort(_)
+            | Method::AgentChatSubmit(_)
+            | Method::AgentTurnAbort(_)
+            | Method::AgentShutdown(_) => {
                 return responses::encode_error(
                     request.id,
                     "invalid_request",

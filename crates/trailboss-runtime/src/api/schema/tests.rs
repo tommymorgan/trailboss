@@ -437,6 +437,54 @@ fn agent_chat_submit_and_turn_abort_round_trip() {
 }
 
 #[test]
+fn conversation_consumers_keep_native_guards_and_reject_journal_path_parameters() {
+    let binding = serde_json::json!({
+        "terminal_id": "term-owned", "conversation_id": "native-session", "reset_entry_id": null
+    });
+    let requests = [
+        (
+            "agent.conversation.read",
+            serde_json::json!({
+                "terminal_id": "term-owned", "expected_context": null, "cursor": null, "max_bytes": 4096
+            }),
+        ),
+        (
+            "agent.conversation.submit",
+            serde_json::json!({
+                "binding": binding, "reporter_epoch": "process-1", "context_epoch": "context-1",
+                "input_id": "utterance-1", "text": "literal cancel", "reply_style": "brief"
+            }),
+        ),
+        (
+            "agent.conversation.input_status",
+            serde_json::json!({
+                "binding": binding, "reporter_epoch": "process-1", "input_id": "utterance-1"
+            }),
+        ),
+        (
+            "agent.conversation.abort",
+            serde_json::json!({
+                "binding": binding, "reporter_epoch": "process-1", "context_epoch": "context-1",
+                "work_fence": "run-1-input-2"
+            }),
+        ),
+    ];
+    for (method, params) in requests {
+        let wire = serde_json::json!({"id": "request", "method": method, "params": params});
+        let request: Request = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), wire);
+        let mut injected = wire;
+        injected["params"]["session_path"] = serde_json::json!("/another/agent.jsonl");
+        assert!(serde_json::from_value::<Request>(injected).is_err());
+    }
+    let unguarded = serde_json::json!({
+        "id": "unsafe", "method": "agent.conversation.submit",
+        "params": {"binding": binding, "input_id": "input", "text": "hello", "reply_style": "brief"}
+    });
+    assert!(serde_json::from_value::<Request>(unguarded).is_err());
+}
+
+#[test]
 fn unknown_method_is_rejected() {
     let json = r#"{"id":"req_1","method":"nope","params":{}}"#;
     let err = serde_json::from_str::<Request>(json)

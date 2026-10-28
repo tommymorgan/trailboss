@@ -113,6 +113,10 @@ pub enum ResponseResult {
     AgentTurnAborted {
         result: super::agents::AgentTurnAbortResult,
     },
+    /// Versioned reporter-native conversation payload (contract_version = 1).
+    AgentConversation {
+        result: super::agents::ConversationResult,
+    },
     AgentStopped {
         result: super::agents::AgentShutdownResult,
     },

@@ -8,6 +8,7 @@
 import net, { type Server, type Socket } from "node:net";
 import fs from "node:fs";
 import path from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 
 const HERDR_ENV = process.env.HERDR_ENV;
 const socketPath = process.env.HERDR_SOCKET_PATH;
@@ -329,7 +330,260 @@ type RestartContext = {
   shutdown?: () => void;
 };
 
+const CONVERSATION_POLICIES = {
+  brief: "[Voice format for this request only: answer with a short actual reply suitable for ten seconds; give detail only if requested. Do not apply this format to unrelated desktop requests.]\n\n",
+  expanded: "[Voice format for this request only: more detail is explicitly requested. Do not apply this format to unrelated desktop requests.]\n\n"
+};
+
+/** Projects native entries only. Input receipts never identify assistant replies. */
+export function createConversationAdapter(getContext) {
+  const reporterEpoch = randomUUID();
+  const receipts = new Map();
+  let cachedContext, branch = [], positions = new Map(), tip = null;
+  let reads = Promise.resolve();
+  const bytes = value => Buffer.byteLength(JSON.stringify(value), "utf8") + 1;
+  const validId = id => typeof id === "string" && id.length > 0 &&
+    Buffer.byteLength(id, "utf8") <= 256 && !/[\u0000-\u001f\u007f]/.test(id);
+  const nullableId = id => id === null || validId(id);
+  const sameContext = (a, b) => a?.conversation_id === b?.conversation_id && a?.reset_entry_id === b?.reset_entry_id;
+  const sameBinding = (a, b) => a?.terminal_id === b?.terminal_id && sameContext(a, b);
+  const receiptKey = p => JSON.stringify([p.binding.terminal_id, p.binding.conversation_id, p.binding.reset_entry_id, p.input_id]);
+  // Compact deterministic binding identity keeps worst-case native IDs inside 2048-byte cursors.
+  const bindingKey = binding => createHash("sha256").update(JSON.stringify([
+    binding.terminal_id, binding.conversation_id, binding.reset_entry_id
+  ])).digest("hex");
+  function error(request, reason, invocation = "not_started") {
+    return { status: "conversation", reason: "", error: {
+      code: reason, message: reason, reason, invocation,
+      ...(validId(request.params?.input_id) ? { input_id: request.params.input_id } : {})
+    } };
+  }
+  function native() {
+    const ctx = getContext(), control = ctx?.conversationControl, manager = ctx?.sessionManager;
+    if (control?.version !== 1 || typeof control.snapshot !== "function" ||
+        typeof control.submit !== "function" || typeof control.abort !== "function" ||
+        typeof manager?.getLeafId !== "function" || typeof manager?.getEntry !== "function") return null;
+    const snapshot = control.snapshot();
+    if (!validId(snapshot?.conversation_id) || !nullableId(snapshot.reset_entry_id) ||
+        !validId(snapshot.context_epoch) || !["working", "not_working", "unknown"].includes(snapshot.work?.state) ||
+        !nullableId(snapshot.work?.fence)) return null;
+    return { control, manager, snapshot };
+  }
+  function encode(cursor) {
+    const encoded = Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+    if (encoded.length > 2048) throw new Error("invalid_params");
+    return encoded;
+  }
+  function decode(encoded) {
+    if (typeof encoded !== "string" || encoded.length > 2048 || !/^[A-Za-z0-9_-]+$/.test(encoded)) throw new Error("invalid_params");
+    const c = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    if (c.v !== 1 || typeof c.b !== "string" || !/^[a-f0-9]{64}$/.test(c.b) ||
+        !validId(c.r) || !validId(c.c) || !nullableId(c.t) || !nullableId(c.s) ||
+        !Number.isSafeInteger(c.o) || c.o < 0 || !["snapshot", "delta"].includes(c.p)) throw new Error("invalid_params");
+    return c;
+  }
+  function project(entry) {
+    const m = entry.message;
+    if (entry.type !== "message" || !["user", "assistant"].includes(m?.role) ||
+        (m.role === "user" && (m.synthetic === true || (m.attribution !== undefined && m.attribution !== "user")))) return null;
+    const text = typeof m.content === "string" ? m.content : Array.isArray(m.content) ?
+      m.content.filter(b => b?.type === "text" && typeof b.text === "string").map(b => b.text).join("") : "";
+    if (!text) return null;
+    return { entry_id: entry.id, parent_id: entry.parentId, role: m.role,
+      stop_reason: m.role === "assistant" ? m.stopReason ?? null : null,
+      has_tool_calls: m.role === "assistant" ? (Array.isArray(m.content) ?
+        m.content.some(b => !["text", "thinking", "redactedThinking"].includes(b?.type)) : null) : false, text };
+  }
+  async function index(manager, snapshot) {
+    const context = JSON.stringify([snapshot.conversation_id, snapshot.reset_entry_id, snapshot.context_epoch]);
+    const capturedTip = manager.getLeafId();
+    if (!nullableId(capturedTip)) throw new Error("history_unavailable");
+    if (cachedContext !== context) { branch = []; positions = new Map(); tip = null; cachedContext = context; }
+    if (capturedTip === tip) return capturedTip;
+    const suffix = [], seen = new Set();
+    let id = capturedTip;
+    while (id !== tip && id !== snapshot.reset_entry_id && id !== null) {
+      if (!validId(id) || seen.has(id)) throw new Error("history_unavailable");
+      seen.add(id);
+      const entry = manager.getEntry(id);
+      if (!entry || !nullableId(entry.parentId)) throw new Error("history_unavailable");
+      suffix.push(entry); id = entry.parentId;
+      if (suffix.length % 512 === 0) {
+        const deferred = Promise.withResolvers();
+        setImmediate(deferred.resolve);
+        await deferred.promise;
+      }
+    }
+    if (tip !== null && id !== tip) throw new Error("branch_changed");
+    for (const entry of suffix.reverse()) { positions.set(entry.id, branch.length); branch.push(entry); }
+    tip = capturedTip;
+    return capturedTip;
+  }
+  async function read(request, live) {
+    const p = request.params, budget = p.max_bytes ?? 65536, snapshot = live.snapshot;
+    if (!Number.isSafeInteger(budget) || budget < 4096 || budget > 65536 ||
+        p.terminal_id !== request.terminal_id || (p.cursor != null && p.expected_context == null)) return error(request, "invalid_params");
+    const binding = { terminal_id: request.terminal_id, conversation_id: snapshot.conversation_id, reset_entry_id: snapshot.reset_entry_id };
+    if (p.expected_context != null && !sameContext(p.expected_context, binding)) return error(request, "binding_mismatch");
+    const capturedTip = live.manager.getLeafId();
+    let cursor = p.cursor == null ? null : decode(p.cursor);
+    const result = { contract_version: 1, binding, reporter_epoch: reporterEpoch, context_epoch: snapshot.context_epoch,
+      work: snapshot.work, capabilities: ["guarded_submit_v1", "input_status_v1", "guarded_abort_v1", "reply_style_v1"],
+      mode: "delta", reset_reason: null, snapshot_tip_id: capturedTip, records: [],
+      next_cursor: null, baseline_cursor: null, has_more: false };
+    const fits = value => Math.max(bytes({ status: "conversation", reason: "", result: value }),
+      bytes({ id: request.request_id, result: { type: "agent_conversation", result: value } })) <= budget;
+    const reset = reason => {
+      const resetResult = { ...result, mode: "reset", reset_reason: reason };
+      return fits(resetResult) ? { status: "conversation", reason: "", result: resetResult } : error(request, "page_budget_too_small");
+    };
+    try { await index(live.manager, snapshot); }
+    catch (cause) {
+      cachedContext = undefined;
+      return reset(cause?.message === "branch_changed" ? "branch_changed" : "history_unavailable");
+    }
+    const now = native();
+    if (!now || !sameContext(now.snapshot, snapshot) || now.snapshot.context_epoch !== snapshot.context_epoch) return error(request, "context_changed");
+    if (cursor && (cursor.b !== bindingKey(binding) || (cursor.r === reporterEpoch && cursor.c !== snapshot.context_epoch))) return reset("branch_changed");
+    const isPosition = id => id === null || id === binding.reset_entry_id || positions.has(id);
+    const position = id => id === null || id === binding.reset_entry_id ? -1 : positions.get(id);
+    if (cursor && (!isPosition(cursor.t) || !isPosition(cursor.s))) return reset("history_unavailable");
+    if (cursor && position(cursor.s) > position(cursor.t)) return reset("branch_changed");
+    if (cursor?.o > 0 && position(cursor.s) < 0) return reset("history_unavailable");
+    const fresh = (s, p, t = capturedTip, o = 0) => ({ v: 1, b: bindingKey(binding), r: reporterEpoch, c: snapshot.context_epoch, t, s, o, p });
+    let start;
+    if (!cursor) {
+      result.mode = "snapshot"; result.baseline_cursor = encode(fresh(capturedTip, "delta"));
+      start = Math.max(0, branch.length - 64);
+      cursor = fresh(start > 0 ? branch[start - 1].id : binding.reset_entry_id, "snapshot");
+    } else {
+      result.mode = cursor.p; cursor = { ...cursor, r: reporterEpoch, c: snapshot.context_epoch };
+      if (cursor.s === cursor.t && cursor.o === 0) { cursor = fresh(cursor.s, "delta"); result.mode = "delta"; }
+      start = position(cursor.s) + (cursor.o > 0 ? 0 : 1);
+    }
+    result.snapshot_tip_id = cursor.t;
+    const end = position(cursor.t);
+    for (let i = start, scanned = 0; i <= end && scanned < 4096; i++, scanned++) {
+      const entry = branch[i], visible = project(entry);
+      if (!visible) {
+        const next = { ...cursor, s: entry.id, o: 0, p: i === end ? "delta" : cursor.p };
+        if (!fits({ ...result, next_cursor: encode(next), has_more: i < end })) {
+          if (result.records.length === 0) return error(request, "page_budget_too_small");
+          break;
+        }
+        cursor = next;
+        continue;
+      }
+      const text = Buffer.from(visible.text, "utf8"), offset = cursor.o;
+      if (offset >= text.length || (offset > 0 && (text[offset] & 0xc0) === 0x80)) return reset("history_unavailable");
+      const record = { ...visible, text_total_bytes: text.length, text_offset_bytes: offset, text: "", entry_end: false };
+      let low = 0, high = text.length - offset, best = 0;
+      while (low <= high) {
+        const probe = Math.floor((low + high) / 2);
+        let length = probe;
+        while (length > 0 && offset + length < text.length && (text[offset + length] & 0xc0) === 0x80) length--;
+        if (length === 0) { low = probe + 1; continue; }
+        const complete = offset + length === text.length;
+        const next = { ...cursor, s: entry.id, o: complete ? 0 : offset + length, p: complete && i === end ? "delta" : cursor.p };
+        const candidate = { ...record, text: text.subarray(offset, offset + length).toString("utf8"), entry_end: complete };
+        if (length > 0 && fits({ ...result, records: [...result.records, candidate], next_cursor: encode(next), has_more: !complete || i < end })) {
+          best = length; low = probe + 1;
+        } else high = probe - 1;
+      }
+      if (best === 0) { if (result.records.length === 0) return error(request, "page_budget_too_small"); break; }
+      record.text = text.subarray(offset, offset + best).toString("utf8"); record.entry_end = offset + best === text.length;
+      result.records.push(record); cursor.s = entry.id; cursor.o = record.entry_end ? 0 : offset + best;
+      if (!record.entry_end) break;
+    }
+    result.has_more = cursor.o > 0 || position(cursor.s) < end;
+    if (!result.has_more) cursor.p = "delta";
+    result.next_cursor = encode(cursor);
+    if (p.cursor && result.records.length === 0 && !result.has_more && cursor.s === capturedTip &&
+        decode(p.cursor).s === capturedTip && decode(p.cursor).o === 0) result.mode = "unchanged";
+    if (!fits(result)) return error(request, "page_budget_too_small");
+    const after = native();
+    if (!after || !sameContext(after.snapshot, snapshot) || after.snapshot.context_epoch !== snapshot.context_epoch) return error(request, "context_changed");
+    return { status: "conversation", reason: "", result };
+  }
+  async function dispatch(request) {
+    const p = request.params;
+    if (!p || !validId(request.terminal_id) || !validId(request.request_id)) return error(request, "invalid_params");
+    if (request.operation !== "conversation_read" && (!p.binding || !validId(p.binding.terminal_id) || !validId(p.binding.conversation_id) ||
+        !nullableId(p.binding.reset_entry_id) || !validId(p.reporter_epoch))) return error(request, "invalid_params");
+    const key = request.operation === "conversation_read" ? null : receiptKey(p);
+    if (request.operation === "conversation_input_status") {
+      if (!validId(p.input_id)) return error(request, "invalid_params");
+      const slot = p.reporter_epoch === reporterEpoch ? receipts.get(key) : undefined;
+      return { status: "conversation", reason: "", result: slot ? slot.result : {
+        input_id: p.input_id, binding: p.binding, reporter_epoch: reporterEpoch, status: "unknown",
+        reason: p.reporter_epoch === reporterEpoch ? "receipt_unavailable" : "reporter_changed" } };
+    }
+    let live;
+    try { live = native(); } catch { return error(request, "structured_unavailable"); }
+    if (!live) return error(request, "structured_unavailable");
+    const binding = { terminal_id: request.terminal_id, conversation_id: live.snapshot.conversation_id, reset_entry_id: live.snapshot.reset_entry_id };
+    if (request.operation === "conversation_read") return read(request, live);
+    if (request.operation === "conversation_capabilities") return { status: "conversation", reason: "", result: {
+      contract_version: 1, binding, reporter_epoch: reporterEpoch, context_epoch: live.snapshot.context_epoch,
+      capabilities: ["guarded_submit_v1", "input_status_v1", "guarded_abort_v1", "reply_style_v1"]
+    } };
+    if (!sameBinding(p.binding, binding)) return error(request, "binding_mismatch");
+    if (p.reporter_epoch !== reporterEpoch) return error(request, "reporter_changed");
+    if (!validId(p.context_epoch) || p.context_epoch !== live.snapshot.context_epoch) return error(request, "context_changed");
+    const expected_context = { conversation_id: binding.conversation_id, reset_entry_id: binding.reset_entry_id };
+    if (request.operation === "conversation_abort") {
+      if (!validId(p.work_fence)) return error(request, "invalid_params");
+      try {
+        const outcome = await live.control.abort({ expected_context, context_epoch: p.context_epoch, work_fence: p.work_fence });
+        if (outcome?.status === "rejected") return error(request, outcome.reason ?? "work_changed", outcome.invocation === "not_started" ? "not_started" : "unknown");
+        if (!["acknowledged", "not_working"].includes(outcome?.status)) return error(request, "abort_failed", "unknown");
+        return { status: "conversation", reason: "", result: { binding, reporter_epoch: reporterEpoch, context_epoch: p.context_epoch, status: outcome.status } };
+      } catch { return error(request, "abort_failed", "unknown"); }
+    }
+    if (request.operation !== "conversation_submit") return error(request, "structured_unavailable");
+    if (!validId(p.input_id) || typeof p.text !== "string" || !p.text.trim() ||
+        !Object.hasOwn(CONVERSATION_POLICIES, p.reply_style)) return error(request, "invalid_params");
+    const text = CONVERSATION_POLICIES[p.reply_style] + p.text;
+    if (Buffer.byteLength(text, "utf8") > 128 * 1024 || bytes({ ...request, params: { ...p, text } }) > 256 * 1024) return error(request, "request_too_large");
+    const digest = createHash("sha256").update(JSON.stringify([p.text, p.reply_style])).digest("hex"), previous = receipts.get(key);
+    if (previous) return previous.digest === digest ? previous.promise : error(request, "idempotency_conflict");
+    if (receipts.size >= 256) {
+      const oldest = [...receipts].find(([, slot]) => slot.result.status !== "dispatching");
+      if (!oldest) return error(request, "capacity_exhausted");
+      receipts.delete(oldest[0]);
+    }
+    const slot = { digest, result: { input_id: p.input_id, binding, reporter_epoch: reporterEpoch, context_epoch: p.context_epoch, status: "dispatching" }, promise: null };
+    // Reserve before native invocation/await; concurrent duplicates join the reservation.
+    receipts.set(key, slot);
+    slot.promise = Promise.resolve().then(async () => {
+      try {
+        const outcome = await live.control.submit({ expected_context, context_epoch: p.context_epoch, text });
+        if (outcome?.status === "accepted") {
+          slot.result = { ...slot.result, status: "accepted_by_reporter", receipt: randomUUID(), reply_style: p.reply_style };
+          return { status: "conversation", reason: "", result: slot.result };
+        }
+        const invocation = outcome?.invocation === "not_started" ? "not_started" : "unknown", reason = outcome?.reason ?? "submission_failed";
+        slot.result = { ...slot.result, status: invocation === "not_started" ? "rejected_before_dispatch" : "unknown", reason };
+        return error(request, reason, invocation);
+      } catch {
+        slot.result = { ...slot.result, status: "unknown", reason: "submission_failed" };
+        return error(request, "submission_failed", "unknown");
+      }
+    });
+    return slot.promise;
+  }
+  return request => {
+    const run = () => dispatch(request).catch(cause => error(request,
+      request.operation === "conversation_read" && ["invalid_params", "history_unavailable", "branch_changed"].includes(cause?.message) ? cause.message : "structured_unavailable",
+      request.operation === "conversation_read" ? "not_started" : "unknown"));
+    if (request.operation !== "conversation_read") return run();
+    const result = reads.then(run, run); reads = result.then(() => {}, () => {}); return result;
+  };
+}
+
+
 export default function (pi) {
+  const conversation = createConversationAdapter(() => currentContext);
   if (!enabled()) {
     return;
   }
@@ -591,6 +845,24 @@ export default function (pi) {
             try {
               const parsed = JSON.parse(input.subarray(0, newline).toString("utf8"));
               const operation = (parsed as Record<string, unknown>)?.operation;
+              if (typeof operation === "string" && operation.startsWith("conversation_")) {
+                replied = true;
+                clearTimeout(deadline);
+                client.setTimeout(5000);
+                updateSessionRef(currentContext);
+                const base = baseAdmissionSkipReason(parsed);
+                if (base) {
+                  client.end(`${JSON.stringify({ status: "conversation", reason: "", error: {
+                    code: "binding_mismatch", message: base, reason: "binding_mismatch",
+                    invocation: "not_started", input_id: parsed.params?.input_id
+                  } })}\n`);
+                } else {
+                  void conversation(parsed).then(reply => {
+                    if (!client.destroyed) client.end(`${JSON.stringify(reply)}\n`);
+                  });
+                }
+                return;
+              }
               if (operation === "chat_submit") {
                 const skip = chatSubmitSkipReason(parsed as Record<string, unknown>);
                 if (skip) {
@@ -622,6 +894,8 @@ export default function (pi) {
                     }
                   }
                 }
+              } else if (input.length > 8192) {
+                reason = "request-too-large";
               } else if (operation === "abort") {
                 const skip = abortSkipReason(parsed as Record<string, unknown>);
                 if (skip) {
@@ -660,7 +934,7 @@ export default function (pi) {
                 reason = restartSkipReason(parsed);
               }
             } catch {
-              reason = "invalid-request";
+              reason = input.length > 8192 ? "request-too-large" : "invalid-request";
             }
           }
           replied = true;

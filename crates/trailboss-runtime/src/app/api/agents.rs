@@ -91,6 +91,49 @@ impl App {
             self.start_restart_idle_agents(request.id, respond_to);
             return true;
         }
+        match &request.method {
+            crate::api::schema::Method::AgentConversationRead(params) => {
+                self.start_agent_conversation(
+                    request.id,
+                    respond_to,
+                    "conversation_read",
+                    &params.terminal_id,
+                    serde_json::to_value(params).unwrap(),
+                );
+                return true;
+            }
+            crate::api::schema::Method::AgentConversationSubmit(params) => {
+                self.start_agent_conversation(
+                    request.id,
+                    respond_to,
+                    "conversation_submit",
+                    &params.binding.terminal_id,
+                    serde_json::to_value(params).unwrap(),
+                );
+                return true;
+            }
+            crate::api::schema::Method::AgentConversationInputStatus(params) => {
+                self.start_agent_conversation(
+                    request.id,
+                    respond_to,
+                    "conversation_input_status",
+                    &params.binding.terminal_id,
+                    serde_json::to_value(params).unwrap(),
+                );
+                return true;
+            }
+            crate::api::schema::Method::AgentConversationAbort(params) => {
+                self.start_agent_conversation(
+                    request.id,
+                    respond_to,
+                    "conversation_abort",
+                    &params.binding.terminal_id,
+                    serde_json::to_value(params).unwrap(),
+                );
+                return true;
+            }
+            _ => {}
+        }
         if let crate::api::schema::Method::AgentChatSubmit(params) = &request.method {
             self.start_agent_chat_submit(request.id, respond_to, params.clone());
             return true;

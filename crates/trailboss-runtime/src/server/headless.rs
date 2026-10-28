@@ -3045,6 +3045,10 @@ impl HeadlessServer {
                 | api::schema::Method::AgentRestartIdle(_)
                 | api::schema::Method::AgentChatSubmit(_)
                 | api::schema::Method::AgentTurnAbort(_)
+                | api::schema::Method::AgentConversationRead(_)
+                | api::schema::Method::AgentConversationSubmit(_)
+                | api::schema::Method::AgentConversationInputStatus(_)
+                | api::schema::Method::AgentConversationAbort(_)
                 | api::schema::Method::AgentShutdown(_)
         ) {
             let deferred_changed = self
