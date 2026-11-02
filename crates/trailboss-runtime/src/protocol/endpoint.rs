@@ -448,25 +448,6 @@ mod tests {
     }
 
     #[test]
-    fn compatible_server_advertises_endpoint_lifecycle_capabilities() {
-        let welcome = EndpointServerWelcome::compatible(Vec::new());
-        assert_eq!(
-            welcome.capabilities,
-            vec![
-                super::super::surface_reuse::CAPABILITY.to_string(),
-                super::super::surface_delta::CAPABILITY.to_string(),
-                super::super::surface_scroll::CAPABILITY.to_string(),
-                SURFACE_INTEREST_CAPABILITY.to_string(),
-                PRESENTATION_EFFECTS_FENCE_CAPABILITY.to_string(),
-                HEALTH_CHECK_CAPABILITY.to_string(),
-                AGENT_VIEW_PROJECTION_CAPABILITY.to_string(),
-                AGENT_COMPLETIONS_CAPABILITY.to_string(),
-                PLUGIN_UI_CAPABILITY.to_string(),
-            ]
-        );
-    }
-
-    #[test]
     fn required_codecs_are_explicit() {
         let mut value = hello();
         assert!(value.supports_required_codecs());

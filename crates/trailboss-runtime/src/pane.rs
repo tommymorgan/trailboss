@@ -311,6 +311,26 @@ async fn publish_agent_process_detected_event(
     }
 }
 
+fn credential_prompt_visible(content: &str) -> bool {
+    let Some(line) = content.lines().rev().find(|line| !line.trim().is_empty()) else {
+        return false;
+    };
+    let line = line.trim();
+    line.ends_with(':')
+        && (line.eq_ignore_ascii_case("password:")
+            || line.eq_ignore_ascii_case("passphrase:")
+            || [
+                "[sudo] password for ",
+                "password for ",
+                "enter passphrase for ",
+            ]
+            .iter()
+            .any(|prefix| {
+                line.get(..prefix.len())
+                    .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+            }))
+}
+
 /// Publishes fallback ordinary-command state from the existing process probe.
 ///
 /// Only an observed foreground job that does not contain the pane's shell is
@@ -322,26 +342,40 @@ async fn publish_agent_process_detected_event(
 /// SSH transport.
 async fn publish_ordinary_probe_state(
     state_events: &mpsc::Sender<AppEvent>,
+    terminal: &PaneTerminal,
     pane_id: PaneId,
     agent: Option<Agent>,
     lifecycle_authority_active: bool,
     suppressed_agent: Option<Agent>,
     probe: &ProcessProbeResult,
     now: std::time::Instant,
-    last_published: &mut Option<AgentState>,
+    last_published: &mut Option<(AgentState, u64)>,
 ) {
     if lifecycle_authority_active || agent.is_some() || suppressed_agent.is_some() {
+        *last_published = None;
         return;
     }
-    let state = if probe.foreground_job_observed && !probe.foreground_is_pane_shell {
+    let Some(generation) = terminal.ordinary_command_generation() else {
+        return;
+    };
+    let input_waiting = match probe.terminal_input_wait {
+        crate::platform::TerminalInputWait::Reading => true,
+        crate::platform::TerminalInputWait::ProtectedReadCandidate => {
+            credential_prompt_visible(&terminal.detection_text())
+        }
+        crate::platform::TerminalInputWait::NotWaiting => false,
+    };
+    let state = if input_waiting {
+        AgentState::Waiting
+    } else if probe.foreground_job_observed && !probe.foreground_is_pane_shell {
         AgentState::Working
     } else {
         AgentState::Unknown
     };
-    if *last_published == Some(state) {
+    if *last_published == Some((state, generation)) {
         return;
     }
-    *last_published = Some(state);
+    *last_published = Some((state, generation));
     if let Err(err) = state_events
         .send(AppEvent::StateChanged {
             pane_id,
@@ -722,6 +756,19 @@ struct ProcessProbeInput {
     elapsed_since_process_check: std::time::Duration,
 }
 
+fn ordinary_input_probe_due(
+    terminal: &PaneTerminal,
+    lifecycle_authority: bool,
+    input: ProcessProbeInput,
+) -> bool {
+    cfg!(target_os = "linux")
+        && !lifecycle_authority
+        && input.current_agent.is_none()
+        && input.suppressed_agent.is_none()
+        && input.elapsed_since_process_check >= std::time::Duration::from_millis(500)
+        && terminal.ordinary_command_is_executing()
+}
+
 fn foreground_group_changed(
     foreground_pgid: Option<u32>,
     last_foreground_pgid: Option<u32>,
@@ -854,6 +901,7 @@ struct ProcessProbeResult {
     /// shape with just a remembered pgid is not evidence a non-shell process
     /// is running.
     foreground_job_observed: bool,
+    terminal_input_wait: crate::platform::TerminalInputWait,
     agent: Option<Agent>,
     /// The process that identified as `agent`, which need not lead its job.
     agent_pid: Option<u32>,
@@ -902,6 +950,7 @@ fn process_probe_result(
         process_group_id: Some(job.process_group_id),
         foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
         foreground_job_observed: true,
+        terminal_input_wait: crate::platform::TerminalInputWait::NotWaiting,
         agent: Some(agent),
         agent_pid: Some(agent_pid),
         process_name: Some(process_name),
@@ -958,6 +1007,7 @@ fn probe_foreground_process_from_jobs(
             process_group_id: Some(job.process_group_id),
             foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
             foreground_job_observed: true,
+            terminal_input_wait: crate::platform::foreground_terminal_input_wait(pid, job),
             agent: None,
             agent_pid: None,
             process_name: None,
@@ -968,6 +1018,7 @@ fn probe_foreground_process_from_jobs(
         process_group_id: foreground_pgid,
         foreground_is_pane_shell: false,
         foreground_job_observed: false,
+        terminal_input_wait: crate::platform::TerminalInputWait::NotWaiting,
         agent: None,
         agent_pid: None,
         process_name: None,
@@ -1025,7 +1076,7 @@ fn spawn_basic_detection_task(
         let mut last_codex_prompt_ready = false;
         let mut last_self_reported_shell_check = None;
         let mut agent_job = AgentJobTracker::default();
-        let mut last_ordinary_probe_state: Option<AgentState> = None;
+        let mut last_ordinary_probe_state: Option<(AgentState, u64)> = None;
 
         loop {
             let sleep_duration = if pending_idle.active() {
@@ -1107,6 +1158,10 @@ fn spawn_basic_detection_task(
                     lifecycle_authority_active,
                     agent_job.in_background(),
                     process_probe_input,
+                ) || ordinary_input_probe_due(
+                    &terminal,
+                    lifecycle_authority_active,
+                    process_probe_input,
                 )
             };
 
@@ -1187,6 +1242,7 @@ fn spawn_basic_detection_task(
                 }
                 publish_ordinary_probe_state(
                     &state_events,
+                    &terminal,
                     pane_id,
                     agent,
                     lifecycle_authority_active,
@@ -1202,9 +1258,12 @@ fn spawn_basic_detection_task(
                 && agent.is_some()
                 && !foreground_shell_exit_reported;
 
-            // The visible screen belongs to another job while the agent waits
-            // in the background, so it says nothing about the agent's state.
-            if (lifecycle_authority_active || agent_job.in_background()) && !process_exited {
+            // Ordinary panes use the process probe; agent screen detection
+            // must not overwrite their terminal-read state with Unknown.
+            // A background agent's screen belongs to another job.
+            if (agent.is_none() || lifecycle_authority_active || agent_job.in_background())
+                && !process_exited
+            {
                 pending_idle.clear();
                 continue;
             }
@@ -3045,7 +3104,7 @@ impl PaneRuntime {
                 let mut last_codex_prompt_ready = false;
                 let mut last_self_reported_shell_check = None;
                 let mut agent_job = AgentJobTracker::default();
-                let mut last_ordinary_probe_state: Option<AgentState> = None;
+                let mut last_ordinary_probe_state: Option<(AgentState, u64)> = None;
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -3163,6 +3222,10 @@ impl PaneRuntime {
                             lifecycle_authority_active,
                             agent_job.in_background(),
                             process_probe_input,
+                        ) || ordinary_input_probe_due(
+                            &terminal,
+                            lifecycle_authority_active,
+                            process_probe_input,
                         )
                     };
 
@@ -3277,6 +3340,7 @@ impl PaneRuntime {
                             }
                             publish_ordinary_probe_state(
                                 &state_events,
+                                &terminal,
                                 pane_id,
                                 agent,
                                 lifecycle_authority_active,
@@ -3302,9 +3366,11 @@ impl PaneRuntime {
                         && agent.is_some()
                         && !foreground_shell_exit_reported;
 
-                    // The visible screen belongs to another job while the agent
-                    // waits in the background, so it says nothing about its state.
-                    if (lifecycle_authority_active || agent_job.in_background()) && !process_exited
+                    // Ordinary panes use the process probe; agent screen detection
+                    // must not overwrite their terminal-read state with Unknown.
+                    // A background agent's screen belongs to another job.
+                    if (agent.is_none() || lifecycle_authority_active || agent_job.in_background())
+                        && !process_exited
                     {
                         pending_idle.clear();
                         continue;

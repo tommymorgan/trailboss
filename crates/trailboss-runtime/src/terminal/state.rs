@@ -318,6 +318,9 @@ impl TerminalState {
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         self.ordinary_command = command;
+        if self.fallback_state == AgentState::Waiting && !self.is_agent_terminal() {
+            self.fallback_state = AgentState::Unknown;
+        }
         if self.patch_ordinary_command_tokens(now) {
             self.revision = self.revision.wrapping_add(1);
         }
@@ -386,7 +389,13 @@ impl TerminalState {
             return self.fallback_state;
         }
         match self.ordinary_command.phase {
-            OrdinaryCommandPhase::Executing => AgentState::Working,
+            OrdinaryCommandPhase::Executing => {
+                if self.fallback_state == AgentState::Waiting {
+                    AgentState::Waiting
+                } else {
+                    AgentState::Working
+                }
+            }
             OrdinaryCommandPhase::Finished => AgentState::Idle,
             OrdinaryCommandPhase::Prompt => AgentState::Unknown,
             OrdinaryCommandPhase::Unobserved => self.fallback_state,

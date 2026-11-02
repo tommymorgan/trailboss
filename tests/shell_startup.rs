@@ -348,3 +348,302 @@ fn completion_without_an_exit_code_never_uses_a_success_dot() {
     assert_eq!(completed["tokens"]["command.status"], "unknown");
     assert!(completed["tokens"].get("command.exit_code").is_none());
 }
+
+#[test]
+fn ordinary_terminal_input_waits_then_resumes_without_becoming_an_agent() {
+    let mut core = ShellCore::launch(Some("/bin/bash"), "");
+    core.wait_for("bash-ready> ");
+    let pane_id = core
+        .client
+        .as_ref()
+        .unwrap()
+        .focused_pane_id
+        .clone()
+        .unwrap();
+    core.client
+        .as_mut()
+        .unwrap()
+        .type_text("read -r -p \"input-$(printf required)> \" answer; printf 'resumed-%s\\n' work; while [ ! -e release-input-command ]; do sleep 0.02; done; (exit 7)\r")
+        .unwrap();
+    core.wait_for("input-required> ");
+    let waiting = core.wait_for_pane_status(&pane_id, "waiting");
+    assert!(waiting["agent"].is_null(), "input waiting is not an agent");
+    assert_eq!(waiting["tokens"]["command.status"], "running");
+
+    core.client
+        .as_mut()
+        .unwrap()
+        .type_text("synthetic-input\r")
+        .unwrap();
+    core.wait_for("resumed-work");
+    let working = core.wait_for_pane_status(&pane_id, "working");
+    assert!(working["agent"].is_null());
+    std::fs::write(core.home.join("release-input-command"), "").unwrap();
+    let completed = core.wait_for_pane_status(&pane_id, "idle");
+    assert_eq!(completed["tokens"]["command.status"], "failure");
+    assert_eq!(completed["tokens"]["command.exit_code"], "7");
+}
+
+#[test]
+fn protected_password_read_waits_without_requiring_process_memory_access() {
+    let mut core = ShellCore::launch(Some("/bin/bash"), "");
+    core.wait_for("bash-ready> ");
+    std::fs::write(
+        core.home.join("protected_password.py"),
+        r#"import ctypes
+import getpass
+import pathlib
+import time
+
+if ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) != 0:
+    raise SystemExit("could not protect the owned password fixture")
+getpass.getpass("[sudo] password for synthetic: ")
+print("protected-resumed", flush=True)
+while not pathlib.Path("release-password-command").exists():
+    time.sleep(0.02)
+"#,
+    )
+    .unwrap();
+    let pane_id = core
+        .client
+        .as_ref()
+        .unwrap()
+        .focused_pane_id
+        .clone()
+        .unwrap();
+    core.client
+        .as_mut()
+        .unwrap()
+        .type_text("python3 ./protected_password.py\r")
+        .unwrap();
+    core.wait_for("[sudo] password for synthetic: ");
+    let process = core.request("pane.process_info", json!({"pane_id": pane_id}));
+    let pid = process["process_info"]["foreground_process_group_id"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        std::fs::read_to_string(format!("/proc/{pid}/syscall")).is_err(),
+        "the owned credential fixture must hide its syscall metadata"
+    );
+    let waiting = core.wait_for_pane_status(&pane_id, "waiting");
+    assert!(waiting["agent"].is_null());
+    assert_eq!(waiting["tokens"]["command.status"], "running");
+    core.client
+        .as_mut()
+        .unwrap()
+        .type_text("fixture-input-not-a-secret\r")
+        .unwrap();
+    core.wait_for("protected-resumed");
+    assert!(!core
+        .client
+        .as_ref()
+        .unwrap()
+        .primary
+        .as_ref()
+        .unwrap()
+        .text()
+        .contains("fixture-input-not-a-secret"));
+    core.wait_for_pane_status(&pane_id, "working");
+    std::fs::write(core.home.join("release-password-command"), "").unwrap();
+    let completed = core.wait_for_pane_status(&pane_id, "idle");
+    assert_eq!(completed["tokens"]["command.status"], "success");
+}
+
+#[test]
+fn a_new_command_gets_its_own_terminal_wait_observation() {
+    let mut core = ShellCore::launch(Some("/bin/bash"), "");
+    core.wait_for("bash-ready> ");
+    let pane_id = core
+        .client
+        .as_ref()
+        .unwrap()
+        .focused_pane_id
+        .clone()
+        .unwrap();
+    core.client
+        .as_mut()
+        .unwrap()
+        .type_text("read -r -p \"first-$(printf input)> \" answer\r")
+        .unwrap();
+    core.wait_for("first-input> ");
+    core.wait_for_pane_status(&pane_id, "waiting");
+    core.client
+        .as_mut()
+        .unwrap()
+        .type_text("first-answer\r")
+        .unwrap();
+    core.wait_for_pane_status(&pane_id, "idle");
+    core.client
+        .as_mut()
+        .unwrap()
+        .type_text("read -r -p \"second-$(printf input)> \" answer\r")
+        .unwrap();
+    core.wait_for("second-input> ");
+    let waiting = core.wait_for_pane_status(&pane_id, "waiting");
+    assert!(waiting["agent"].is_null());
+    core.client
+        .as_mut()
+        .unwrap()
+        .type_text("second-answer\r")
+        .unwrap();
+    core.wait_for_pane_status(&pane_id, "idle");
+}
+
+#[test]
+fn sleeping_pipe_and_raw_jobs_do_not_claim_human_input_waits() {
+    for mode in ["sleep", "pipe", "raw", "protected-sleep"] {
+        let mut core = ShellCore::launch(Some("/bin/bash"), "");
+        core.wait_for("bash-ready> ");
+        std::fs::write(
+            core.home.join("ordinary_job.py"),
+            r#"import ctypes
+import os
+import pathlib
+import sys
+import termios
+import threading
+import time
+import tty
+
+mode = sys.argv[1]
+saved = termios.tcgetattr(0)
+release = pathlib.Path("release-ordinary-job")
+if mode == "raw":
+    tty.setraw(0)
+elif mode == "protected-sleep":
+    if ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) != 0:
+        raise SystemExit("could not protect the owned work fixture")
+    hidden = termios.tcgetattr(0)
+    hidden[3] &= ~termios.ECHO
+    termios.tcsetattr(0, termios.TCSANOW, hidden)
+    print("Password:", flush=True)
+if mode == "pipe":
+    reader, writer = os.pipe()
+    def release_pipe():
+        while not release.exists():
+            time.sleep(0.02)
+        os.write(writer, b"x")
+    threading.Thread(target=release_pipe, daemon=True).start()
+print("bounded-job-ready", flush=True)
+try:
+    if mode == "raw":
+        os.read(0, 1)
+    elif mode == "pipe":
+        os.read(reader, 1)
+    else:
+        while not release.exists():
+            time.sleep(0.02)
+finally:
+    termios.tcsetattr(0, termios.TCSANOW, saved)
+"#,
+        )
+        .unwrap();
+        let pane_id = core
+            .client
+            .as_ref()
+            .unwrap()
+            .focused_pane_id
+            .clone()
+            .unwrap();
+        core.client
+            .as_mut()
+            .unwrap()
+            .type_text(&format!("python3 ./ordinary_job.py {mode}\r"))
+            .unwrap();
+        core.wait_for("bounded-job-ready");
+        core.wait_for_pane_status(&pane_id, "working");
+        let deadline = Instant::now() + Duration::from_millis(900);
+        while Instant::now() < deadline {
+            let pane = core.request("pane.get", json!({"pane_id": pane_id}));
+            assert_eq!(pane["pane"]["agent_status"], "working", "{mode}: {pane}");
+            assert!(pane["pane"]["agent"].is_null());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if mode == "raw" {
+            core.client.as_mut().unwrap().type_text("x").unwrap();
+        } else {
+            std::fs::write(core.home.join("release-ordinary-job"), "").unwrap();
+        }
+        let completed = core.wait_for_pane_status(&pane_id, "idle");
+        assert_eq!(completed["tokens"]["command.status"], "success", "{mode}");
+    }
+}
+
+#[test]
+fn ordinary_input_observations_do_not_override_agent_lifecycle_authority() {
+    let mut core = ShellCore::launch(Some("/bin/bash"), "");
+    core.wait_for("bash-ready> ");
+    let pane_id = core
+        .client
+        .as_ref()
+        .unwrap()
+        .focused_pane_id
+        .clone()
+        .unwrap();
+    core.client
+        .as_mut()
+        .unwrap()
+        .type_text("read -r -p \"authority-$(printf input)> \" answer\r")
+        .unwrap();
+    core.wait_for("authority-input> ");
+    core.wait_for_pane_status(&pane_id, "waiting");
+    core.request(
+        "pane.report_agent",
+        json!({
+            "pane_id": pane_id,
+            "source": "waiting-authority-fixture",
+            "agent": "omp",
+            "state": "blocked",
+            "seq": 1
+        }),
+    );
+    core.wait_for_pane_status(&pane_id, "blocked");
+    let deadline = Instant::now() + Duration::from_millis(900);
+    while Instant::now() < deadline {
+        let pane = core.request("pane.get", json!({"pane_id": pane_id}));
+        assert_eq!(pane["pane"]["agent_status"], "blocked", "{pane}");
+        assert_eq!(pane["pane"]["agent"], "omp");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_worker_threads_canonical_terminal_read_is_waiting() {
+    let mut core = ShellCore::launch(Some("/bin/bash"), "");
+    core.wait_for("bash-ready> ");
+    std::fs::write(
+        core.home.join("threaded_input.py"),
+        r#"import os
+import threading
+
+reader = threading.Thread(target=lambda: os.read(0, 4096))
+reader.start()
+print("thread-input-ready", flush=True)
+reader.join()
+"#,
+    )
+    .unwrap();
+    let pane_id = core
+        .client
+        .as_ref()
+        .unwrap()
+        .focused_pane_id
+        .clone()
+        .unwrap();
+    core.client
+        .as_mut()
+        .unwrap()
+        .type_text("python3 ./threaded_input.py\r")
+        .unwrap();
+    core.wait_for("thread-input-ready");
+    let waiting = core.wait_for_pane_status(&pane_id, "waiting");
+    assert!(waiting["agent"].is_null());
+    assert_eq!(waiting["tokens"]["command.status"], "running");
+    core.client
+        .as_mut()
+        .unwrap()
+        .type_text("synthetic-thread-input\r")
+        .unwrap();
+    let completed = core.wait_for_pane_status(&pane_id, "idle");
+    assert_eq!(completed["tokens"]["command.status"], "success");
+}

@@ -507,6 +507,7 @@ struct ShellCommandOscState {
     phase: crate::terminal::state::OrdinaryCommandPhase,
     exit_code: Option<u8>,
     dirty: bool,
+    generation: u64,
 }
 
 impl AgentOscStateTracker {
@@ -556,6 +557,14 @@ impl AgentOscStateTracker {
             phase: self.shell_command.phase,
             exit_code: self.shell_command.exit_code,
         })
+    }
+
+    pub(super) fn ordinary_command_is_executing(&self) -> bool {
+        self.shell_command.phase == crate::terminal::state::OrdinaryCommandPhase::Executing
+    }
+
+    pub(super) fn ordinary_command_generation(&self) -> u64 {
+        self.shell_command.generation
     }
 
     /// Restores the ordinary-command lifecycle across a live handoff so a
@@ -633,6 +642,7 @@ impl ShellCommandOscState {
                 _ => None,
             },
             b'C' => {
+                self.generation = self.generation.wrapping_add(1);
                 self.set_exit(None);
                 Some(crate::terminal::state::OrdinaryCommandPhase::Executing)
             }

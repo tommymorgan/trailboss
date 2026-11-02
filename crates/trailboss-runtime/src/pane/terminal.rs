@@ -504,6 +504,21 @@ impl PaneTerminal {
         self.ghostty.detection_text()
     }
 
+    pub(crate) fn ordinary_command_is_executing(&self) -> bool {
+        self.ghostty
+            .core
+            .try_lock()
+            .is_ok_and(|core| core.agent_osc_state.ordinary_command_is_executing())
+    }
+
+    pub(crate) fn ordinary_command_generation(&self) -> Option<u64> {
+        self.ghostty
+            .core
+            .try_lock()
+            .ok()
+            .map(|core| core.agent_osc_state.ordinary_command_generation())
+    }
+
     pub(crate) fn try_compression_activity(&self) -> Result<Option<u64>, crate::ghostty::Error> {
         self.ghostty.try_compression_activity()
     }

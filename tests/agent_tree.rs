@@ -377,6 +377,94 @@ fn cell_style(
     (cells.style().unwrap(), cells.fg_color().unwrap())
 }
 
+#[test]
+fn waiting_renders_as_a_filled_violet_dot_in_both_native_sidebar_layouts() {
+    let mut fixture = enable_first_consumer();
+    let pane_id = fixture.client.focused_pane_id.as_ref().unwrap();
+    fixture.core.request(
+        "pane.report_agent",
+        json!({
+            "pane_id": pane_id,
+            "source": "agent-tree-fixture",
+            "agent": "codex",
+            "state": "waiting"
+        }),
+    );
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !fixture
+        .client
+        .declarations
+        .as_ref()
+        .is_some_and(|declarations| {
+            sidebar::rows(declarations).any(|(_, node)| {
+                matches!(node, Node::Row { children, .. } if matches!(
+                    children.first(),
+                    Some(Node::Label { role, .. }) if role == "status-waiting"
+                ))
+            })
+        })
+    {
+        assert!(
+            Instant::now() < deadline,
+            "waiting declaration did not arrive"
+        );
+        fixture.client.receive().unwrap();
+    }
+    crossterm::style::force_color_output(true);
+    for themed in [true, false] {
+        let mut declarations = fixture.client.declarations.as_ref().unwrap().clone();
+        if !themed {
+            for (_, declaration) in &mut declarations {
+                for placement in &mut declaration.zones {
+                    if let Node::Column { children } = &mut placement.tree {
+                        children.retain(|node| matches!(node, Node::Row { context, .. } if context.tab_id.is_some()));
+                    }
+                }
+            }
+        }
+        let mut bytes = Vec::new();
+        sidebar::draw(
+            &mut bytes,
+            &declarations,
+            terminal::Rect {
+                x: 0,
+                y: 0,
+                width: 50,
+                height: 24,
+            },
+            fixture.client.focused_tab_id.as_deref(),
+        )
+        .unwrap();
+        let mut screen = ghostty_vt::Terminal::new(50, 24, 0).unwrap();
+        screen.write(&bytes);
+        let rows = screen.screen_text_rows().unwrap();
+        let (y, row) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| {
+                let text: String = row
+                    .cells
+                    .iter()
+                    .flat_map(|cell| cell.graphemes.iter())
+                    .filter_map(|ch| char::from_u32(*ch))
+                    .collect();
+                text.contains("Build")
+            })
+            .expect("the actual waiting tab must remain visible");
+        let x = row
+            .cells
+            .iter()
+            .position(|cell| cell.graphemes.contains(&u32::from('●')))
+            .expect("waiting must retain its filled dot");
+        let (_, color) = cell_style(&screen, y, x as u16);
+        assert_eq!(
+            color.map(|color| (color.r, color.g, color.b)),
+            Some((181, 138, 232)),
+            "themed={themed}"
+        );
+    }
+}
+
 fn rendered_sidebar(client: &Client) -> Vec<String> {
     let mut bytes = Vec::new();
     sidebar::draw(
