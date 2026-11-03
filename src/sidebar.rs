@@ -35,12 +35,18 @@ pub fn action_at(declarations: &Declarations, row: usize) -> Option<(&str, &str,
     };
     Some((plugin, action, context))
 }
+const WAITING_COLOR: Color = Color::Rgb {
+    r: 181,
+    g: 138,
+    b: 232,
+};
+
 pub(crate) fn role_color(role: &str) -> Color {
     match role {
         "muted" | "rule" | "leader" | "status-idle" => Color::DarkGrey,
         "status-working" => Color::Yellow,
         "status-blocked" => Color::Red,
-        "status-waiting" => Color::Blue,
+        "status-waiting" => WAITING_COLOR,
         "status-done" => Color::Green,
         _ => Color::Reset,
     }
@@ -136,11 +142,7 @@ fn themed_color(role: &str, focused: bool) -> Color {
             g: 90,
             b: 85,
         },
-        "status-waiting" => Color::Rgb {
-            r: 111,
-            g: 143,
-            b: 192,
-        },
+        "status-waiting" => WAITING_COLOR,
         _ if focused => Color::Rgb {
             r: 242,
             g: 238,

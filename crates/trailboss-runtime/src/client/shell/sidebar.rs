@@ -208,7 +208,7 @@ pub(in crate::client::shell) fn plugin_segment_style(
         "rule" => Style::default().fg(palette.overlay1),
         "status-working" => Style::default().fg(palette.yellow),
         "status-blocked" => Style::default().fg(palette.red),
-        "status-waiting" => Style::default().fg(palette.blue),
+        "status-waiting" => Style::default().fg(palette.mauve),
         "status-done" => Style::default().fg(palette.green),
         "status-idle" => Style::default().fg(palette.green),
         _ => base,

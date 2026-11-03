@@ -2083,13 +2083,37 @@ mod tests {
 
     #[test]
     fn cli_user_dir_creation_seeds_legacy_config_before_printing_config_dir() {
+        const CHILD: &str = "TRAILBOSS_PLUGIN_CONFIG_DIR_TEST";
+        let Some(root) = std::env::var_os(CHILD).map(PathBuf::from) else {
+            let root = std::env::temp_dir().join(unique_plugin_id("config-dir-child"));
+            std::fs::create_dir(&root).unwrap();
+            // CLI output changes process-wide SIGPIPE policy. Keep it out of the test runner.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cli::plugin::tests::cli_user_dir_creation_seeds_legacy_config_before_printing_config_dir",
+                    "--nocapture",
+                ])
+                .env(CHILD, &root)
+                .env("HOME", &root)
+                .env("USERPROFILE", &root)
+                .env("XDG_CONFIG_HOME", root.join("config"))
+                .env("XDG_STATE_HOME", root.join("state"))
+                .env("APPDATA", root.join("config"))
+                .env("LOCALAPPDATA", root.join("local"))
+                .output()
+                .unwrap();
+            std::fs::remove_dir_all(root).unwrap();
+            assert!(output.status.success(), "child failed: {output:?}");
+            return;
+        };
         let plugin_id = unique_plugin_id("legacy-config");
         let config_dir = crate::plugin_paths::plugin_config_dir(&plugin_id);
         let state_dir = crate::plugin_paths::plugin_state_dir(&plugin_id);
         let legacy_dir = crate::config::config_dir().join("plugins").join(&plugin_id);
-        let _ = std::fs::remove_dir_all(&config_dir);
-        let _ = std::fs::remove_dir_all(&state_dir);
-        let _ = std::fs::remove_dir_all(&legacy_dir);
+        assert!(config_dir.starts_with(&root));
+        assert!(state_dir.starts_with(&root));
+        assert!(legacy_dir.starts_with(&root));
         std::fs::create_dir_all(&legacy_dir).unwrap();
         std::fs::write(legacy_dir.join(".env"), "TOKEN=legacy\n").unwrap();
 
@@ -2102,9 +2126,5 @@ mod tests {
             std::fs::read_to_string(config_dir.join(".env")).unwrap(),
             "TOKEN=legacy\n"
         );
-
-        let _ = std::fs::remove_dir_all(config_dir);
-        let _ = std::fs::remove_dir_all(state_dir);
-        let _ = std::fs::remove_dir_all(legacy_dir);
     }
 }

@@ -1,7 +1,8 @@
 use std::{
     collections::{HashSet, VecDeque},
     io::{Read, Write},
-    os::fd::RawFd,
+    os::fd::{AsRawFd, RawFd},
+    os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
     path::PathBuf,
     process::{Command, Stdio},
     sync::OnceLock,
@@ -11,7 +12,7 @@ pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
 
 use super::{
     read_limited_reader, ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess,
-    LimitedRead, Signal,
+    LimitedRead, Signal, TerminalInputWait,
 };
 
 pub(crate) use super::unix_common::{
@@ -661,6 +662,103 @@ pub fn foreground_process_group_id(child_pid: u32) -> Option<u32> {
 pub fn foreground_process_group_id_for_tty_fd(fd: RawFd) -> Option<u32> {
     let pgid = unsafe { libc::tcgetpgrp(fd) };
     (pgid > 0).then_some(pgid as u32)
+}
+
+/// Observes canonical reads on this pane's terminal without consuming input.
+pub(crate) fn foreground_terminal_input_wait(
+    child_pid: u32,
+    job: &ForegroundJob,
+) -> TerminalInputWait {
+    let Some(shell) = process_job_stat(child_pid) else {
+        return TerminalInputWait::NotWaiting;
+    };
+    let Ok(tty) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(format!("/proc/{child_pid}/fd/0"))
+    else {
+        return TerminalInputWait::NotWaiting;
+    };
+    let mut mode: libc::termios = unsafe { std::mem::zeroed() };
+    // Core observes a different process's controlling terminal, so tcgetsid
+    // rejects the slave descriptor even when it belongs to this pane.
+    if unsafe { libc::tcgetattr(tty.as_raw_fd(), &mut mode) } != 0
+        || mode.c_lflag & libc::ICANON == 0
+    {
+        return TerminalInputWait::NotWaiting;
+    }
+    let Ok(terminal_metadata) = tty.metadata() else {
+        return TerminalInputWait::NotWaiting;
+    };
+    let mut evidence = TerminalInputWait::NotWaiting;
+    let mut budget = ForegroundScanBudget::for_probe();
+    for process in &job.processes {
+        // Check the leader first. Enumerate other tasks only if it did not
+        // establish a read, sharing the existing bounded task-entry budget.
+        let threads = std::iter::once_with(|| process_task_ids(process.pid, &mut budget));
+        for tid in
+            std::iter::once(process.pid).chain(threads.flatten().filter(|tid| *tid != process.pid))
+        {
+            match process_reads_terminal(
+                tid,
+                shell.session,
+                job.process_group_id,
+                terminal_metadata.rdev(),
+            ) {
+                Ok(true) => return TerminalInputWait::Reading,
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::PermissionDenied
+                        && mode.c_lflag & libc::ECHO == 0 =>
+                {
+                    evidence = TerminalInputWait::ProtectedReadCandidate;
+                }
+                _ => {}
+            }
+        }
+    }
+    evidence
+}
+
+fn process_reads_terminal(
+    pid: u32,
+    session: i32,
+    group: u32,
+    terminal_device: u64,
+) -> std::io::Result<bool> {
+    let Some(before) = process_job_stat(pid) else {
+        return Ok(false);
+    };
+    if before.session != session
+        || Some(before.pgrp) != i32::try_from(group).ok()
+        || before.state != 'S'
+    {
+        return Ok(false);
+    }
+    let mut syscall = std::fs::File::open(format!("/proc/{pid}/syscall"))?;
+    let mut bytes = [0; 256];
+    let count = syscall.read(&mut bytes)?;
+    let Some((number, fd)) = (|| {
+        let mut fields = std::str::from_utf8(&bytes[..count])
+            .ok()?
+            .split_whitespace();
+        let number = fields.next()?.parse::<libc::c_long>().ok()?;
+        let fd = u32::from_str_radix(fields.next()?.strip_prefix("0x")?, 16).ok()?;
+        Some((number, fd))
+    })() else {
+        return Ok(false);
+    };
+    if number != libc::SYS_read && number != libc::SYS_readv {
+        return Ok(false);
+    }
+    let descriptor = format!("/proc/{pid}/fd/{fd}");
+    let metadata = std::fs::metadata(&descriptor)?;
+    let is_terminal = metadata.file_type().is_char_device()
+        && (metadata.rdev() == terminal_device
+            || std::fs::read_link(&descriptor).is_ok_and(|path| path.as_os_str() == "/dev/tty"));
+    let Some(after) = process_job_stat(pid) else {
+        return Ok(false);
+    };
+    Ok(is_terminal && before.start_time == after.start_time && after.session == session)
 }
 
 /// Start time of `pid` in clock ticks since boot. It tells a process apart

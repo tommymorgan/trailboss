@@ -181,9 +181,20 @@ The sidebar tracks commands in instrumented Bash panes, including remote
 commands reached through SSH:
 
 - Running commands show busy without being identified as coding agents.
+- On Linux, a command waiting in a canonical terminal read shows a filled violet dot.
 - Exit code `0` shows completion; a nonzero code shows failure attention.
 - Focusing the tab clears attention but retains `exit N` in its label.
 - Missing or malformed exit codes remain unknown, never assumed successful.
+
+Input-wait detection observes the local foreground process and terminal mode,
+not input bytes. If a protected process hides its syscall metadata, Core uses
+a narrower password-prompt heuristic: a sleeping foreground process, canonical
+no-echo mode, and a visible English password or passphrase prompt. This covers
+protected credential prompts without elevated access; it is not proof of every
+possible input wait. Input resumes busy status, and completion clears waiting.
+Raw/full-screen input and waits inside SSH are not inferred from output silence.
+Agent lifecycle reports keep their existing authority. The existing `waiting`
+wire value is unchanged; Herdr-Web keeps its own color styling.
 
 New non-login Bash panes are instrumented automatically. For login shells
 and SSH, run this on each host whose Bash sessions should report:

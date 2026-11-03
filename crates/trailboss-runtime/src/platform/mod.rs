@@ -56,6 +56,22 @@ pub struct ForegroundJob {
     pub processes: Vec<ForegroundProcess>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalInputWait {
+    NotWaiting,
+    Reading,
+    ProtectedReadCandidate,
+}
+
+/// No portable kernel evidence is available outside the Linux implementation.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn foreground_terminal_input_wait(
+    _child_pid: u32,
+    _job: &ForegroundJob,
+) -> TerminalInputWait {
+    TerminalInputWait::NotWaiting
+}
+
 /// A request from outside the process to stop the server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ServerQuitSignal {
