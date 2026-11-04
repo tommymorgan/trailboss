@@ -70,6 +70,154 @@ fn sidebar_text(screen: &ghostty_vt::Terminal) -> Vec<String> {
         })
         .collect()
 }
+
+fn scrollable_sidebar() -> trailboss::sidebar::Declarations {
+    use serde_json::json;
+    let tabs: Vec<_> = (0..12)
+        .map(|index| {
+            json!({
+                "type":"row","action":"host:focus-tab",
+                "context":{"workspace_id":"w","tab_id":format!("t{index}")},
+                "children":[{"type":"label","text":format!("Tab {index:02}"),"role":"label"}]
+            })
+        })
+        .collect();
+    vec![(
+        "sidebar".into(),
+        serde_json::from_value(json!({
+            "herdr":"widget_tree","version":1,
+            "zones":[{"zone":"list","tree":{"type":"column","children":tabs}}],
+            "composition":{"priority":1,"tree":{"type":"column","children":[
+                {"type":"label","text":"Header","role":"title"},
+                {"type":"flex","weight":1,"child":{"type":"zone","zone":"list"}},
+                {"type":"label","text":"Footer","role":"label"}
+            ]}}
+        }))
+        .unwrap(),
+    )]
+}
+
+#[test]
+fn switching_tabs_reveals_only_offscreen_sidebar_rows() {
+    let declarations = scrollable_sidebar();
+    let mut core = Core::default();
+    let mut renderer = terminal::FrameRenderer::default();
+    let mut screen = ghostty_vt::Terminal::new(24, 6, 0).unwrap();
+    for (tab, expected) in [
+        ("t0", ["Tab 00", "Tab 01", "Tab 02", "Tab 03"]),
+        ("t10", ["Tab 07", "Tab 08", "Tab 09", "Tab 10"]),
+        ("t8", ["Tab 07", "Tab 08", "Tab 09", "Tab 10"]),
+        ("t2", ["Tab 02", "Tab 03", "Tab 04", "Tab 05"]),
+    ] {
+        core.focused_tab_id = Some(tab.into());
+        let mut bytes = Vec::new();
+        renderer
+            .draw_frame(
+                &mut bytes,
+                None,
+                &declarations,
+                &core,
+                Rect::viewport(24, 6),
+            )
+            .unwrap();
+        screen.write(&bytes);
+        let rows = sidebar_text(&screen);
+        assert_eq!(rows[0].trim(), "Header");
+        assert_eq!(rows[5].trim(), "Footer");
+        for (row, expected) in rows[1..5].iter().zip(expected) {
+            assert!(row.starts_with(expected), "selected {tab}: {rows:?}");
+        }
+    }
+}
+
+#[test]
+fn stock_fallback_reveals_the_tab_below_a_visible_workspace_header() {
+    use serde_json::json;
+    let declarations = composition(json!({"type":"column","children":[
+        {"type":"label","text":"Header","role":"title"},
+        {"type":"flex","weight":1,"child":{"type":"zone","zone":"list","fallback":{
+            "type":"column","children":[
+                {"type":"row","action":"host:focus",
+                 "context":{"workspace_id":"first","tab_id":"first-tab"},
+                 "children":[{"type":"label","text":"First space","role":"section"}]},
+                {"type":"row","action":"host:focus",
+                 "context":{"workspace_id":"first","tab_id":"first-tab"},
+                 "children":[{"type":"label","text":"First tab","role":"label"}]},
+                {"type":"row","children":[{"type":"label","text":"","role":"muted"}]},
+                {"type":"row","action":"host:focus",
+                 "context":{"workspace_id":"second","tab_id":"selected-tab"},
+                 "children":[{"type":"label","text":"Second space","role":"section"}]},
+                {"type":"row","action":"host:focus",
+                 "context":{"workspace_id":"second","tab_id":"selected-tab"},
+                 "children":[{"type":"label","text":"Selected tab","role":"label"}]},
+                {"type":"row","action":"host:focus",
+                 "context":{"workspace_id":"second","tab_id":"other-tab"},
+                 "children":[{"type":"label","text":"Other tab","role":"label"}]}
+            ]
+        }}},
+        {"type":"label","text":"Footer","role":"label"}
+    ]}));
+    let mut core = Core::default();
+    let mut renderer = terminal::FrameRenderer::default();
+    let mut screen = ghostty_vt::Terminal::new(24, 6, 0).unwrap();
+    for (tab, last_row) in [
+        ("first-tab", "Second space"),
+        ("selected-tab", "Selected tab"),
+    ] {
+        core.focused_tab_id = Some(tab.into());
+        let mut bytes = Vec::new();
+        renderer
+            .draw_frame(
+                &mut bytes,
+                None,
+                &declarations,
+                &core,
+                Rect::viewport(24, 6),
+            )
+            .unwrap();
+        screen.write(&bytes);
+        let rows = sidebar_text(&screen);
+        assert_eq!(rows[0].trim(), "Header");
+        assert_eq!(rows[5].trim(), "Footer");
+        assert!(
+            rows[4].trim_start().starts_with(last_row),
+            "selected {tab}: {rows:?}"
+        );
+    }
+}
+
+#[test]
+fn sidebar_reveal_waits_for_its_row_and_does_not_undo_manual_scrolling() {
+    let mut core = Core::default();
+    core.focused_tab_id = Some("t10".into());
+    let mut renderer = terminal::FrameRenderer::default();
+    let viewport = Rect::viewport(24, 6);
+    let mut screen = ghostty_vt::Terminal::new(24, 6, 0).unwrap();
+    let mut bytes = Vec::new();
+    renderer
+        .draw_frame(&mut bytes, None, &vec![], &core, viewport)
+        .unwrap();
+    let declarations = scrollable_sidebar();
+    bytes.clear();
+    renderer
+        .draw_frame(&mut bytes, None, &declarations, &core, viewport)
+        .unwrap();
+    screen.write(&bytes);
+    assert!(sidebar_text(&screen)[4].starts_with("Tab 10"));
+
+    assert!(renderer
+        .controls
+        .scroll_list(&core, &declarations, viewport, 1, 2, true, 7));
+    bytes.clear();
+    renderer
+        .draw_frame(&mut bytes, None, &declarations, &core, viewport)
+        .unwrap();
+    screen.write(&bytes);
+    assert!(sidebar_text(&screen)[1].starts_with("Tab 00"));
+    assert!(!sidebar_text(&screen)
+        .iter()
+        .any(|row| row.contains("Tab 10")));
+}
 #[test]
 fn sectioned_sidebar_keeps_palette_hierarchy_and_selected_tab_inside_its_cells() {
     use serde_json::json;

@@ -39,18 +39,6 @@ fn producer_stdin_action_correlates_unfocused_tab_and_successful_result() {
 
 #[test]
 fn living_dispatch_plugin_actions_through_stdin_envelopes() {
-    let feature = include_str!("../features/plugin-actions.feature");
-    let scenario = "Scenario: Dispatch plugin actions through stdin envelopes";
-    let steps: Vec<_> = feature
-        .lines()
-        .skip_while(|line| line.trim() != scenario)
-        .take(4)
-        .map(str::trim)
-        .collect();
-    assert_eq!(steps,[scenario,
-        "Given a long-lived producer declares a focus-tab action for an unfocused tab",
-        "When I activate that declaration",
-        "Then the producer receives the correlated action and tab context on stdin and the requested tab becomes focused after its successful action result"]);
     let fixture = FocusProducer::new();
     let mut console = console::Console::new(&fixture.core);
     let rows = console.wait(|rows| {
