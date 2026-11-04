@@ -391,6 +391,66 @@ fn list_viewport(core: &Core, declarations: &Declarations, viewport: Rect) -> Op
     });
     target
 }
+fn focused_list_offset(
+    core: &Core,
+    declarations: &Declarations,
+    viewport: Rect,
+    current: u16,
+) -> Option<u16> {
+    let tab = core.focused_tab_id.as_deref()?;
+    let (area, maximum) = list_viewport(core, declarations, viewport)?;
+    if area.height == 0 {
+        return None;
+    }
+    let mut target = None;
+    application(
+        core,
+        declarations,
+        viewport,
+        0,
+        &mut |plugin, node, rect| {
+            if matches!(
+                node,
+                Node::Zone {
+                    zone: Zone::List,
+                    ..
+                }
+            ) {
+                // Measure before clipping so an off-screen row retains its list position.
+                walk(
+                    core,
+                    declarations,
+                    plugin,
+                    node,
+                    Rect {
+                        y: 0,
+                        height: rect.height.saturating_add(maximum),
+                        ..rect
+                    },
+                    0,
+                    0,
+                    &mut |_, node, row| {
+                        if target.is_none()
+                            && matches!(node, Node::Row { context, .. }
+                            if context.tab_id.as_deref() == Some(tab) && context.pane_id.is_none())
+                        {
+                            target = Some(row);
+                        }
+                    },
+                );
+            }
+        },
+    );
+    target.map(|row| {
+        let current = current.min(maximum);
+        if row.y < current {
+            row.y
+        } else {
+            current.max(row.y.saturating_add(row.height).saturating_sub(area.height))
+        }
+        .min(maximum)
+    })
+}
 fn application<'a>(
     core: &Core,
     declarations: &'a Declarations,

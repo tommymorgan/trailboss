@@ -53,6 +53,13 @@ overrides compatible with running agents. New session files use the
 `trailboss` namespace; changing product labels does not migrate an existing
 session or its socket. See [runtime provenance](docs/runtime-provenance.md#trailboss-naming-cutover).
 
+## Sidebar tab selection
+
+Switching tabs scrolls the plugin sidebar only enough to reveal the selected
+tab when its row is outside the visible list. Tabs already in view keep the
+current scroll position. Manual sidebar scrolling remains unchanged until
+another tab is selected; the header and footer stay fixed.
+
 ## Moving a running tab between spaces
 
 Use `trailboss tab move <tab-id> --workspace <space-id>` to move a complete

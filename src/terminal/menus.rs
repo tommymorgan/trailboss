@@ -152,6 +152,8 @@ pub struct Controls {
     palette: Option<super::palette::Palette>,
     interaction: Option<super::palette::Handoff>,
     pub list_offset: u16,
+    selected_tab: Option<String>,
+    reveal_selected_tab: bool,
     pub(super) dialog_focus: usize,
 }
 fn triggers<'a>(
@@ -370,6 +372,18 @@ impl Controls {
         self.list_offset = self.list_offset.min(
             super::list_viewport(core, declarations, viewport).map_or(0, |(_, maximum)| maximum),
         );
+        if self.selected_tab != core.focused_tab_id {
+            self.selected_tab.clone_from(&core.focused_tab_id);
+            self.reveal_selected_tab = core.focused_tab_id.is_some();
+        }
+        if self.reveal_selected_tab {
+            if let Some(offset) =
+                super::focused_list_offset(core, declarations, viewport, self.list_offset)
+            {
+                self.list_offset = offset;
+                self.reveal_selected_tab = false;
+            }
+        }
         if !core.editing() {
             self.interaction = None;
         }

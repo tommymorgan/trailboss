@@ -39,6 +39,44 @@ fn numbered_top(rows: &[String]) -> usize {
         })
         .unwrap()
 }
+
+#[test]
+fn executable_tab_switch_reveals_offscreen_sidebar_selection_in_both_directions() {
+    let core = Core::new();
+    let created = core.request(
+        "workspace.create",
+        json!({"label":"Visibility", "cwd":core.home, "focus":true}),
+    );
+    let workspace = &created["workspace"]["workspace_id"];
+    let first = created["tab"]["tab_id"].clone();
+    core.request("tab.rename", json!({"tab_id":first,"label":"Visible00"}));
+    let mut tabs = vec![first];
+    for index in 1..30 {
+        let created = core.request(
+            "tab.create",
+            json!({"workspace_id":workspace,"label":format!("Visible{index:02}"),
+                "cwd":core.home,"focus":false}),
+        );
+        tabs.push(created["tab"]["tab_id"].clone());
+    }
+    let mut console = ready(&core);
+    let sidebar = |rows: &[String]| -> Vec<String> {
+        rows.iter()
+            .map(|row| row.chars().take(20).collect())
+            .collect()
+    };
+    let initial = console.wait(|rows| sidebar(rows).iter().any(|row| row.contains("Visible00")));
+    assert!(!sidebar(&initial)
+        .iter()
+        .any(|row| row.contains("Visible29")));
+
+    core.request("tab.focus", json!({"tab_id":tabs[29]}));
+    console.wait(|rows| sidebar(rows).iter().any(|row| row.contains("Visible29")));
+
+    core.request("tab.focus", json!({"tab_id":tabs[0]}));
+    let top = console.wait(|rows| sidebar(rows).iter().any(|row| row.contains("Visible00")));
+    assert!(!sidebar(&top).iter().any(|row| row.contains("Visible29")));
+}
 #[test]
 fn executable_wheel_scrolls_primary_shell_up_and_down_using_configured_lines() {
     for lines in [3, 7] {
