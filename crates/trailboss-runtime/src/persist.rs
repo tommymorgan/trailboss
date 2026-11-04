@@ -4,11 +4,15 @@
 //! Optional pane screen history is stored separately at `session-history.json`.
 //! Installed plugins are persisted separately at `plugins.json`.
 
+pub(crate) mod closed_tabs;
 mod io;
 pub mod plugin_registry;
 mod restore;
 mod snapshot;
 mod writer;
+pub(crate) use self::closed_tabs::ClosedTabSnapshot;
+pub(crate) use self::restore::{restore_closed_workspace, RestoreRuntimeContext};
+pub(crate) use self::snapshot::capture_tab;
 
 pub use self::io::{clear_history, load, load_history};
 pub use self::restore::restore;

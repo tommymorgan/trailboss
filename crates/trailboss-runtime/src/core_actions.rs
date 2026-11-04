@@ -3,6 +3,7 @@
 
 /// Core-issued command fragments are locators, never producer override hooks.
 pub const COMMAND_FRAGMENT_PREFIX: &str = "trailboss.command.v1:";
+pub const RECENTLY_CLOSED_FRAGMENT: &str = "trailboss.command.v1:recently-closed-tabs";
 
 /// Resource policy for a user command. Native-scope and client-local commands
 /// must not inherit a resource menu's captured target.
@@ -28,6 +29,7 @@ pub enum CoreCommandInteraction {
     Immediate,
     Name { submit_label: &'static str },
     Confirm,
+    Picker,
 }
 
 /// User-facing metadata. Interaction controls intentionally have no descriptor.
@@ -55,6 +57,7 @@ macro_rules! core_actions {
             pub fn parse(id: &str) -> Option<Self> {
                 match id {
                     $($id => Some(Self::$variant),)*
+                    id if id.strip_prefix("tab.closed.restore:").is_some_and(|id| !id.is_empty()) => Some(Self::RestoreClosedTab),
                     _ => None,
                 }
             }
@@ -112,6 +115,10 @@ core_actions! {
     Detach => "host:detach" [
         "Detach from session", ClientLocal, None, CoreCommandInteraction::Immediate
     ],
+    RecentlyClosedTabs => "host:recently-closed-tabs" [
+        "Recently closed tabs", Global, None, CoreCommandInteraction::Picker
+    ],
+    RestoreClosedTab => "tab.closed.restore" [],
     Create => "host:create" [],
     Cancel => "host:cancel" [],
 }

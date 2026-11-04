@@ -18,8 +18,7 @@ pub struct Core {
 }
 impl Drop for Core {
     fn drop(&mut self) {
-        if self.child.try_wait().is_ok_and(|status| status.is_some()) {
-            let _ = std::fs::remove_dir_all(&self.home);
+        if self.home.as_os_str().is_empty() {
             return;
         }
         // Let Core tear down its supervised producer before a forced fallback.
@@ -31,9 +30,11 @@ impl Drop for Core {
             .api
             .request_value_with_timeout(&request, Duration::from_secs(2));
         let deadline = Instant::now() + Duration::from_secs(2);
-        while self.child.try_wait().is_ok_and(|status| status.is_none())
-            && Instant::now() < deadline
-        {
+        // Handoff can replace the process while retaining this owned session socket.
+        let socket = self
+            .home
+            .join(format!("trailboss/sessions/{}/trailboss.sock", self.name));
+        while socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
         let _ = self.child.kill();
@@ -86,7 +87,17 @@ impl Core {
         }
         for (key, _) in std::env::vars_os().filter(|(key, _)| {
             let name = key.to_string_lossy();
-            name.starts_with("TRAILBOSS_") || name.starts_with("HERDR_")
+            name.starts_with("TRAILBOSS_")
+                || name.starts_with("HERDR_")
+                || name.starts_with("PI_")
+                || name.starts_with("OMP_")
+                || name.starts_with("AWS_")
+                || name.starts_with("AZURE_")
+                || name.starts_with("GOOGLE_")
+                || name.ends_with("_API_KEY")
+                || name.ends_with("_AUTH_TOKEN")
+                || name.ends_with("_ACCESS_TOKEN")
+                || matches!(name.as_ref(), "GH_TOKEN" | "GITHUB_TOKEN")
         }) {
             command.env_remove(key);
         }
@@ -95,6 +106,7 @@ impl Core {
         }
         command
             .env("SHELL", "/bin/sh")
+            .env("PI_CODING_AGENT_DIR", home.join(".omp/agent"))
             .env("TRAILBOSS_CONFIG_PATH", home.join("config.toml"))
             .env("TRAILBOSS_STARTUP_CWD", &home)
             .current_dir(&home)

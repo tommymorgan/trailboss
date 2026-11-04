@@ -117,6 +117,10 @@ pub enum Method {
     TabTransfer(TabTransferParams),
     #[serde(rename = "tab.close")]
     TabClose(TabTarget),
+    #[serde(rename = "tab.closed.list")]
+    TabClosedList(EmptyParams),
+    #[serde(rename = "tab.closed.restore")]
+    TabClosedRestore(ClosedTabRestoreParams),
     #[serde(rename = "agent.list")]
     AgentList(EmptyParams),
     #[serde(rename = "agent.restart_idle")]

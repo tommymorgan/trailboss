@@ -398,7 +398,15 @@ impl App {
             };
         let terminal_cwd_reported = matches!(ev, AppEvent::TerminalCwdReported { .. });
         let previous_toast = self.state.toast.clone();
+        let closed_tab = if let AppEvent::PaneDied { pane_id, .. } = &ev {
+            self.capture_final_pane_tab(*pane_id)
+        } else {
+            None
+        };
         let mut pane_updates = self.state.handle_app_event(ev);
+        if let Some(closed_tab) = closed_tab {
+            self.remember_closed_tab(closed_tab);
+        }
         if update_ready.is_some() {
             self.state.latest_release_notes = crate::release_notes::load_latest();
         }
@@ -1175,6 +1183,10 @@ impl App {
             Method::TabMove(params) => return self.handle_tab_move(request.id, params),
             Method::TabTransfer(params) => return self.handle_tab_transfer(request.id, params),
             Method::TabClose(target) => return self.handle_tab_close(request.id, target),
+            Method::TabClosedList(_) => return self.handle_closed_tab_list(request.id),
+            Method::TabClosedRestore(params) => {
+                return self.handle_closed_tab_restore(request.id, params);
+            }
             Method::AgentList(_) => return self.handle_agent_list(request.id),
             Method::AgentRestartIdle(_) => {
                 return responses::encode_error(

@@ -35,13 +35,13 @@ struct PaneRestoreStartup<'a> {
     reserved_agent_session: Option<String>,
 }
 
-struct RestoreRuntimeContext<'a> {
-    scrollback_limit_bytes: usize,
-    shell_config: crate::pane::PaneShellConfig<'a>,
-    resume_agents_on_restore: bool,
-    events: mpsc::Sender<AppEvent>,
-    render_notify: Arc<Notify>,
-    render_dirty: Arc<RenderSignal>,
+pub(crate) struct RestoreRuntimeContext<'a> {
+    pub(crate) scrollback_limit_bytes: usize,
+    pub(crate) shell_config: crate::pane::PaneShellConfig<'a>,
+    pub(crate) resume_agents_on_restore: bool,
+    pub(crate) events: mpsc::Sender<AppEvent>,
+    pub(crate) render_notify: Arc<Notify>,
+    pub(crate) render_dirty: Arc<RenderSignal>,
 }
 
 type RestoredSession = (
@@ -90,6 +90,36 @@ pub fn restore(
         render_notify,
         render_dirty,
     )
+}
+
+/// Recreate one closed tab atomically; unavailable placeholder panes are not success.
+pub(crate) fn restore_closed_workspace(
+    snapshot: &WorkspaceSnapshot,
+    size: (u16, u16),
+    context: &RestoreRuntimeContext<'_>,
+) -> Result<RestoredWorkspace, String> {
+    let (restored, _) = restore_workspace(
+        snapshot,
+        None,
+        size.0,
+        size.1,
+        context,
+        &mut HashSet::new(),
+        &mut HashMap::new(),
+    );
+    let (workspace, terminals, runtimes) =
+        restored.ok_or_else(|| "The saved tab could not be reconstructed".to_string())?;
+    if let Some(error) = terminals
+        .iter()
+        .find_map(|terminal| terminal.restore_error.as_ref())
+    {
+        let error = error.clone();
+        for runtime in runtimes.into_values() {
+            runtime.shutdown();
+        }
+        return Err(error);
+    }
+    Ok((workspace, terminals, runtimes))
 }
 
 #[cfg(unix)]
@@ -1536,6 +1566,7 @@ mod tests {
     async fn restore_carries_persisted_agent_session_metadata() {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
+            closed_tabs: Default::default(),
             version: super::super::snapshot::SNAPSHOT_VERSION,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
@@ -1617,6 +1648,7 @@ mod tests {
     async fn restore_preserves_public_id_mapping_after_pane_id_remap() {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
+            closed_tabs: Default::default(),
             version: super::super::snapshot::SNAPSHOT_VERSION,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("w1".into()),
@@ -1730,6 +1762,7 @@ mod tests {
             launch_argv: None,
         };
         let snapshot = SessionSnapshot {
+            closed_tabs: Default::default(),
             version: super::super::snapshot::SNAPSHOT_VERSION,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("w1".into()),
@@ -1852,6 +1885,7 @@ mod tests {
     async fn native_agent_restore_defers_runtime_launch() {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
+            closed_tabs: Default::default(),
             version: super::super::snapshot::SNAPSHOT_VERSION,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
@@ -2215,6 +2249,7 @@ mod tests {
             }],
         };
         let snapshot = SessionSnapshot {
+            closed_tabs: Default::default(),
             version: super::super::snapshot::SNAPSHOT_VERSION,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),

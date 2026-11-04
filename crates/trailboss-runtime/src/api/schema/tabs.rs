@@ -25,6 +25,21 @@ pub struct TabListParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ClosedTabRestoreParams {
+    pub closed_tab_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ClosedTabInfo {
+    pub closed_tab_id: String,
+    pub label: String,
+    pub workspace_id: String,
+    pub workspace_label: String,
+    pub closed_at: u64,
+    pub pane_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TabRenameParams {
     pub tab_id: String,
     pub label: String,

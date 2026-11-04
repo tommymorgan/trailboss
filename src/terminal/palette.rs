@@ -312,9 +312,10 @@ fn view_at<'a>(
     core: &Core,
     declarations: &'a Declarations,
     provider: &str,
+    root: &str,
     path: &[Identity],
 ) -> Option<View<'a>> {
-    let (mut plugin, mut tree) = core.fragment(declarations, "command-palette")?;
+    let (mut plugin, mut tree) = core.fragment(declarations, root)?;
     if plugin != provider {
         return None;
     }
@@ -364,6 +365,7 @@ pub(super) struct Handoff {
     pub(super) context: Context,
     pub(super) input: bool,
     provider: String,
+    root: &'static str,
     path: Vec<Identity>,
     selected: Identity,
     choices: Vec<(usize, ChoiceIdentity)>,
@@ -383,7 +385,7 @@ impl Handoff {
             .expect("captured command action")
     }
     fn current_tree<'a>(&self, core: &Core, declarations: &'a Declarations) -> Option<&'a Node> {
-        let view = view_at(core, declarations, &self.provider, &self.path)?;
+        let view = view_at(core, declarations, &self.provider, self.root, &self.path)?;
         let mut entries = view
             .entries
             .iter()
@@ -509,6 +511,7 @@ pub(super) struct Palette {
     scroll: usize,
     selected_id: Option<Identity>,
     provider: String,
+    root: &'static str,
     stale: bool,
     context: Context,
     handoff: Option<Handoff>,
@@ -519,7 +522,15 @@ impl Palette {
         declarations: &Declarations,
         context: Option<&Context>,
     ) -> Option<Self> {
-        let (provider, _) = core.fragment(declarations, "command-palette")?;
+        Self::open_fragment(core, declarations, context, "command-palette")
+    }
+    pub fn open_fragment(
+        core: &Core,
+        declarations: &Declarations,
+        context: Option<&Context>,
+        root: &'static str,
+    ) -> Option<Self> {
+        let (provider, _) = core.fragment(declarations, root)?;
         Some(Self {
             path: Vec::new(),
             crumbs: Vec::new(),
@@ -528,13 +539,14 @@ impl Palette {
             scroll: 0,
             selected_id: None,
             provider: provider.into(),
+            root,
             stale: false,
             context: context.cloned().unwrap_or_default(),
             handoff: None,
         })
     }
     fn view<'a>(&self, core: &Core, declarations: &'a Declarations) -> Option<View<'a>> {
-        let mut view = view_at(core, declarations, &self.provider, &self.path)?;
+        let mut view = view_at(core, declarations, &self.provider, self.root, &self.path)?;
         // A targetless Core focus is this client's Previous operation. Captured
         // resource-menu context must not invent a visit or make it executable.
         view.entries.retain(|entry| {
@@ -578,7 +590,7 @@ impl Palette {
                 self.path.pop();
                 self.crumbs.pop();
             }
-            if let Some((provider, _)) = core.fragment(declarations, "command-palette") {
+            if let Some((provider, _)) = core.fragment(declarations, self.root) {
                 self.provider = provider.into();
             }
             self.query.clear();
@@ -732,6 +744,7 @@ impl Palette {
                 context,
                 input: true,
                 provider: self.provider.clone(),
+                root: self.root,
                 path: self.path.clone(),
                 selected,
                 choices: Vec::new(),
@@ -808,6 +821,7 @@ impl Palette {
                 context: entry.context(&self.path, &self.context).clone(),
                 input: prepares_input,
                 provider: std::mem::take(&mut self.provider),
+                root: self.root,
                 path: std::mem::take(&mut self.path),
                 selected: entry.identity(),
                 choices,

@@ -13,7 +13,7 @@ use crate::{
     app::{App, AppState},
     core_actions::{
         CoreAction, CoreCommandInteraction, CoreCommandTarget, CoreFocusMode,
-        COMMAND_FRAGMENT_PREFIX, CORE_COMMANDS,
+        COMMAND_FRAGMENT_PREFIX, CORE_COMMANDS, RECENTLY_CLOSED_FRAGMENT,
     },
     protocol::{
         endpoint::{EndpointPluginUi, EndpointPluginUiItem, PLUGIN_UI_KIND},
@@ -256,6 +256,9 @@ pub(crate) fn projection(
         let action = descriptor.action.id();
         let menu = match descriptor.interaction {
             CoreCommandInteraction::Immediate => None,
+            CoreCommandInteraction::Picker => Some(Node::Use {
+                name: RECENTLY_CLOSED_FRAGMENT.to_owned(),
+            }),
             CoreCommandInteraction::Name { submit_label } => Some(Node::Column {
                 children: vec![
                     Node::Input,
@@ -299,8 +302,11 @@ pub(crate) fn projection(
             },
             Some(row(
                 descriptor.title,
-                (!matches!(descriptor.interaction, CoreCommandInteraction::Confirm))
-                    .then_some(action),
+                matches!(
+                    descriptor.interaction,
+                    CoreCommandInteraction::Immediate | CoreCommandInteraction::Name { .. }
+                )
+                .then_some(action),
                 menu,
             )),
         )?;
@@ -364,6 +370,52 @@ pub(crate) fn projection(
             )?;
         }
     }
+    let children = if state.closed_tabs.is_empty() {
+        vec![Node::Label {
+            text: "No recently closed tabs".to_owned(),
+            role: "muted".to_owned(),
+            tone: None,
+        }]
+    } else {
+        state
+            .closed_tabs
+            .iter()
+            .map(|entry| {
+                let timestamp = time::OffsetDateTime::from_unix_timestamp_nanos(
+                    i128::from(entry.closed_at) * 1_000_000,
+                );
+                let closed = timestamp
+                    .map(|date| {
+                        format!(
+                            "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+                            date.year(),
+                            u8::from(date.month()),
+                            date.day(),
+                            date.hour(),
+                            date.minute(),
+                            date.second()
+                        )
+                    })
+                    .unwrap_or_else(|_| "Unknown close time".to_owned());
+                row(
+                    &format!("{} · {} · {closed}", entry.label, entry.workspace_label),
+                    Some(&format!("tab.closed.restore:{}", entry.id)),
+                    None,
+                )
+            })
+            .collect()
+    };
+    owners
+        .entry("trailboss.core".to_owned())
+        .or_default()
+        .push((
+            Fragment {
+                name: RECENTLY_CLOSED_FRAGMENT.to_owned(),
+                priority: 0,
+                tree: Node::Column { children },
+            },
+            None,
+        ));
     let ordinary_ids: HashSet<_> = ordinary
         .iter()
         .map(|item| (item.plugin_id.as_str(), item.ui_id.as_str()))

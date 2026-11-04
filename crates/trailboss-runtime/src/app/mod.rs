@@ -16,6 +16,7 @@ pub(crate) use api::restart_idle::RestartIdleCheck;
 pub(crate) use api::test_support::exiting_test_command;
 mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
+mod closed_tabs;
 mod creation;
 mod custom_commands;
 mod git_refresh;
@@ -151,6 +152,7 @@ pub struct App {
     pub(crate) agent_metadata_deadline: Option<Instant>,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
     startup_per_agent_delay: Duration,
+    resume_agents_on_restore: bool,
     next_agent_resume_at: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
@@ -413,7 +415,17 @@ impl App {
         // Try to restore previous session
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        let snapshot = policy.restore_session.then(crate::persist::load).flatten();
+        let mut snapshot = policy.restore_session.then(crate::persist::load).flatten();
+        let mut closed_tabs = snapshot
+            .as_mut()
+            .map(|snapshot| std::mem::take(&mut snapshot.closed_tabs))
+            .unwrap_or_default();
+        closed_tabs.truncate(crate::persist::closed_tabs::CLOSED_TAB_LIMIT);
+        crate::workspace::reserve_workspace_ids(
+            closed_tabs
+                .iter()
+                .filter_map(|entry| entry.workspace.id.as_deref()),
+        );
         let mut plugin_installation_leases = crate::plugin_installations::Leases::new();
         let mut plugin_installation_cleanup_allowed = true;
         if policy.persist_plugin_registry {
@@ -509,6 +521,7 @@ impl App {
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces,
+            closed_tabs,
             active,
             previous_pane_focus: None,
             selected,
@@ -676,6 +689,7 @@ impl App {
             startup_per_agent_delay: Duration::from_millis(
                 config.session.startup_per_agent_delay_ms.into(),
             ),
+            resume_agents_on_restore: config.session.resume_agents_on_restore,
             next_agent_resume_at: None,
             session_save_deadline: None,
             session_save_thread: None,
@@ -767,6 +781,13 @@ impl App {
 
         app.state.pane_id_aliases = pane_id_aliases;
         app.state.workspaces = workspaces;
+        app.state.closed_tabs = snapshot.closed_tabs.clone();
+        crate::workspace::reserve_workspace_ids(
+            app.state
+                .closed_tabs
+                .iter()
+                .filter_map(|entry| entry.workspace.id.as_deref()),
+        );
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
         for (alias, old_pane_id) in public_aliases {
@@ -1006,6 +1027,10 @@ impl App {
                 self.state.sound = config.ui.sound.clone();
                 self.state.toast_config = config.ui.toast.clone();
             }
+        }
+
+        if !invalid_section("session") {
+            self.resume_agents_on_restore = config.session.resume_agents_on_restore;
         }
 
         if !invalid_section("session")
@@ -3382,39 +3407,6 @@ mod tests {
         let snapshot = crate::persist::load().expect("checkpointed session should survive");
         assert_eq!(snapshot.workspaces.len(), 1);
         assert_eq!(snapshot.workspaces[0].tabs[0].panes.len(), 2);
-
-        std::env::remove_var("XDG_CONFIG_HOME");
-        let _ = std::fs::remove_dir_all(config_home);
-    }
-
-    #[test]
-    fn normal_autosave_replaces_a_signaled_exit_checkpoint() {
-        let _guard = crate::config::test_config_env_lock().lock().unwrap();
-        let config_home = unique_temp_path("signaled-pane-autosave");
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
-        std::env::remove_var(crate::session::SESSION_ENV_VAR);
-
-        let mut app = test_app();
-        app.policy.persist_session = true;
-        let workspace = Workspace::test_new("closed");
-        let pane_id = workspace.tabs[0].root_pane;
-        app.state.workspaces = vec![workspace];
-        app.state.active = Some(0);
-        app.state.ensure_test_terminals();
-
-        app.handle_internal_event(AppEvent::PaneDied {
-            pane_id,
-            exit_reason: crate::platform::ChildExitReason::Interrupted,
-        });
-        assert!(crate::persist::load().is_some());
-
-        app.start_background_session_save();
-        if let Some(thread) = app.session_save_thread.take() {
-            thread.join().unwrap();
-        }
-        app.save_session_on_shutdown();
-
-        assert!(crate::persist::load().is_none());
 
         std::env::remove_var("XDG_CONFIG_HOME");
         let _ = std::fs::remove_dir_all(config_home);

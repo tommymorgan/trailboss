@@ -541,6 +541,7 @@ fn run_client_inner(
             if let Some(response) = endpoint_response.as_ref() {
                 core.tab_transfer_response(response, &next_boot, Instant::now());
                 core.argument_response(response, &next_boot, Instant::now());
+                core.closed_tab_restore_response(response, &next_boot, Instant::now());
             }
             if let Some(
                 trailboss_runtime::protocol::ServerMessage::ClientShellEndpointResponseChunk {
@@ -570,6 +571,7 @@ fn run_client_inner(
                 retired_direct.clear();
                 selection = None;
                 core.clear_copy_feedback();
+                core.clear_closed_tab_restore();
                 renderer.controls.list_offset = 0;
                 renderer.controls.reset();
                 renderer.reorder.cancel();

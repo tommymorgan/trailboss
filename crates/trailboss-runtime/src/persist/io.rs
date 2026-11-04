@@ -185,6 +185,7 @@ mod tests {
 
     fn empty_snapshot() -> SessionSnapshot {
         SessionSnapshot {
+            closed_tabs: Default::default(),
             version: SNAPSHOT_VERSION,
             workspaces: vec![],
             active: None,

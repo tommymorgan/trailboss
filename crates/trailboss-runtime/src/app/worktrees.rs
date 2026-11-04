@@ -18,7 +18,7 @@ impl App {
             .map(|space| space.key.clone());
 
         self.state.selected = ws_idx;
-        self.state.close_selected_workspace();
+        self.close_workspaces_with_history(self.state.workspace_close_indices(ws_idx));
 
         if !removed_workspace_was_active {
             return;

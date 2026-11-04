@@ -19,13 +19,14 @@ pub(crate) use actions::{
 #[cfg(test)]
 pub(crate) use env::integration_env_lock;
 pub(crate) use env::{
-    apply_pane_base_env, TRAILBOSS_PANE_ID_ENV_VAR, TRAILBOSS_TAB_ID_ENV_VAR,
-    TRAILBOSS_WORKSPACE_ID_ENV_VAR,
+    apply_pane_base_env, claude_dir, codex_dir, copilot_dir, home_dir, kimi_dir, letta_dir,
+    omp_extension_dir, pi_extension_dir, qwen_dir, TRAILBOSS_PANE_ID_ENV_VAR,
+    TRAILBOSS_TAB_ID_ENV_VAR, TRAILBOSS_WORKSPACE_ID_ENV_VAR,
 };
 pub(crate) use registry::{
-    experimental_letta_integration_status, experimental_shell_integration_status,
-    installed_integration_statuses, integration_recommendations, integration_target_label,
-    print_outdated_update_notice,
+    command_available, experimental_letta_integration_status,
+    experimental_shell_integration_status, installed_integration_statuses,
+    integration_recommendations, integration_target_label, print_outdated_update_notice,
 };
 pub(crate) use shell::pane_bash_rcfile;
 pub(crate) use types::{

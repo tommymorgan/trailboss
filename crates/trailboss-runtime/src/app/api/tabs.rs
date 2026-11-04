@@ -10,6 +10,33 @@ use crate::app::{App, Mode};
 use super::responses::{encode_error, encode_success};
 
 impl App {
+    pub(super) fn handle_closed_tab_list(&mut self, id: String) -> String {
+        let closed_tabs = self
+            .state
+            .closed_tabs
+            .iter()
+            .map(|entry| entry.info())
+            .collect();
+        encode_success(id, ResponseResult::TabClosedList { closed_tabs })
+    }
+
+    pub(super) fn handle_closed_tab_restore(
+        &mut self,
+        id: String,
+        params: crate::api::schema::ClosedTabRestoreParams,
+    ) -> String {
+        match self.restore_closed_tab(&params.closed_tab_id) {
+            Ok((workspace_id, tab_id)) => encode_success(
+                id,
+                ResponseResult::TabClosedRestored {
+                    workspace_id,
+                    tab_id,
+                },
+            ),
+            Err(message) => encode_error(id, "closed_tab_restore_failed", message),
+        }
+    }
+
     pub(super) fn handle_tab_list(&mut self, id: String, params: TabListParams) -> String {
         let tabs = if let Some(workspace_id) = params.workspace_id {
             let Some(ws_idx) = self.parse_workspace_id(&workspace_id) else {
@@ -427,7 +454,7 @@ impl App {
             }
             let workspace = self.workspace_info(ws_idx);
             self.state.selected = ws_idx;
-            self.state.close_selected_workspace();
+            self.close_workspaces_with_history(self.state.workspace_close_indices(ws_idx));
             self.state.remove_pane_records(pane_ids);
             self.shutdown_detached_terminal_runtimes();
             self.emit_event(EventEnvelope {
@@ -447,6 +474,7 @@ impl App {
             return encode_success(id, ResponseResult::Ok {});
         }
 
+        let closed = self.capture_closed_tab(ws_idx, tab_idx);
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return tab_not_found(id, &target.tab_id);
         };
@@ -457,6 +485,7 @@ impl App {
                 format!("tab {} could not be closed", target.tab_id),
             );
         }
+        self.remember_closed_tab(closed);
         self.state.remove_pane_records(pane_ids);
         self.state.remove_unattached_terminal_ids(terminal_ids);
         self.shutdown_detached_terminal_runtimes();

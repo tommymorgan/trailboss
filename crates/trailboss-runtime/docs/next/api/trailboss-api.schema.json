@@ -1993,6 +1993,17 @@
           ],
           "type": "object"
         },
+        "ClosedTabRestoreParams": {
+          "properties": {
+            "closed_tab_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "closed_tab_id"
+          ],
+          "type": "object"
+        },
         "CommandInvokeParams": {
           "properties": {
             "command_id": {
@@ -5639,6 +5650,38 @@
         {
           "properties": {
             "method": {
+              "const": "tab.closed.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "tab.closed.restore",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ClosedTabRestoreParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.list",
               "type": "string"
             },
@@ -7422,6 +7465,41 @@
             "no_foreground_client"
           ],
           "type": "string"
+        },
+        "ClosedTabInfo": {
+          "properties": {
+            "closed_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "closed_tab_id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "pane_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "workspace_id": {
+              "type": "string"
+            },
+            "workspace_label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "closed_tab_id",
+            "label",
+            "workspace_id",
+            "workspace_label",
+            "closed_at",
+            "pane_count"
+          ],
+          "type": "object"
         },
         "ConfigReloadStatus": {
           "enum": [
@@ -10533,6 +10611,45 @@
               "required": [
                 "type",
                 "tabs"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "closed_tabs": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ClosedTabInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "tab_closed_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "closed_tabs"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "tab_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "tab_closed_restored",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "workspace_id",
+                "tab_id"
               ],
               "type": "object"
             },

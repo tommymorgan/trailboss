@@ -160,6 +160,27 @@ The same unresolved behavior applies when a plugin declares a reserved Core
 action ID: legacy registration remains intact, but discovery never issues a
 plugin wrapper that would execute a different Core operation.
 
+## Recently closed tabs
+
+Choose **Recently closed tabs** from the session menu or command palette.
+Search by tab or space name, then select an entry to restore and focus it.
+Each session retains its latest 50 closures across restarts and live handoffs.
+History begins when this release is installed; there is no backfill.
+
+Closing still ends the tab's processes. Restore creates fresh terminals with
+the saved splits, names, working directories and supported agent conversations.
+It uses the original space if present, or recreates that space otherwise.
+Ordinary commands and jobs are not replayed.
+
+Missing directories, unavailable saved conversations and duplicate running or
+pending conversations produce an error without consuming the entry or replacing
+open tabs. Native-store and configuration cases outside the documented support
+matrix also return explicit errors; retrying alone does not add missing support.
+
+Automation uses `tab.closed.list` with `{}` and `tab.closed.restore` with
+`{"closed_tab_id":"<entry ID>"}`. See [the feature contract](docs/recently-closed-tabs.md)
+for capture rules and supported recovery boundaries.
+
 ## Recent-tab switching
 
 Press **F6** to switch immediately to the previously visited tab, including

@@ -270,6 +270,26 @@ impl Controls {
         self.palette = Some(palette);
         true
     }
+    fn follow_picker(
+        &mut self,
+        response: Response,
+        core: &Core,
+        declarations: &Declarations,
+    ) -> Response {
+        if matches!(&response, Response::Invoke(action) if action.action == "host:recently-closed-tabs")
+        {
+            self.reset();
+            self.palette = super::palette::Palette::open_fragment(
+                core,
+                declarations,
+                None,
+                trailboss_runtime::core_actions::RECENTLY_CLOSED_FRAGMENT,
+            );
+            Response::Consumed
+        } else {
+            response
+        }
+    }
     pub fn paste(&mut self, text: &str) -> bool {
         self.palette
             .as_mut()
@@ -619,7 +639,7 @@ impl Controls {
                 self.popup = None;
                 self.focus = None;
             }
-            return response;
+            return self.follow_picker(response, core, declarations);
         }
         let mut target = None;
         triggers(
@@ -748,7 +768,7 @@ impl Controls {
                         self.popup = None;
                         self.focus = None;
                     }
-                    return response;
+                    return self.follow_picker(response, core, declarations);
                 }
                 _ => {}
             }

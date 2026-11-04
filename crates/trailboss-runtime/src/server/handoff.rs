@@ -548,6 +548,7 @@ mod tests {
 
     fn empty_snapshot() -> crate::persist::SessionSnapshot {
         crate::persist::SessionSnapshot {
+            closed_tabs: Default::default(),
             version: 0,
             workspaces: Vec::new(),
             active: None,

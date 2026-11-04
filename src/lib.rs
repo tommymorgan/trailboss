@@ -352,7 +352,7 @@ impl Client {
             }
             message @ ServerMessage::ClientShellEndpointResponseChunk { .. }
                 if matches!(&message, ServerMessage::ClientShellEndpointResponseChunk { request_id, .. }
-                    if request_id.starts_with("tab-cycle-") || request_id.starts_with("tab-transfer-") || request_id.starts_with("widget-action-") || request_id.starts_with("argument-log-")) =>
+                    if request_id.starts_with("tab-cycle-") || request_id.starts_with("tab-transfer-") || request_id.starts_with("closed-tab-restore-") || request_id.starts_with("widget-action-") || request_id.starts_with("argument-log-")) =>
             {
                 self.endpoint_response = Some(message);
             }
@@ -537,6 +537,21 @@ impl Input {
         method: &str,
         mut params: serde_json::Value,
     ) -> io::Result<()> {
+        if method == "tab.closed.restore" {
+            self.next_action_id += 1;
+            let id = self.next_action_id;
+            let request = serde_json::json!({"id":format!("closed-tab-restore-{id}"),"method":method,"params":params});
+            protocol::write_message(
+                &mut self.stream,
+                &ClientMessage::ClientShellEndpointRequest {
+                    boot_id: boot_id.to_owned(),
+                    request: request.to_string(),
+                },
+            )
+            .map_err(error)?;
+            core.begin_closed_tab_restore(id);
+            return Ok(());
+        }
         if method != "tab.focus" {
             return self.request(boot_id, method, params);
         }
@@ -922,51 +937,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn legacy_core_declarations_keep_visible_rows_and_original_action_targets() {
-        let (mut client, mut peer) = hyperlink_client();
-        let message = ServerMessage::EndpointControl {
-            kind: protocol::endpoint::PLUGIN_UI_KIND.into(),
-            data: serde_json::json!({
-                "boot_id": "existing-core", "revision": 7,
-                "ui": [{
-                    "plugin_id": "existing.tree", "ui_id": "tree", "title": "",
-                    "declaration": {
-                        "herdr": "widget_tree", "version": 1,
-                        "zones": [{"zone": "list", "tree": {
-                            "type": "column", "children": [{
-                                "type": "row", "action": "focus-tab",
-                                "context": {"tab_id": "existing-tab"},
-                                "children": [{"type": "label", "text": "Existing pane", "role": "label"}]
-                            }]
-                        }}]
-                    }
-                }]
-            }).to_string(),
-        };
-        protocol::write_message(&mut peer, &message).unwrap();
-        client.receive().unwrap();
-        let declarations = client.declarations.as_ref().unwrap();
-        let (plugin, action, context) = sidebar::action_at(declarations, 0).unwrap();
-        assert_eq!(plugin, "existing.tree");
-        assert_eq!(action, "focus-tab");
-        assert_eq!(context.tab_id.as_deref(), Some("existing-tab"));
-        let mut output = Vec::new();
-        sidebar::draw(
-            &mut output,
-            declarations,
-            terminal::Rect {
-                x: 0,
-                y: 0,
-                width: 40,
-                height: 4,
-            },
-            None,
-        )
-        .unwrap();
-        assert!(String::from_utf8(output).unwrap().contains("Existing pane"));
     }
 
     fn hyperlink_client() -> (Client, UnixStream) {

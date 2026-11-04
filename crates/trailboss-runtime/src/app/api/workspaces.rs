@@ -344,7 +344,7 @@ impl App {
             })
             .collect::<Vec<_>>();
         self.state.selected = index;
-        self.state.close_workspaces(close_indices);
+        self.close_workspaces_with_history(close_indices);
         self.shutdown_detached_terminal_runtimes();
         for (workspace_id, workspace) in closed_workspaces {
             self.emit_event(EventEnvelope {

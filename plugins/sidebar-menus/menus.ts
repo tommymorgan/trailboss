@@ -44,6 +44,7 @@ export function declareMenus(entities: EntityRow[]) {
         children: [
           row([label('SESSION', 'muted')]),
           row([label('New space')], 'host:new-space'),
+          row([label('Recently closed tabs')], 'host:recently-closed-tabs'),
           row([label('Restart idle agents')], 'host:restart-idle-agents'),
           row([label('Detach from session')], 'host:detach'),
         ],

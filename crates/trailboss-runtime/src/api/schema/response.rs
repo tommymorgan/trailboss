@@ -94,6 +94,13 @@ pub enum ResponseResult {
     TabList {
         tabs: Vec<TabInfo>,
     },
+    TabClosedList {
+        closed_tabs: Vec<super::tabs::ClosedTabInfo>,
+    },
+    TabClosedRestored {
+        workspace_id: String,
+        tab_id: String,
+    },
     TabTransfer {
         transfer: TabTransferResult,
     },

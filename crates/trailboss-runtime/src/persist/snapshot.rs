@@ -26,6 +26,8 @@ pub struct SessionSnapshot {
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    pub(crate) closed_tabs: std::collections::VecDeque<super::ClosedTabSnapshot>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -48,7 +50,7 @@ pub struct TabHistorySnapshot {
     pub panes: HashMap<u32, PaneHistorySnapshot>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WorkspaceSnapshot {
     #[serde(default)]
     pub id: Option<String>,
@@ -83,7 +85,7 @@ struct LegacyWorkspaceSnapshot {
     root_pane: Option<u32>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TabSnapshot {
     #[serde(default)]
     pub custom_name: Option<String>,
@@ -96,7 +98,7 @@ pub struct TabSnapshot {
     pub root_pane: Option<u32>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PaneSnapshot {
     pub cwd: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,7 +137,7 @@ pub struct PaneHistorySnapshot {
 }
 
 /// Serializable BSP tree.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum LayoutSnapshot {
     Pane(u32),
     Split {
@@ -146,7 +148,7 @@ pub enum LayoutSnapshot {
     },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum DirectionSnapshot {
     Horizontal,
     Vertical,
@@ -195,10 +197,13 @@ struct RawSessionSnapshot {
     sidebar_section_split: Option<f32>,
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    closed_tabs: std::collections::VecDeque<super::ClosedTabSnapshot>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
     Ok(SessionSnapshot {
+        closed_tabs: raw.closed_tabs,
         version: raw.version,
         workspaces: raw
             .workspaces
@@ -271,6 +276,7 @@ pub fn capture(
     selected: usize,
 ) -> SessionSnapshot {
     SessionSnapshot {
+        closed_tabs: Default::default(),
         version: SNAPSHOT_VERSION,
         workspaces: workspaces
             .iter()
@@ -320,7 +326,7 @@ fn capture_workspace(
     }
 }
 
-fn capture_tab(
+pub(crate) fn capture_tab(
     tab: &crate::workspace::Tab,
     terminals: &std::collections::HashMap<
         crate::terminal::TerminalId,
@@ -404,11 +410,30 @@ fn capture_tab(
 pub(super) fn layout_fingerprint(snapshot: &SessionSnapshot) -> Option<String> {
     use sha2::{Digest, Sha256};
 
-    let mut value = serde_json::to_value(snapshot).ok()?;
-    // Sets serialize as arrays; normalize their order as well as JSON object keys.
-    let mut collapsed: Vec<_> = snapshot.collapsed_space_keys.iter().collect();
-    collapsed.sort_unstable();
-    value["collapsed_space_keys"] = serde_json::to_value(collapsed).ok()?;
+    // Preserve the pre-closed-tabs representation: closed records do not change
+    // the open panes to which the separately stored screen history belongs.
+    #[derive(Serialize)]
+    struct OpenLayout<'a> {
+        version: u32,
+        workspaces: &'a [WorkspaceSnapshot],
+        active: Option<usize>,
+        selected: usize,
+        sidebar_width: Option<u16>,
+        sidebar_section_split: Option<f32>,
+        collapsed_space_keys: Vec<&'a String>,
+    }
+    let mut collapsed_space_keys: Vec<_> = snapshot.collapsed_space_keys.iter().collect();
+    collapsed_space_keys.sort_unstable();
+    let value = serde_json::to_value(OpenLayout {
+        version: snapshot.version,
+        workspaces: &snapshot.workspaces,
+        active: snapshot.active,
+        selected: snapshot.selected,
+        sidebar_width: snapshot.sidebar_width,
+        sidebar_section_split: snapshot.sidebar_section_split,
+        collapsed_space_keys,
+    })
+    .ok()?;
     let bytes = serde_json::to_vec(&value).ok()?;
     Some(format!("{:x}", Sha256::digest(bytes)))
 }
@@ -656,6 +681,7 @@ mod tests {
     #[test]
     fn round_trip_empty_session() {
         let snap = SessionSnapshot {
+            closed_tabs: Default::default(),
             version: SNAPSHOT_VERSION,
             workspaces: vec![],
             active: None,
@@ -723,6 +749,7 @@ mod tests {
         );
 
         let snap = SessionSnapshot {
+            closed_tabs: Default::default(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("wproj".to_string()),
                 custom_name: Some("pi-mono".to_string()),
@@ -1426,6 +1453,7 @@ mod tests {
         );
 
         let snap = SessionSnapshot {
+            closed_tabs: Default::default(),
             version: SNAPSHOT_VERSION,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("test-ws".to_string()),

@@ -1985,12 +1985,20 @@ impl App {
         }
         let workspace_snapshot = self.workspace_info(ws_idx);
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
+        let closed_tabs = if self.state.close_pane_would_close_workspace(ws_idx, pane_id) {
+            self.capture_closed_workspaces(&self.state.workspace_close_indices(ws_idx))
+        } else {
+            self.capture_final_pane_tab(pane_id).into_iter().collect()
+        };
         let should_close_workspace = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                 return Err(pane_not_found(id, &target.pane_id));
             };
             ws.close_pane(pane_id)
         };
+        for entry in closed_tabs {
+            self.remember_closed_tab(entry);
+        }
         self.state.remove_pane_records([pane_id]);
         if should_close_workspace {
             self.state.selected = ws_idx;

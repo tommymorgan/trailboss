@@ -107,6 +107,7 @@ pub struct Core {
     tab_cycle_deadline: Option<Instant>,
     copy_feedback_deadline: Option<Instant>,
     tab_transfer_request: Option<TabTransferRequest>,
+    closed_tab_restore_request: Option<TabTransferRequest>,
     endpoint_notice: Option<EndpointNotice>,
     require_name: bool,
     pub command_ui: Option<trailboss_runtime::protocol::endpoint::EndpointPluginUi>,
@@ -402,6 +403,66 @@ impl Core {
                 .insert_str(0, "Action unavailable: tab.transfer — ");
             self.endpoint_notice = Some(EndpointNotice {
                 message: rejection.message,
+                deadline: now + Duration::from_secs(8),
+            });
+        }
+    }
+    pub fn begin_closed_tab_restore(&mut self, id: u64) {
+        self.closed_tab_restore_request = Some(TabTransferRequest {
+            id,
+            response: Vec::new(),
+        });
+        self.endpoint_notice = None;
+    }
+    pub fn clear_closed_tab_restore(&mut self) {
+        self.closed_tab_restore_request = None;
+    }
+    pub fn closed_tab_restore_response(
+        &mut self,
+        message: &trailboss_runtime::protocol::ServerMessage,
+        current_boot: &str,
+        now: Instant,
+    ) {
+        use trailboss_runtime::{api_schema::ErrorResponse, protocol::ServerMessage};
+        let ServerMessage::ClientShellEndpointResponseChunk {
+            boot_id,
+            request_id,
+            final_chunk,
+            data,
+        } = message
+        else {
+            return;
+        };
+        if boot_id != current_boot {
+            return;
+        }
+        let Some(pending) = self.closed_tab_restore_request.as_mut() else {
+            return;
+        };
+        if request_id
+            .strip_prefix("closed-tab-restore-")
+            .and_then(|id| id.parse().ok())
+            != Some(pending.id)
+        {
+            return;
+        }
+        pending.response.extend_from_slice(data);
+        if !final_chunk {
+            return;
+        }
+        let completed = self.closed_tab_restore_request.take().unwrap();
+        if let Ok(reply) = serde_json::from_slice::<ErrorResponse>(&completed.response) {
+            if reply.id != *request_id {
+                return;
+            }
+            let message: String = reply
+                .error
+                .message
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .collect();
+            self.endpoint_notice = Some(EndpointNotice {
+                message: format!("Cannot restore closed tab: {message}"),
                 deadline: now + Duration::from_secs(8),
             });
         }
@@ -826,6 +887,7 @@ impl Core {
         context: &Context,
         snapshot: Option<&trailboss_runtime::protocol::ClientShellSnapshot>,
     ) -> Effect {
+        let closed_tab_id = action.strip_prefix("tab.closed.restore:");
         let Some(action) = CoreAction::parse(action) else {
             return Effect::Plugin;
         };
@@ -844,6 +906,13 @@ impl Core {
                 });
         }
         match action {
+            CoreAction::RecentlyClosedTabs => Effect::Consumed,
+            CoreAction::RestoreClosedTab => {
+                closed_tab_id.map_or(Effect::Consumed, |id| Effect::Request {
+                    method: "tab.closed.restore",
+                    params: json!({"closed_tab_id":id}),
+                })
+            }
             CoreAction::NewSpace => {
                 self.interaction = Interaction::None;
                 Effect::Request {
