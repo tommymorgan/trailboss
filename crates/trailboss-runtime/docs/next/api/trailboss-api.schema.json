@@ -5314,6 +5314,22 @@
         {
           "properties": {
             "method": {
+              "const": "session.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "workspace.create",
               "type": "string"
             },
@@ -10395,6 +10411,25 @@
             },
             {
               "properties": {
+                "sessions": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/SessionListEntry"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "session_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "sessions"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "type": {
                   "const": "workspace_info",
                   "type": "string"
@@ -11799,6 +11834,25 @@
           },
           "required": [
             "live_handoff"
+          ],
+          "type": "object"
+        },
+        "SessionListEntry": {
+          "properties": {
+            "default": {
+              "type": "boolean"
+            },
+            "name": {
+              "type": "string"
+            },
+            "running": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "default",
+            "running"
           ],
           "type": "object"
         },

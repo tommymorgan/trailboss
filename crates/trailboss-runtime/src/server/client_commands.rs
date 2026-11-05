@@ -41,6 +41,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "product_announcement.dismiss",
     "release_notes.dismiss",
     "server.reload_config",
+    "session.list",
     "tab.close",
     "tab.closed.list",
     "tab.closed.restore",

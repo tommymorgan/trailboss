@@ -16,7 +16,7 @@ use super::plugins::{
     PluginPaneInfo,
 };
 use super::server::ServerCapabilities;
-use super::session::SessionSnapshot;
+use super::session::{SessionListEntry, SessionSnapshot};
 use super::tabs::{TabInfo, TabTransferResult};
 use super::workspaces::WorkspaceInfo;
 use super::worktrees::{WorktreeInfo, WorktreeSourceInfo};
@@ -50,6 +50,9 @@ pub enum ResponseResult {
     },
     SessionSnapshot {
         snapshot: Box<SessionSnapshot>,
+    },
+    SessionList {
+        sessions: Vec<SessionListEntry>,
     },
     WorkspaceInfo {
         workspace: WorkspaceInfo,

@@ -961,7 +961,7 @@ fn executable_pty_current_store_starts_and_refreshes_against_legacy_core() {
     );
     let home = std::env::temp_dir().join(&name);
     std::fs::create_dir_all(&home).unwrap();
-    let core = Core::launch_with_executable(home, name, legacy);
+    let core = Core::launch_with_executable(home, name, legacy, true);
     let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
     let workspace = tools["workspace"]["workspace_id"].as_str().unwrap();
     let build = tools["tab"]["tab_id"].as_str().unwrap();
@@ -1142,6 +1142,7 @@ command = ["sh", "-c", '''popup_local=popup-state; printf '%s\n' "$$" > '{}'; pr
         surface_reuse: false,
         surface_delta: false,
         surface_scroll: false,
+        session_switch: false,
         snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
         surface_codecs: vec![SURFACE_CODEC_V1.into()],
         input_codecs: vec![INPUT_CODEC_V1.into()],
@@ -1382,7 +1383,19 @@ fn executable_pty_transfers_split_tab_to_each_cross_space_drop_slot() {
                 std::fs::read_to_string(core.home.join(format!("native-{stage}-{index}")))
             {
                 if state.ends_with('\n') {
-                    return state;
+                    // The parent can publish its marker before the background
+                    // child execs sleep. Capture identity only after that exec.
+                    let mut ids = state.split_whitespace();
+                    let shell = ids.next().unwrap();
+                    let job = ids.next().unwrap();
+                    let started = stage != "before"
+                        || std::fs::read_link(format!("/proc/{job}/exe"))
+                            .ok()
+                            .zip(std::fs::read_link(format!("/proc/{shell}/exe")).ok())
+                            .is_some_and(|(job, shell)| job != shell);
+                    if started {
+                        return state;
+                    }
                 }
             }
             assert!(
@@ -2336,7 +2349,7 @@ fn executable_pty_unsupported_sidebar_transfer_reports_notice_without_reordering
     );
     let home = std::env::temp_dir().join(&name);
     std::fs::create_dir_all(&home).unwrap();
-    let core = Core::launch_with_executable(home, name, legacy);
+    let core = Core::launch_with_executable(home, name, legacy, true);
     let tools = core.request("workspace.create", json!({"label":"Tools","cwd":core.home}));
     let source = tools["workspace"]["workspace_id"].as_str().unwrap();
     core.request(

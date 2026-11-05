@@ -7,22 +7,30 @@ pub fn run_remote_client_bridge(
     args: &[String],
     initialize: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
-    let idle_timeout = match args {
-        [] => false,
-        [option]
-            if option == "--idle-timeout-v1"
-                && crate::platform::REMOTE_BRIDGE_IDLE_TIMEOUT_SUPPORTED =>
-        {
-            true
+    let mut idle_timeout = false;
+    let mut existing_only = false;
+    for option in args {
+        match option.as_str() {
+            "--idle-timeout-v1"
+                if !idle_timeout && crate::platform::REMOTE_BRIDGE_IDLE_TIMEOUT_SUPPORTED =>
+            {
+                idle_timeout = true;
+            }
+            "--existing-only-v1" if !existing_only => existing_only = true,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unsupported remote client bridge option",
+                ));
+            }
         }
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "unsupported remote client bridge option",
-            ))
-        }
-    };
-    ensure_remote_server_running()?;
+    }
+    // Picker targets are existing sessions, never permission to recreate a Core.
+    // Connect below without the daemon-starting fallback, including if it stops
+    // between discovery and this SSH command.
+    if !existing_only {
+        ensure_remote_server_running()?;
+    }
     initialize()?;
     #[cfg(unix)]
     let _ssh_agent = super::ssh_agent::Registration::start();

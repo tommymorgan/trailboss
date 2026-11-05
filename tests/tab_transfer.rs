@@ -2124,8 +2124,12 @@ fn alias_blind_importer_is_rejected_before_public_socket_or_owner_changes() {
     );
     let probe_home = core.home.join("legacy-probe");
     std::fs::create_dir_all(&probe_home).unwrap();
-    let probe =
-        Core::launch_with_executable(probe_home, format!("{}-legacy", core.name), legacy.clone());
+    let probe = Core::launch_with_executable(
+        probe_home,
+        format!("{}-legacy", core.name),
+        legacy.clone(),
+        true,
+    );
     let source_ping = core.request("ping", json!({}));
     let legacy_ping = probe.request("ping", json!({}));
     assert_eq!(
@@ -2296,7 +2300,7 @@ fn alias_free_legacy_source_hands_off_through_plain_restored_handshake() {
     );
     let home = std::env::temp_dir().join(&name);
     std::fs::create_dir_all(&home).unwrap();
-    let mut core = Core::launch_with_executable(home, name, legacy);
+    let mut core = Core::launch_with_executable(home, name, legacy, true);
     let socket = core
         .home
         .join(format!("trailboss/sessions/{}/trailboss.sock", core.name));

@@ -517,6 +517,9 @@ pub(super) struct Palette {
     handoff: Option<Handoff>,
 }
 impl Palette {
+    pub fn is_root(&self, root: &str) -> bool {
+        self.root == root
+    }
     pub fn open(
         core: &Core,
         declarations: &Declarations,

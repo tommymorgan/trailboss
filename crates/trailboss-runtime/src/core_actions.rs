@@ -115,6 +115,9 @@ core_actions! {
     Detach => "host:detach" [
         "Detach from session", ClientLocal, None, CoreCommandInteraction::Immediate
     ],
+    SwitchSession => "host:switch-session" [
+        "Switch session", ClientLocal, None, CoreCommandInteraction::Immediate
+    ],
     RecentlyClosedTabs => "host:recently-closed-tabs" [
         "Recently closed tabs", Global, None, CoreCommandInteraction::Picker
     ],

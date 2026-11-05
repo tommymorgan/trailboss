@@ -13,6 +13,9 @@ pub struct Console {
 impl Console {
     #[allow(dead_code)] // Shared harness: remote-only callers supply their own command.
     pub fn new(core: &Core) -> Self {
+        Self::with_cell_size(core, (0, 0))
+    }
+    pub fn with_cell_size(core: &Core, cell_size: (u16, u16)) -> Self {
         let mut command = portable_pty::CommandBuilder::new(super::support::executable());
         command.args(["--session", &core.name]);
         for key in HOMES {
@@ -28,18 +31,33 @@ impl Console {
         command.env("TERM", "xterm-256color");
         command.env("SHELL", "/bin/sh");
         command.env_remove("NO_COLOR");
-        Self::from_command(command)
+        for key in ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"] {
+            command.env_remove(key);
+        }
+        if cell_size == (0, 0) {
+            Self::from_command(command)
+        } else {
+            Self::sized_with_cell_size(command, 80, 24, cell_size)
+        }
     }
     pub fn from_command(command: portable_pty::CommandBuilder) -> Self {
         Self::sized(command, 80, 24)
     }
     pub fn sized(command: portable_pty::CommandBuilder, cols: u16, rows: u16) -> Self {
+        Self::sized_with_cell_size(command, cols, rows, (0, 0))
+    }
+    fn sized_with_cell_size(
+        command: portable_pty::CommandBuilder,
+        cols: u16,
+        rows: u16,
+        cell_size: (u16, u16),
+    ) -> Self {
         let pair = portable_pty::native_pty_system()
             .openpty(portable_pty::PtySize {
                 rows,
                 cols,
-                pixel_width: 0,
-                pixel_height: 0,
+                pixel_width: cols.saturating_mul(cell_size.0),
+                pixel_height: rows.saturating_mul(cell_size.1),
             })
             .unwrap();
         let child = pair.slave.spawn_command(command).unwrap();

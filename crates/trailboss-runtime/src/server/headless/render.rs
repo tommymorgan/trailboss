@@ -526,16 +526,32 @@ impl HeadlessServer {
         }
 
         let mut broken_clients: Vec<u64> = Vec::new();
-        let plugin_ui_rows = crate::app::sidebar_plugin_ui_rows(&self.app);
-        let plugin_ui_projection: Option<&[crate::protocol::endpoint::EndpointPluginUiItem]> =
-            plugin_ui_rows
-                .as_ref()
-                .ok()
+        let mut needs_plugin_ui = [false; 2];
+        for (client_id, _, _, _, mode) in &render_targets {
+            if matches!(mode, ClientConnectionMode::ClientShell) {
+                let session_switch = self
+                    .clients
+                    .get(client_id)
+                    .is_some_and(|client| client.shell_session_switch);
+                needs_plugin_ui[usize::from(session_switch)] = true;
+            }
+        }
+        let plugin_ui_rows: [_; 2] = std::array::from_fn(|index| {
+            needs_plugin_ui[index]
+                .then(|| crate::app::sidebar_plugin_ui_rows(&self.app, index == 1))
+        });
+        for (client_id, (cols, rows), cell_size, _is_foreground, mode) in render_targets {
+            let session_switch = self
+                .clients
+                .get(&client_id)
+                .is_some_and(|client| client.shell_session_switch);
+            let plugin_ui_rows = plugin_ui_rows[usize::from(session_switch)].as_ref();
+            let plugin_ui_projection = plugin_ui_rows
+                .and_then(|rows| rows.as_ref().ok())
                 .filter(|rows| !rows.is_empty())
                 .map(Vec::as_slice);
-        for (client_id, (cols, rows), cell_size, _is_foreground, mode) in render_targets {
             if matches!(mode, ClientConnectionMode::ClientShell) {
-                if let Err(error) = &plugin_ui_rows {
+                if let Some(Err(error)) = plugin_ui_rows {
                     self.send_to_client(
                         client_id,
                         ServerMessage::ClientShellError {

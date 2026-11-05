@@ -92,6 +92,8 @@ pub struct Core {
     interaction: Interaction,
     pub input_text: String,
     pub detach_requested: bool,
+    pub session_switch_requested: bool,
+    pub session_switch_target: Option<String>,
     pub workspace_id: Option<String>,
     pub focused_tab_id: Option<String>,
     pub has_pane: bool,
@@ -466,6 +468,12 @@ impl Core {
                 deadline: now + Duration::from_secs(8),
             });
         }
+    }
+    pub fn show_endpoint_notice(&mut self, message: String) {
+        self.endpoint_notice = Some(EndpointNotice {
+            message,
+            deadline: Instant::now() + Duration::from_secs(8),
+        });
     }
     pub fn endpoint_notice(&self) -> Option<&str> {
         self.endpoint_notice
@@ -906,6 +914,10 @@ impl Core {
                 });
         }
         match action {
+            CoreAction::SwitchSession => {
+                self.session_switch_requested = true;
+                Effect::Consumed
+            }
             CoreAction::RecentlyClosedTabs => Effect::Consumed,
             CoreAction::RestoreClosedTab => {
                 closed_tab_id.map_or(Effect::Consumed, |id| Effect::Request {

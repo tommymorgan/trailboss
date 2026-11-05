@@ -66,6 +66,21 @@ fn check_adjacent_input(keys: &str, typed_tab: &str, final_tab: &str) {
             .unwrap()
             .type_text(&format!("python3 witness-{label}.py\n"))
             .unwrap();
+        // Finish delivery and start this pane's raw witness before a separate
+        // API connection changes focus for the next setup command.
+        let marker = format!("F6_READY_{label}");
+        while setup.primary.as_ref().is_none_or(|surface| {
+            !surface
+                .text()
+                .lines()
+                .any(|line| line.trim_end().ends_with(&marker))
+        }) {
+            setup.receive().unwrap();
+            assert!(
+                Instant::now() < deadline,
+                "raw input witness did not start in {label}"
+            );
+        }
     }
     drop(setup);
     core.request("tab.focus", json!({"tab_id":first["tab"]["tab_id"]}));

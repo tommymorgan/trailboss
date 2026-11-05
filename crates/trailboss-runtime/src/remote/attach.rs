@@ -36,6 +36,13 @@ const SSH_CONTROL_SOCKET_NAME: &str = "ctl";
 /// Keep it alive until the client detaches; dropping it reaps its owned bridge.
 pub struct RemoteConnection {
     bridge: SshStdioBridge,
+    host: Arc<RemoteConnectionHost>,
+}
+
+struct RemoteConnectionHost {
+    target: String,
+    remote: RemoteTrailboss,
+    ssh_options: Option<ManagedSshOptions>,
 }
 impl RemoteConnection {
     pub fn connect(target: &str, session: &str, executable: Option<&str>) -> io::Result<Self> {
@@ -68,15 +75,42 @@ impl RemoteConnection {
         } else {
             find_installed_remote_trailboss(&ssh)?
         };
-        let bridge = SshStdioBridge::start(
-            target.to_owned(),
-            remote,
-            local_forward_socket_path(target, session),
-            session.to_owned(),
-            ssh.options(),
+        Self::connect_selected(
+            Arc::new(RemoteConnectionHost {
+                target: target.to_owned(),
+                remote,
+                ssh_options: ssh.options().cloned(),
+            }),
+            session,
+            true,
+        )
+    }
+
+    /// Attach another session using the already selected SSH host and executable.
+    /// Only the owned local bridge is prepared here; no remote discovery or startup runs.
+    pub fn connect_session_existing(&self, session: &str) -> io::Result<Self> {
+        crate::session::validate_name(session).map_err(io::Error::other)?;
+        Self::connect_selected(Arc::clone(&self.host), session, false)
+    }
+
+    fn connect_selected(
+        host: Arc<RemoteConnectionHost>,
+        session: &str,
+        allow_startup: bool,
+    ) -> io::Result<Self> {
+        let command = host.remote.executable.bridge_command_with_options(
+            session,
+            host.remote.bridge_idle_timeout,
+            !allow_startup,
+        );
+        let bridge = SshStdioBridge::start_command(
+            host.target.clone(),
+            command,
+            local_forward_socket_path(&host.target, session),
+            host.ssh_options.as_ref(),
             true,
         )?;
-        Ok(Self { bridge })
+        Ok(Self { bridge, host })
     }
     pub fn socket_path(&self) -> &Path {
         &self.bridge.local_socket
@@ -389,10 +423,24 @@ impl RemoteExecutable {
     }
 
     fn bridge_command_with_idle_timeout(&self, session_name: &str, idle_timeout: bool) -> String {
-        let command = if idle_timeout {
-            &["remote-client-bridge", "--idle-timeout-v1"][..]
-        } else {
-            &["remote-client-bridge"][..]
+        self.bridge_command_with_options(session_name, idle_timeout, false)
+    }
+
+    fn bridge_command_with_options(
+        &self,
+        session_name: &str,
+        idle_timeout: bool,
+        existing_only: bool,
+    ) -> String {
+        let command: &[&str] = match (idle_timeout, existing_only) {
+            (false, false) => &["remote-client-bridge"],
+            (true, false) => &["remote-client-bridge", "--idle-timeout-v1"],
+            (false, true) => &["remote-client-bridge", "--existing-only-v1"],
+            (true, true) => &[
+                "remote-client-bridge",
+                "--idle-timeout-v1",
+                "--existing-only-v1",
+            ],
         };
         let args = Self::session_args(session_name, command);
         match self {

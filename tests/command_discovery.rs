@@ -4526,6 +4526,7 @@ fn c17_actual_paired_revisions_refresh_owners_and_restart_invalidates_old_locato
             surface_reuse: false,
             surface_delta: false,
             surface_scroll: false,
+            session_switch: false,
             snapshot_codecs: vec!["shell.snapshot.v1".into()],
             surface_codecs: vec!["shell.surface.v1".into()],
             input_codecs: vec!["shell.input.semantic.v1".into()],
@@ -5792,9 +5793,12 @@ fn confirmation_locator_refresh(captured_scope: bool) {
                 &tree["children"]
             };
             let reordered = children.as_array().is_some_and(|children| {
-                children.len() == 2
-                    && children[0]["name"] == names[1]
-                    && children[1]["name"] == names[0]
+                children
+                    .first()
+                    .is_some_and(|child| child["name"] == names[1])
+                    && children
+                        .get(1)
+                        .is_some_and(|child| child["name"] == names[0])
             });
             let second_updated =
                 native
@@ -6378,7 +6382,7 @@ fn raw_arguments_create_owned_tabs_without_losing_empty_quotes_spaces_or_unicode
             support::executable().display()
         )).unwrap();
         std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let core = support::Core::launch_with_executable(home, name, launcher);
+        let core = support::Core::launch_with_executable(home, name, launcher, true);
         let target = core.request(
             "workspace.create",
             json!({"label":"Argument target","cwd":core.home,"focus":true}),

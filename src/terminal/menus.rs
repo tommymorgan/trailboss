@@ -272,6 +272,25 @@ impl Controls {
         self.palette = Some(palette);
         true
     }
+    pub fn open_fragment(
+        &mut self,
+        core: &Core,
+        declarations: &Declarations,
+        root: &'static str,
+    ) -> bool {
+        let Some(palette) = super::palette::Palette::open_fragment(core, declarations, None, root)
+        else {
+            return false;
+        };
+        self.reset();
+        self.palette = Some(palette);
+        true
+    }
+    pub fn palette_is(&self, root: &str) -> bool {
+        self.palette
+            .as_ref()
+            .is_some_and(|palette| palette.is_root(root))
+    }
     fn follow_picker(
         &mut self,
         response: Response,

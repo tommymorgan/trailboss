@@ -1,9 +1,28 @@
-use crate::api::schema::{PaneInfo, ResponseResult, SessionSnapshot};
+use crate::api::schema::{PaneInfo, ResponseResult, SessionListEntry, SessionSnapshot};
 use crate::app::App;
 
-use super::responses::encode_success;
+use super::responses::{encode_error, encode_success};
 
 impl App {
+    pub(super) fn handle_session_list(&mut self, id: String) -> String {
+        match crate::session::list_sessions() {
+            Ok(sessions) => encode_success(
+                id,
+                ResponseResult::SessionList {
+                    sessions: sessions
+                        .into_iter()
+                        .map(|session| SessionListEntry {
+                            name: session.name,
+                            default: session.default,
+                            running: session.running,
+                        })
+                        .collect(),
+                },
+            ),
+            Err(error) => encode_error(id, "session_list_failed", error.to_string()),
+        }
+    }
+
     pub(super) fn handle_session_snapshot(&mut self, id: String) -> String {
         encode_success(
             id,

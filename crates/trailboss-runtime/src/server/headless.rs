@@ -1900,6 +1900,7 @@ impl HeadlessServer {
                 surface_reuse,
                 surface_delta,
                 surface_scroll,
+                session_switch,
                 writer,
             } => {
                 if self.handoff_in_progress {
@@ -1947,6 +1948,7 @@ impl HeadlessServer {
                 connection.shell_uses_endpoint_keybindings = endpoint_keybindings;
                 connection.shell_mouse_capture = mouse_capture;
                 connection.shell_surface_active = surface_active;
+                connection.shell_session_switch = session_switch;
                 connection.render_state.enable_surface_reuse(surface_reuse);
                 connection.render_state.enable_surface_delta(surface_delta);
                 connection
@@ -1968,20 +1970,21 @@ impl HeadlessServer {
                 let location =
                     crate::server::clients::ClientShellLocation::from_snapshot(&seed_snapshot);
                 let agent_view = self.app.state.agent_view_override.clone();
-                let plugin_ui_rows = match crate::app::sidebar_plugin_ui_rows(&self.app) {
-                    Ok(rows) => rows,
-                    Err(error) => {
-                        if let (Some(writer), Ok(message)) = (
-                            connection.writer.as_ref(),
-                            Self::frame_server_message(&ServerMessage::ClientShellError {
-                                message: error,
-                            }),
-                        ) {
-                            let _ = writer.control.send(message);
+                let plugin_ui_rows =
+                    match crate::app::sidebar_plugin_ui_rows(&self.app, session_switch) {
+                        Ok(rows) => rows,
+                        Err(error) => {
+                            if let (Some(writer), Ok(message)) = (
+                                connection.writer.as_ref(),
+                                Self::frame_server_message(&ServerMessage::ClientShellError {
+                                    message: error,
+                                }),
+                            ) {
+                                let _ = writer.control.send(message);
+                            }
+                            return false;
                         }
-                        return false;
-                    }
-                };
+                    };
                 let projection_message = match agent_view.as_ref() {
                     Some(view) => match crate::protocol::endpoint::agent_view_projection_message(
                         &seed_snapshot.boot_id,

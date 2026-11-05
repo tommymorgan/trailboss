@@ -64,6 +64,7 @@ pub struct Client {
     pending_ui: Option<protocol::endpoint::EndpointPluginUi>,
     projection_pair: Option<(String, u64)>,
     argument_capability: bool,
+    welcome_received: bool,
 }
 fn error(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
@@ -114,6 +115,7 @@ impl Client {
             surface_reuse: false,
             surface_delta: false,
             surface_scroll: false,
+            session_switch: true,
             snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
             surface_codecs: vec![SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
@@ -161,11 +163,27 @@ impl Client {
             pending_ui: None,
             projection_pair: None,
             argument_capability: false,
+            welcome_received: false,
             boot_id: String::new(),
             declarations: None,
             primary: None,
             snapshot: None,
         })
+    }
+    pub fn wait_ready(&mut self) -> io::Result<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !self.welcome_received || self.snapshot.is_none() {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "session attachment timed out",
+                ));
+            }
+            self.stream.set_read_timeout(Some(remaining))?;
+            self.receive()?;
+        }
+        Ok(())
     }
     pub fn receive(&mut self) -> io::Result<()> {
         let message: ServerMessage =
@@ -318,6 +336,22 @@ impl Client {
             {
                 let welcome: protocol::endpoint::EndpointServerWelcome =
                     serde_json::from_str(&data).map_err(error)?;
+                use protocol::endpoint::*;
+                if let Some(failure) = welcome.error {
+                    return Err(io::Error::new(io::ErrorKind::Unsupported, failure.message));
+                }
+                if welcome.generation != ENDPOINT_PROTOCOL_GENERATION
+                    || welcome.snapshot_codec != SNAPSHOT_CODEC_V1
+                    || welcome.surface_codec != SURFACE_CODEC_V1
+                    || welcome.input_codec != INPUT_CODEC_V1
+                    || welcome.blob_codec != BLOB_CODEC_V1
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "incompatible session endpoint",
+                    ));
+                }
+                self.welcome_received = true;
                 self.argument_capability = welcome.capabilities.iter().any(|capability| {
                     capability == protocol::endpoint::PLUGIN_ACTION_ARGUMENTS_CAPABILITY
                 });
@@ -352,7 +386,7 @@ impl Client {
             }
             message @ ServerMessage::ClientShellEndpointResponseChunk { .. }
                 if matches!(&message, ServerMessage::ClientShellEndpointResponseChunk { request_id, .. }
-                    if request_id.starts_with("tab-cycle-") || request_id.starts_with("tab-transfer-") || request_id.starts_with("closed-tab-restore-") || request_id.starts_with("widget-action-") || request_id.starts_with("argument-log-")) =>
+                    if request_id.starts_with("tab-cycle-") || request_id.starts_with("tab-transfer-") || request_id.starts_with("closed-tab-restore-") || request_id.starts_with("widget-action-") || request_id.starts_with("argument-log-") || request_id.starts_with("session-list-")) =>
             {
                 self.endpoint_response = Some(message);
             }
@@ -822,6 +856,9 @@ impl Input {
         )
         .map_err(error)
     }
+    pub fn shutdown(&self) -> io::Result<()> {
+        self.stream.shutdown(std::net::Shutdown::Both)
+    }
     pub fn detach(&mut self) -> io::Result<()> {
         protocol::write_message(&mut self.stream, &ClientMessage::Detach).map_err(error)?;
         self.stream.shutdown(std::net::Shutdown::Both)
@@ -962,6 +999,7 @@ mod tests {
                 pending_ui: None,
                 projection_pair: None,
                 argument_capability: false,
+                welcome_received: false,
             },
             peer,
         )

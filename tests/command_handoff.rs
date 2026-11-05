@@ -668,14 +668,15 @@ fn existing_input_handoffs_real_plugin_owner_pane_reuses_ordinary_interaction() 
         }
         macro_rules! choose_tab {
             ($label:expr) => {{
-                let needle = format!("○ {}", $label);
+                // A waiting owner can change the tab's status glyph.
+                let needle = format!(" {}", $label);
                 observe!("native-sidebar-tab-visible", |rows| rows
                     .iter()
                     .any(|row| row.contains(&needle)));
                 let screen = console.rows();
                 let y = screen.iter().position(|row| row.contains(&needle)).unwrap();
                 let byte = screen[y].find(&needle).unwrap();
-                let x = screen[y][..byte].chars().count() + 2;
+                let x = screen[y][..byte].chars().count() + 1;
                 console.click(x, y);
             }};
         }
@@ -1992,32 +1993,29 @@ fn reordered_duplicate_commands_keep_the_selected_owner_and_captured_resource() 
         origin["tab"]["tab_id"].as_str().map(str::to_owned),
         true,
     );
-    let wait_order =
-        |client: &mut trailboss::Client, reversed: bool| {
-            let deadline = Instant::now() + Duration::from_secs(8);
-            loop {
-                if let Some(declarations) = &client.declarations {
-                    let actions = available(&native, declarations);
-                    if actions.len() == 4 {
-                        let blue =
-                            matching(&actions, "fixture.reorder-blue", "probe", &target).unwrap();
-                        let expected = usize::from(reversed);
-                        if blue.3.iter().all(|(_, ordinal)| *ordinal == expected) {
-                            assert!(matching(&actions, "fixture.reorder-red", "probe", &target)
-                                .is_some());
-                            assert!(matching(&actions, "fixture.reorder-blue", "probe", &other)
-                                .is_some());
-                            return blue.3.clone();
-                        }
+    let wait_order = |client: &mut trailboss::Client, reversed: bool| {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            if let Some(declarations) = &client.declarations {
+                let actions = available(&native, declarations);
+                if let Some(blue) = matching(&actions, "fixture.reorder-blue", "probe", &target) {
+                    let expected = usize::from(reversed);
+                    if blue.3.iter().all(|(_, ordinal)| *ordinal == expected)
+                        && matching(&actions, "fixture.reorder-red", "probe", &target).is_some()
+                        && matching(&actions, "fixture.reorder-blue", "probe", &other).is_some()
+                        && matching(&actions, "fixture.reorder-red", "probe", &other).is_some()
+                    {
+                        return blue.3.clone();
                     }
                 }
-                assert!(
-                    Instant::now() < deadline,
-                    "real ordered owner Uses did not publish: reversed={reversed}"
-                );
-                client.receive().unwrap();
             }
-        };
+            assert!(
+                Instant::now() < deadline,
+                "real ordered owner Uses did not publish: reversed={reversed}"
+            );
+            client.receive().unwrap();
+        }
+    };
     let route = wait_order(&mut client, false);
     let mut renderer = FrameRenderer::default();
     let declarations = client.declarations.as_ref().unwrap();
@@ -4073,10 +4071,13 @@ fn same_title_raw_occurrence_keeps_its_owner_and_target_when_declarations_reorde
         loop {
             if let Some(declarations) = &client.declarations {
                 let actions = available(&native, declarations);
-                if actions.len() == 2 {
-                    let selected =
-                        matching(&actions, "fixture.raw-red", "create", &context(&red)).unwrap();
-                    if selected.3[0].1 == usize::from(!reversed) {
+                if let Some(selected) =
+                    matching(&actions, "fixture.raw-red", "create", &context(&red))
+                {
+                    if selected.3[0].1 == usize::from(!reversed)
+                        && matching(&actions, "fixture.raw-blue", "create", &context(&blue))
+                            .is_some()
+                    {
                         return;
                     }
                 }

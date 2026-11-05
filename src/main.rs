@@ -9,11 +9,12 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use trailboss::{terminal, Client};
+mod attachment;
 mod selection;
+mod session_switch;
 use std::{
     io::{self, Write},
     process::{Command, Stdio},
-    sync::mpsc,
     time::{Duration, Instant},
 };
 const NORMAL_POINTER: &str = "\x1b]22;default\x1b\\";
@@ -172,12 +173,14 @@ fn run_native_client(
         phase = "discovery",
         "selecting client transport"
     );
-    let remote = remote
+    let remote_target = remote.as_ref().map(|remote| remote.target().to_owned());
+    let current = trailboss_runtime::session::active_name()
+        .unwrap_or_else(|| trailboss_runtime::session::DEFAULT_SESSION_NAME.into());
+    let bridge = remote
         .map(|remote| {
             trailboss_runtime::remote::RemoteConnection::connect(
                 remote.target(),
-                &trailboss_runtime::session::active_name()
-                    .unwrap_or_else(|| trailboss_runtime::session::DEFAULT_SESSION_NAME.into()),
+                &current,
                 executable,
             )
         })
@@ -191,25 +194,27 @@ fn run_native_client(
                 "remote discovery or bridge connection failed"
             );
         })?;
-    let path = remote.as_ref().map_or_else(
-        || {
-            trailboss_runtime::session::client_socket_path_for(
-                trailboss_runtime::session::active_name().as_deref(),
-            )
-        },
-        |connection| connection.socket_path().to_owned(),
-    );
+    let session_host = attachment::SessionHost {
+        current,
+        remote: remote_target,
+        bridge,
+    };
+    let path = session_host.path();
     tracing::info!(
         event = "native_client_transport",
         phase = "ready",
-        transport = if remote.is_some() { "ssh" } else { "unix" },
+        transport = if session_host.remote.is_some() {
+            "ssh"
+        } else {
+            "unix"
+        },
         "client transport selected"
     );
-    run_client(&path, remote.is_some())
+    run_client(&path, session_host)
 }
-fn run_client(path: &std::path::Path, remote: bool) -> io::Result<()> {
+fn run_client(path: &std::path::Path, session_host: attachment::SessionHost) -> io::Result<()> {
     let mut phase = "graphics_host";
-    let result = run_client_inner(path, remote, &mut phase);
+    let result = run_client_inner(path, session_host, &mut phase);
     if let Err(error) = &result {
         tracing::error!(
             event = "native_client_loop_failed",
@@ -223,9 +228,10 @@ fn run_client(path: &std::path::Path, remote: bool) -> io::Result<()> {
 }
 fn run_client_inner(
     path: &std::path::Path,
-    remote: bool,
+    mut session_host: attachment::SessionHost,
     phase: &mut &'static str,
 ) -> io::Result<()> {
+    let remote = session_host.remote.is_some();
     let defaults = trailboss_runtime::config::Config::load().config;
     let graphics_enabled = defaults.kitty_graphics_enabled();
     let mut host = trailboss_runtime::client::graphics_transport::Host::new(graphics_enabled)?;
@@ -313,9 +319,7 @@ fn run_client_inner(
         "waiting for initial session snapshot"
     );
     // Attaching without a pane is valid: a declaration can offer the first tab.
-    while client.boot_id.is_empty() {
-        client.receive()?;
-    }
+    client.wait_ready()?;
     tracing::info!(
         event = "native_client_attach",
         phase = "snapshot_ready",
@@ -346,6 +350,7 @@ fn run_client_inner(
     );
     let mut surface = client.primary.take();
     let mut declarations = client.declarations.take().unwrap_or_default();
+    session_switch::mount_command(&mut declarations);
     core.command_ui = client.command_ui.take();
     let mut boot_id = client.boot_id.clone();
     let mut snapshot = client.snapshot.take();
@@ -353,75 +358,7 @@ fn run_client_inner(
         core.reconcile_tab_history(snapshot);
     }
     let mut graphics_messages = std::mem::take(&mut client.graphics_messages);
-    let (tx, rx) = mpsc::sync_channel(1);
-    tracing::info!(
-        event = "native_client_receiver_start",
-        "starting native receive worker"
-    );
-    std::thread::spawn(move || {
-        let mut last_focus = (
-            client.workspace_id.clone(),
-            client.focused_tab_id.clone(),
-            client.focused_pane_id.clone(),
-        );
-        loop {
-            if let Err(error) = client.receive() {
-                tracing::error!(
-                    event = "native_client_receiver_end",
-                    reason = "receive_failure",
-                    "native receive worker failed"
-                );
-                let _ = tx.send(Err(error));
-                break;
-            }
-            let session = (
-                client.workspace_id.clone(),
-                client.focused_tab_id.clone(),
-                client.focused_pane_id.clone(),
-            );
-            let focus_update = if session != last_focus {
-                last_focus.clone_from(&session);
-                Some(session)
-            } else {
-                None
-            };
-            if client.surface_changed
-                || client.declarations.is_some()
-                || focus_update.is_some()
-                || client.snapshot.is_some()
-                || client.endpoint_response.is_some()
-                || !client.graphics_messages.is_empty()
-            {
-                let update = (
-                    client.primary.take(),
-                    client.declarations.take(),
-                    focus_update,
-                    client.boot_id.clone(),
-                    client.snapshot.take(),
-                    std::mem::take(&mut client.graphics_messages),
-                    std::mem::take(&mut client.surface_changed),
-                    client.endpoint_response.take(),
-                    client.command_ui.take(),
-                );
-                trailboss_runtime::render_prof::trace(
-                    "client.update.send_start",
-                    format_args!("pane={:?}", client.focused_pane_id),
-                );
-                if tx.send(Ok(update)).is_err() {
-                    tracing::info!(
-                        event = "native_client_receiver_end",
-                        reason = "consumer_closed",
-                        "native receive worker stopped after consumer closed"
-                    );
-                    break;
-                }
-                trailboss_runtime::render_prof::trace(
-                    "client.update.send_end",
-                    format_args!("pane={:?}", client.focused_pane_id),
-                );
-            }
-        }
-    });
+    let mut incoming = attachment::Receiver::start(client)?;
     let mut dirty = true;
     host.query_geometry(io::stdout())?;
     let prefix_keys = defaults.prefix_keys();
@@ -448,6 +385,8 @@ fn run_client_inner(
     let mut resize_cursor = None;
     let mut pointer_dirty = true;
     let mut pending_input = None;
+    let mut discovery = session_switch::Discovery::default();
+    let mut preparation: Option<attachment::Preparation> = None;
     // Match the existing endpoint health probe cadence. Quiet native sessions
     // must keep the remote bridge alive without input or redraws.
     let health_ping = trailboss_runtime::protocol::ClientMessage::EndpointControl {
@@ -462,6 +401,120 @@ fn run_client_inner(
     );
     loop {
         let now = Instant::now();
+        if std::mem::take(&mut core.session_switch_requested) {
+            if preparation.is_some() {
+                renderer.controls.reset();
+                core.show_endpoint_notice(
+                    "Session connection is still preparing; Esc cancels".into(),
+                );
+            } else {
+                discovery.cancel(&mut declarations);
+                let host_name = session_host.remote.as_deref().unwrap_or("this host");
+                match discovery.begin(&mut input, &boot_id, host_name, &mut declarations) {
+                    Ok(()) => {
+                        renderer.controls.open_fragment(
+                            &core,
+                            &declarations,
+                            session_switch::FRAGMENT,
+                        );
+                    }
+                    Err(error) => {
+                        core.show_endpoint_notice(format!("Cannot list sessions: {error}"))
+                    }
+                }
+            }
+            dirty = true;
+        }
+        if let Some(target) = core.session_switch_target.take() {
+            let valid = discovery.contains(&target);
+            discovery.cancel(&mut declarations);
+            renderer.controls.reset();
+            if !valid {
+                core.show_endpoint_notice("Session selection is no longer available".into());
+            } else if preparation.is_some() {
+                core.show_endpoint_notice(
+                    "Session connection is still preparing; Esc cancels".into(),
+                );
+            } else if target != session_host.current {
+                let (_, _, cell_width, cell_height, exact_cell_size) = host.geometry();
+                let geometry = attachment::Geometry {
+                    size: (viewport.width, viewport.height),
+                    cell: (cell_width, cell_height),
+                    exact_cell_size,
+                    direct_graphics,
+                };
+                match attachment::Preparation::start(&session_host, target, geometry) {
+                    Ok(next) => {
+                        preparation = Some(next);
+                        core.show_endpoint_notice(
+                            "Connecting to selected session; Esc cancels".into(),
+                        );
+                    }
+                    Err(error) => {
+                        core.show_endpoint_notice(format!("Cannot switch session: {error}"))
+                    }
+                }
+            }
+            dirty = true;
+        }
+        if preparation
+            .as_ref()
+            .is_some_and(attachment::Preparation::finished)
+        {
+            if let Some(result) = preparation.take().expect("finished preparation").finish() {
+                match result {
+                    Ok((target, next)) => {
+                        renderer.graphics.cleanup(&mut output)?;
+                        incoming.stop();
+                        incoming = next.receiver;
+                        input = next.input;
+                        session_host.bridge = next.bridge;
+                        session_host.current = target;
+                        // No old receiver, channel, queued frame or pending action survives.
+                        core = trailboss::core::Core::default();
+                        core.command_ui = next.initial.commands;
+                        if let Some((workspace, tab, pane)) = next.initial.focus {
+                            core.update_session(workspace, tab, pane.is_some());
+                        }
+                        surface = next.initial.surface;
+                        declarations = next.initial.declarations.unwrap_or_default();
+                        session_switch::mount_command(&mut declarations);
+                        boot_id = next.initial.boot;
+                        snapshot = next.initial.snapshot;
+                        if let Some(snapshot) = &snapshot {
+                            core.reconcile_tab_history(snapshot);
+                        }
+                        graphics_messages = next.initial.graphics;
+                        host.reset();
+                        pane_size = (0, 0);
+                        pending_direct.clear();
+                        retired_direct.clear();
+                        selection = None;
+                        last_pane_click = None;
+                        renderer.controls = Default::default();
+                        renderer.reorder.cancel();
+                        sidebar_resize.finish();
+                        reorder_gesture = false;
+                        pending_input = None;
+                        next_health_ping = Instant::now() + Duration::from_secs(5);
+                        pointer_dirty = true;
+                    }
+                    Err(error) => {
+                        core.show_endpoint_notice(format!("Cannot switch session: {error}"))
+                    }
+                }
+                dirty = true;
+            }
+        }
+        if discovery.open() && !renderer.controls.palette_is(session_switch::FRAGMENT) {
+            discovery.cancel(&mut declarations);
+        }
+        if discovery.expired(now) {
+            discovery.cancel(&mut declarations);
+            renderer.controls.reset();
+            core.show_endpoint_notice("Cannot list sessions: request timed out".into());
+            dirty = true;
+        }
         dirty |= core.tick_copy_feedback(now);
         dirty |= core.tick_endpoint_notice(now);
         if core.detach_requested {
@@ -486,19 +539,20 @@ fn run_client_inner(
             input.send(&health_ping)?;
             next_health_ping = now + Duration::from_secs(5);
         }
-        while let Ok(update) = rx.try_recv() {
-            let (
-                next_surface,
-                next_declarations,
-                session,
-                next_boot,
-                next_snapshot,
-                next_graphics,
+        while let Ok(update) = incoming.try_recv() {
+            let attachment::Update {
+                surface: next_surface,
+                declarations: next_declarations,
+                focus: session,
+                boot: next_boot,
+                snapshot: next_snapshot,
+                graphics: next_graphics,
                 surface_changed,
-                endpoint_response,
-                command_ui,
-            ) = update?;
+                response: endpoint_response,
+                commands: command_ui,
+            } = update?;
             if boot_id != next_boot {
+                discovery.cancel(&mut declarations);
                 core.command_ui = None;
                 core.argument_editing = false;
                 core.clear_argument_invocation();
@@ -518,7 +572,9 @@ fn run_client_inner(
                 }
                 surface = next_surface;
             }
-            if let Some(next) = next_declarations {
+            if let Some(mut next) = next_declarations {
+                session_switch::Discovery::preserve(&mut declarations, &mut next);
+                session_switch::mount_command(&mut next);
                 declarations = next;
             }
             if let Some(ui) = command_ui {
@@ -539,6 +595,11 @@ fn run_client_inner(
                 snapshot = Some(next);
             }
             if let Some(response) = endpoint_response.as_ref() {
+                if let Err(error) = discovery.response(response, &mut declarations) {
+                    discovery.cancel(&mut declarations);
+                    renderer.controls.reset();
+                    core.show_endpoint_notice(format!("Cannot list sessions: {error}"));
+                }
                 core.tab_transfer_response(response, &next_boot, Instant::now());
                 core.argument_response(response, &next_boot, Instant::now());
                 core.closed_tab_restore_response(response, &next_boot, Instant::now());
@@ -778,6 +839,17 @@ fn run_client_inner(
         let Some(event) = event else {
             continue;
         };
+        if matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Release
+            && key.code == KeyCode::Esc && key.modifiers.is_empty())
+        {
+            if let Some(pending) = &preparation {
+                pending.cancel();
+                renderer.controls.reset();
+                core.show_endpoint_notice("Session switch cancelled".into());
+                dirty = true;
+                continue;
+            }
+        }
         let ordinary_input = match &event {
             Event::Key(key) => {
                 key.kind != KeyEventKind::Release
@@ -1336,6 +1408,12 @@ fn apply_menu_response(
             Ok(true)
         }
         terminal::menus::Response::Invoke(action) => {
+            if action.plugin == session_switch::OWNER {
+                if let Some(name) = action.action.strip_prefix(session_switch::SELECT) {
+                    core.session_switch_target = Some(name.to_owned());
+                    return Ok(true);
+                }
+            }
             match core.invoke(&action.action, &action.context, snapshot) {
                 trailboss::core::Effect::Consumed => {}
                 trailboss::core::Effect::Request { method, params } => {
@@ -1356,13 +1434,14 @@ fn apply_menu_response(
     }
 }
 fn enable_default_producer() -> io::Result<()> {
+    enable_default_producer_at(trailboss_runtime::session::active_api_socket_path())
+}
+fn enable_default_producer_at(path: std::path::PathBuf) -> io::Result<()> {
     use trailboss_runtime::{
         api_client::{ApiClient, ConnectionTarget},
         api_schema::Request,
     };
-    let api = ApiClient::for_target(ConnectionTarget::SocketPath(
-        trailboss_runtime::session::active_api_socket_path(),
-    ));
+    let api = ApiClient::for_target(ConnectionTarget::SocketPath(path));
     let request: Request = serde_json::from_value(
         serde_json::json!({"id":"stock-registry","method":"plugin.list","params":{}}),
     )

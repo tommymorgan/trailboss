@@ -419,6 +419,7 @@ pub(crate) enum ServerEvent {
         surface_reuse: bool,
         surface_delta: bool,
         surface_scroll: bool,
+        session_switch: bool,
         writer: ClientWriter,
     },
     /// A client sent an input message.
@@ -787,6 +788,7 @@ pub(crate) fn handle_client_handshake(
                     hello.surface_reuse,
                     hello.surface_delta,
                     hello.surface_scroll,
+                    hello.session_switch,
                 )),
             )
         }
@@ -884,6 +886,7 @@ pub(crate) fn handle_client_handshake(
         surface_reuse,
         surface_delta,
         surface_scroll,
+        session_switch,
     )) = shell_options
     {
         ServerEvent::ClientShellConnected {
@@ -900,6 +903,7 @@ pub(crate) fn handle_client_handshake(
             surface_reuse,
             surface_delta,
             surface_scroll,
+            session_switch,
             writer,
         }
     } else {
@@ -1479,6 +1483,7 @@ mod tests {
             surface_reuse: false,
             surface_delta: false,
             surface_scroll: false,
+            session_switch: false,
             snapshot_codecs: vec![crate::protocol::endpoint::SNAPSHOT_CODEC_V1.into()],
             surface_codecs: vec![crate::protocol::endpoint::SURFACE_CODEC_V1.into()],
             input_codecs: vec![crate::protocol::endpoint::INPUT_CODEC_V1.into()],
@@ -1997,11 +2002,13 @@ mod tests {
                 surface_reuse,
                 surface_delta,
                 surface_scroll,
+                session_switch,
                 writer,
             } => {
                 assert!(!surface_reuse);
                 assert!(!surface_delta);
                 assert!(!surface_scroll);
+                assert!(!session_switch);
                 assert_eq!(client_id, 43);
                 assert_eq!((surface_cols, surface_rows), (80, 29));
                 assert_eq!((cell_width_px, cell_height_px), (8, 16));

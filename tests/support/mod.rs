@@ -15,6 +15,7 @@ pub struct Core {
     pub home: PathBuf,
     pub name: String,
     api: ApiClient,
+    owns_home: bool,
 }
 impl Drop for Core {
     fn drop(&mut self) {
@@ -31,15 +32,15 @@ impl Drop for Core {
             .request_value_with_timeout(&request, Duration::from_secs(2));
         let deadline = Instant::now() + Duration::from_secs(2);
         // Handoff can replace the process while retaining this owned session socket.
-        let socket = self
-            .home
-            .join(format!("trailboss/sessions/{}/trailboss.sock", self.name));
+        let socket = session_directory(&self.home, &self.name).join("trailboss.sock");
         while socket.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.home);
+        if self.owns_home {
+            let _ = std::fs::remove_dir_all(&self.home);
+        }
     }
 }
 pub const HOMES: &[&str] = &[
@@ -63,6 +64,21 @@ pub fn executable() -> PathBuf {
                 .join("trailboss")
         })
 }
+fn session_directory(home: &std::path::Path, name: &str) -> PathBuf {
+    let directory = home.join("trailboss");
+    if name == trailboss_runtime::session::DEFAULT_SESSION_NAME {
+        directory
+    } else {
+        directory.join("sessions").join(name)
+    }
+}
+
+impl Default for Core {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Core {
     pub fn new() -> Self {
         let name = format!(
@@ -77,9 +93,14 @@ impl Core {
         Self::launch(home, name)
     }
     pub fn launch(home: PathBuf, name: String) -> Self {
-        Self::launch_with_executable(home, name, executable())
+        Self::launch_with_executable(home, name, executable(), true)
     }
-    pub fn launch_with_executable(home: PathBuf, name: String, executable: PathBuf) -> Self {
+    pub fn launch_with_executable(
+        home: PathBuf,
+        name: String,
+        executable: PathBuf,
+        owns_home: bool,
+    ) -> Self {
         let mut command = Command::new(executable);
         command.args(["server", "--session", &name]);
         for key in HOMES {
@@ -114,21 +135,18 @@ impl Core {
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
         let child = command.spawn().unwrap();
-        let socket = home.join(format!("trailboss/sessions/{name}/trailboss.sock"));
+        let socket = session_directory(&home, &name).join("trailboss.sock");
         let api = ApiClient::for_target(ConnectionTarget::SocketPath(socket.clone()));
         let mut core = Self {
             child,
             home,
             name,
             api,
+            owns_home,
         };
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !core
-            .home
-            .join(format!(
-                "trailboss/sessions/{}/trailboss-client.sock",
-                core.name
-            ))
+        while !session_directory(&core.home, &core.name)
+            .join("trailboss-client.sock")
             .exists()
         {
             assert!(
@@ -154,10 +172,7 @@ impl Core {
     }
     pub fn attach(&self) -> Client {
         Client::attach(
-            &self.home.join(format!(
-                "trailboss/sessions/{}/trailboss-client.sock",
-                self.name
-            )),
+            &session_directory(&self.home, &self.name).join("trailboss-client.sock"),
             80,
             24,
         )

@@ -32,7 +32,7 @@ impl App {
         }
         let ordinary =
             super::sidebar_ui_rows(&self.state.installed_plugins, &self.state.plugin_ui_dynamic);
-        let (commands, _) = match projection(&self.state, ordinary) {
+        let (commands, _) = match projection(&self.state, ordinary, false) {
             Ok(publication) => publication,
             Err(error) => return encode_error(id, "ui_command_projection_failed", error),
         };
@@ -209,10 +209,100 @@ fn bounded_publication(
     Ok(publication.ui)
 }
 
+fn retain_supported_node(node: &mut Node, switch_fragment: &str) -> bool {
+    match node {
+        Node::Row { action, .. } if action.as_deref() == Some(CoreAction::SwitchSession.id()) => {
+            false
+        }
+        Node::Use { name } => name != switch_fragment,
+        Node::Column { children }
+        | Node::Row {
+            children,
+            menu: None,
+            ..
+        } => {
+            children.retain_mut(|child| retain_supported_node(child, switch_fragment));
+            true
+        }
+        Node::Row {
+            children,
+            menu: Some(menu),
+            ..
+        } => {
+            if !retain_supported_node(menu, switch_fragment) {
+                return false;
+            }
+            children.retain_mut(|child| retain_supported_node(child, switch_fragment));
+            true
+        }
+        Node::List { entries } => {
+            entries.retain_mut(|entry| retain_supported_node(entry, switch_fragment));
+            true
+        }
+        Node::Flex { child, .. } | Node::When { child, .. } | Node::Modal { child } => {
+            retain_supported_node(child, switch_fragment)
+        }
+        Node::Zone {
+            fallback: Some(fallback),
+            ..
+        } => {
+            if !retain_supported_node(fallback, switch_fragment) {
+                if let Node::Zone { fallback, .. } = node {
+                    *fallback = None;
+                }
+            }
+            true
+        }
+        Node::Label { .. }
+        | Node::Leader { .. }
+        | Node::Spacer { .. }
+        | Node::Surface
+        | Node::Zone { fallback: None, .. }
+        | Node::Input => true,
+    }
+}
+
+fn retain_supported_declarations(rows: &mut Vec<EndpointPluginUiItem>, switch_fragment: &str) {
+    rows.retain_mut(|item| {
+        if item.action.as_deref() == Some(CoreAction::SwitchSession.id()) {
+            return false;
+        }
+        item.command_inputs
+            .retain(|input| input.fragment_name != switch_fragment);
+        let Some(declaration) = item.declaration.as_mut() else {
+            return true;
+        };
+        declaration
+            .zones
+            .retain_mut(|placement| retain_supported_node(&mut placement.tree, switch_fragment));
+        declaration.fragments.retain_mut(|fragment| {
+            fragment.name != switch_fragment
+                && retain_supported_node(&mut fragment.tree, switch_fragment)
+        });
+        if declaration.composition.as_mut().is_some_and(|composition| {
+            !retain_supported_node(&mut composition.tree, switch_fragment)
+        }) {
+            declaration.composition = None;
+        }
+        true
+    });
+}
+
 pub(crate) fn projection(
     state: &AppState,
-    ordinary: Vec<EndpointPluginUiItem>,
+    mut ordinary: Vec<EndpointPluginUiItem>,
+    session_switch: bool,
 ) -> Result<(Vec<UiCommandInfo>, Vec<EndpointPluginUiItem>), String> {
+    if !session_switch {
+        let (switch_fragment, _) = locator(
+            &state.command_boot_id,
+            &UiCommandKey::Core {
+                action_id: CoreAction::SwitchSession.id().to_owned(),
+                mode: None,
+            },
+        );
+        retain_supported_declarations(&mut ordinary, &switch_fragment);
+    }
     if state.command_boot_id.is_empty() {
         return Ok((Vec::new(), ordinary));
     }
@@ -253,6 +343,9 @@ pub(crate) fn projection(
             Ok(())
         };
     for descriptor in CORE_COMMANDS {
+        if descriptor.action == CoreAction::SwitchSession && !session_switch {
+            continue;
+        }
         let action = descriptor.action.id();
         let menu = match descriptor.interaction {
             CoreCommandInteraction::Immediate => None,

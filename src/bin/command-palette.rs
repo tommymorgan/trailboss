@@ -178,6 +178,9 @@ fn declaration(
     let mut children = Vec::new();
     for command in commands {
         if command.diagnostic.is_some()
+            // Core publishes this capability-scoped command per renderer.
+            || matches!(&command.key, UiCommandKey::Core { action_id, .. }
+                if action_id == trailboss_runtime::core_actions::CoreAction::SwitchSession.id())
             || core
                 .fragment(declarations, &command.fragment_name)
                 .is_none()
@@ -342,6 +345,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         surface_reuse: false,
         surface_delta: false,
         surface_scroll: false,
+        session_switch: false,
         snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
         surface_codecs: vec![SURFACE_CODEC_V1.into()],
         input_codecs: vec![INPUT_CODEC_V1.into()],

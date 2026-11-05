@@ -67,6 +67,9 @@ pub struct EndpointClientHello {
     /// Accept the optional scroll-aware patch encoding on this connection.
     #[serde(default)]
     pub surface_scroll: bool,
+    /// Offer client-local session switching only to clients that implement it.
+    #[serde(default)]
+    pub session_switch: bool,
     #[serde(default)]
     pub snapshot_codecs: Vec<String>,
     #[serde(default)]
@@ -291,6 +294,7 @@ mod tests {
             surface_reuse: false,
             surface_delta: false,
             surface_scroll: false,
+            session_switch: false,
             snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
             surface_codecs: vec![SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
