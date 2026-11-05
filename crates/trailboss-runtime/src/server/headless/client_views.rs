@@ -126,6 +126,25 @@ impl HeadlessServer {
     }
 
     pub(super) fn reconcile_client_shell_locations(&mut self) {
+        #[cfg(unix)]
+        {
+            let removed = self
+                .app
+                .live_transfers
+                .parked_popups
+                .keys()
+                .filter(|tab| self.app.parse_tab_id(tab).is_none())
+                .cloned()
+                .collect::<Vec<_>>();
+            for tab in removed {
+                if let Some(popup) = self.app.live_transfers.parked_popups.remove(&tab) {
+                    self.app.state.terminals.remove(&popup.terminal_id);
+                    if let Some(runtime) = self.app.terminal_runtimes.remove(&popup.terminal_id) {
+                        runtime.shutdown();
+                    }
+                }
+            }
+        }
         if self.app.state.popup_pane.is_none() {
             self.popup_owner_tab_id = None;
         } else if self
@@ -201,6 +220,8 @@ impl HeadlessServer {
     }
 
     fn set_default_shell_target_from_client(&mut self, client_id: u64) -> bool {
+        #[cfg(unix)]
+        self.activate_tab_popup(self.shell_tab_id_for_client(client_id));
         let Some(target) = self.shell_target_for_client(client_id) else {
             return false;
         };
@@ -837,6 +858,18 @@ impl HeadlessServer {
     ) {
         if let Some(api::schema::ResponseResult::TabTransfer { transfer }) = result {
             if transfer.changed {
+                #[cfg(unix)]
+                if let Some(popup) = self
+                    .app
+                    .live_transfers
+                    .parked_popups
+                    .remove(&transfer.previous_tab_id)
+                {
+                    self.app
+                        .live_transfers
+                        .parked_popups
+                        .insert(transfer.tab.tab_id.clone(), popup);
+                }
                 if self.popup_owner_tab_id.as_deref() == Some(transfer.previous_tab_id.as_str()) {
                     self.popup_owner_tab_id = Some(transfer.tab.tab_id.clone());
                 }
@@ -852,6 +885,10 @@ impl HeadlessServer {
         &mut self,
         mut msg: api::ApiRequestMessage,
     ) -> bool {
+        #[cfg(unix)]
+        if self.intercept_live_transfer_api(&msg.request.method) {
+            return self.handle_api_request_with_shutdown_check_inner(msg, false, false);
+        }
         let target_before = self.default_shell_target();
         let popup_before = self.app.state.popup_pane.is_some();
         let method_claims_geometry = Self::public_request_may_change_geometry(&msg.request.method);
@@ -957,6 +994,10 @@ impl HeadlessServer {
         client_id: u64,
         mut msg: api::ApiRequestMessage,
     ) -> bool {
+        #[cfg(unix)]
+        if self.intercept_live_transfer_api(&msg.request.method) {
+            return self.handle_api_request_with_shutdown_check_inner(msg, false, true);
+        }
         let focus_before = self.shell_focus_target(client_id);
         let focused_tabs_before = self.focused_shell_tabs();
         let method_claims_geometry = Self::shell_endpoint_claims_geometry(&msg.request.method);

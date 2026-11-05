@@ -21,6 +21,8 @@ mod creation;
 mod custom_commands;
 mod git_refresh;
 mod ids;
+#[cfg(unix)]
+mod live_transfer;
 mod popup;
 mod runtime;
 mod session;
@@ -64,10 +66,12 @@ pub(crate) fn load_plugin_manifest(
 pub(crate) fn sidebar_plugin_ui_rows(
     app: &crate::app::App,
     session_switch: bool,
+    tab_transfer: bool,
 ) -> Result<Vec<crate::protocol::endpoint::EndpointPluginUiItem>, String> {
     let rows =
         api::plugins::sidebar_ui_rows(&app.state.installed_plugins, &app.state.plugin_ui_dynamic);
-    api::plugins::commands::projection(&app.state, rows, session_switch).map(|(_, rows)| rows)
+    api::plugins::commands::projection(&app.state, rows, session_switch, tab_transfer)
+        .map(|(_, rows)| rows)
 }
 
 /// Full application: AppState + runtime concerns (event channels, async I/O).
@@ -118,6 +122,8 @@ pub struct App {
     pub state: AppState,
     pub(crate) pixel_mouse_available: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
+    #[cfg(unix)]
+    pub(crate) live_transfers: live_transfer::LiveTransfers,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
@@ -660,6 +666,8 @@ impl App {
             state,
             pixel_mouse_available: false,
             terminal_runtimes: restored_terminal_runtimes,
+            #[cfg(unix)]
+            live_transfers: Default::default(),
             event_tx,
             event_rx,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
@@ -749,14 +757,30 @@ impl App {
         ) {
             app.plugin_installation_cleanup_allowed = false;
         }
+        let route_admissions = imports
+            .values()
+            .filter_map(|import| import.state.route_admission.clone())
+            .collect::<Vec<_>>();
+        let popup_ids = imports
+            .iter()
+            .filter_map(|(id, import)| import.state.popup.is_some().then_some(*id))
+            .collect::<Vec<_>>();
+        let popup_imports = popup_ids
+            .into_iter()
+            .filter_map(|id| imports.remove(&id))
+            .collect::<Vec<_>>();
         let mut public_aliases = std::collections::HashMap::new();
         #[cfg(target_os = "linux")]
         let mut inherited_aliases = std::collections::HashMap::<String, Option<u32>>::new();
+        #[cfg(target_os = "linux")]
+        let inherited_endpoint = crate::session::active_api_socket_path();
         for (&old_pane_id, import) in imports.iter_mut() {
             #[cfg(target_os = "linux")]
-            if let Some(alias) =
-                crate::platform::inherited_pane_id_for_pty(import.state.child_pid, import.master_fd)
-            {
+            if let Some(alias) = crate::platform::inherited_pane_id_for_pty(
+                import.state.child_pid,
+                import.master_fd,
+                &inherited_endpoint,
+            ) {
                 inherited_aliases
                     .entry(alias)
                     .and_modify(|owner| *owner = None)
@@ -791,6 +815,8 @@ impl App {
         );
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
+        app.restore_live_handoff_popups(popup_imports)?;
+        app.restore_live_route_admissions(route_admissions);
         for (alias, old_pane_id) in public_aliases {
             let valid = alias.rsplit_once(":p").is_some_and(|(workspace, number)| {
                 !workspace.is_empty()
@@ -870,6 +896,10 @@ impl App {
     }
 
     pub(crate) fn ensure_default_workspace(&mut self) -> bool {
+        #[cfg(unix)]
+        if !self.live_transfers.moved_panes.is_empty() && self.state.workspaces.is_empty() {
+            return false;
+        }
         if !self.state.workspaces.is_empty() {
             return false;
         }

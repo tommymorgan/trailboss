@@ -53,6 +53,26 @@ impl HeadlessServer {
                 }
             }
         }
+        let mut popup_exports = self.app.live_transfers.parked_popups.clone();
+        if let (Some(tab), Some(popup)) = (&self.popup_owner_tab_id, &self.app.state.popup_pane) {
+            popup_exports.insert(tab.clone(), popup.clone());
+        }
+        let popup_exports = popup_exports
+            .into_iter()
+            .filter_map(|(tab_id, state)| {
+                let terminal = self.app.state.terminals.get(&state.terminal_id)?;
+                pane_by_terminal.insert(state.terminal_id.clone(), state.pane_id.raw());
+                Some((
+                    state.terminal_id.clone(),
+                    crate::handoff_runtime::HandoffPopupState {
+                        tab_id,
+                        state,
+                        cwd: terminal.cwd.clone(),
+                        label: terminal.manual_label.clone(),
+                    },
+                ))
+            })
+            .collect::<HashMap<_, _>>();
         let public_alias_count = self.app.state.public_pane_id_aliases.len();
         let mut public_aliases_by_pane = HashMap::<u32, Vec<String>>::new();
         for (alias, pane_id) in &self.app.state.public_pane_id_aliases {
@@ -87,11 +107,24 @@ impl HeadlessServer {
         snapshot.closed_tabs = self.app.state.closed_tabs.clone();
 
         let mut handoff_entries = Vec::new();
+        let mut snapshot_error = None;
         for (terminal_id, runtime) in self.app.terminal_runtimes.iter() {
             let Some(pane_id) = pane_by_terminal.get(terminal_id).copied() else {
                 continue;
             };
             let mut handoff_runtime = runtime.handoff_runtime_state(pane_id);
+            handoff_runtime.terminal_id = Some(terminal_id.clone());
+            handoff_runtime.route_admission = self.app.live_route_admission(terminal_id);
+            handoff_runtime.popup = popup_exports.get(terminal_id).cloned();
+            if handoff_runtime.popup.is_some() {
+                match runtime.complete_terminal_snapshot() {
+                    Ok(snapshot) => handoff_runtime.terminal_snapshot = Some(snapshot),
+                    Err(error) => {
+                        snapshot_error = Some(error);
+                        break;
+                    }
+                }
+            }
             handoff_runtime.public_pane_aliases =
                 public_aliases_by_pane.remove(&pane_id).unwrap_or_default();
             handoff_runtime.agent_state = self
@@ -116,6 +149,10 @@ impl HeadlessServer {
                 handoff_runtime.initial_history_ansi = runtime.handoff_history_ansi();
             }
             handoff_entries.push((terminal_id.clone(), handoff_runtime));
+        }
+        if let Some(error) = snapshot_error {
+            self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
+            return Err(error);
         }
         if !public_aliases_by_pane.is_empty() {
             self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);

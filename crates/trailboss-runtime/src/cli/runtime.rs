@@ -67,8 +67,68 @@ pub(super) fn tab_rename(params: TabRenameParams) -> std::io::Result<i32> {
     print_method_response("cli:tab:rename", Method::TabRename(params))
 }
 
+fn unresolved_transfer(error: &dyn std::fmt::Display, operation_id: &str) -> i32 {
+    eprintln!("tab transfer unresolved: {error}; operation_id={operation_id}");
+    eprintln!("Do not repeat the move. Query the same Core's public API for the recorded outcome:");
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "id": "cli:tab:move:status",
+            "method": "tab.transfer.status",
+            "params": { "operation_id": operation_id },
+        })
+    );
+    1
+}
+
 pub(super) fn tab_transfer(params: TabTransferParams) -> std::io::Result<i32> {
-    print_method_response("cli:tab:move", Method::TabTransfer(params))
+    if params.destination_session.is_none() {
+        return print_method_response("cli:tab:move", Method::TabTransfer(params));
+    }
+    // Retain the original operation before sending. A lost response is not
+    // authority to replay the move, or to claim that it failed.
+    let operation_id = params
+        .operation_id
+        .clone()
+        .ok_or_else(|| std::io::Error::other("cross-session transfer requires operation_id"))?;
+    let client = super::target::api_client()?;
+    super::ensure_server_protocol_compatible(&client, "cli:tab:move")?;
+    let request = Request {
+        id: "cli:tab:move".into(),
+        method: Method::TabTransfer(params),
+    };
+    match client.request_value(&request) {
+        Ok(response) => {
+            if matches!(
+                response
+                    .pointer("/error/code")
+                    .and_then(|value| value.as_str()),
+                Some("transfer_unresolved" | "transfer_unavailable")
+            ) {
+                let error = response
+                    .pointer("/error/message")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("Cannot resolve move outcome");
+                return Ok(unresolved_transfer(&error, &operation_id));
+            }
+            super::print_response(&response)
+        }
+        Err(error) => {
+            // These connect failures cannot have submitted this operation.
+            if matches!(&error, crate::api::client::ApiClientError::Io(io)
+                if matches!(io.kind(), std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::PermissionDenied))
+            {
+                return Err(super::map_server_not_running_or_io(
+                    error,
+                    "cli:tab:move",
+                    &client,
+                ));
+            }
+            Ok(unresolved_transfer(&error, &operation_id))
+        }
+    }
 }
 
 pub(super) fn tab_close(tab_id: String) -> std::io::Result<i32> {

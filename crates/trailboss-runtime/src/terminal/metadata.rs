@@ -6,6 +6,7 @@ use crate::detect::AgentState;
 use super::{TerminalState, TerminalStateMutation};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(unix, derive(serde::Serialize, serde::Deserialize))]
 pub struct AgentMetadata {
     pub source: String,
     pub agent_label: Option<String>,
@@ -13,9 +14,13 @@ pub struct AgentMetadata {
     pub title: Option<String>,
     pub display_agent: Option<String>,
     pub state_labels: HashMap<String, String>,
+    #[cfg_attr(unix, serde(with = "crate::handoff_runtime::clock::instant"))]
     pub reported_at: Instant,
+    #[cfg_attr(unix, serde(with = "crate::handoff_runtime::clock::optional"))]
     title_reported_at: Option<Instant>,
+    #[cfg_attr(unix, serde(with = "crate::handoff_runtime::clock::optional"))]
     display_agent_reported_at: Option<Instant>,
+    #[cfg_attr(unix, serde(with = "crate::handoff_runtime::clock::map"))]
     state_label_reported_at: HashMap<String, Instant>,
     pub ttl: Option<Duration>,
     expiry_event_pending: bool,

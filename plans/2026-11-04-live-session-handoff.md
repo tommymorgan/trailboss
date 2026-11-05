@@ -100,7 +100,7 @@ Scenario: OlderClientsDoNotExposeUnsupportedSessionCommands
 
 ## Slice 3: Move a live tab independently of its source session
 
-**Tracer bullet**: Move a split tab with a shell-local marker, background job and managed OMP into beta, stop alpha completely, then use the same original processes and guarded agent controls through the inherited context.
+**Tracer bullet**: Move a split tab with a shell-local marker, background job and managed OMP into beta, stop alpha completely, then use the same original processes and restricted agent controls through the inherited context.
 **Touches**: selective PTY ownership, same-host Core coordination, protected per-user routing helper and persisted ownership records, public transfer/status interface and CLI, tab-menu/palette declarations, source/destination view reconciliation, source stop/start/delete behavior.
 **Off-limits**: cross-host process migration, process recreation, process suspension as a transfer technique, reporter restart/environment rewriting, weaker agent/phone admission, arbitrary job replay, new packages/TCP services, unrelated live sessions.
 > Design: existing tab menu, command palette and searchable destination picker.
@@ -111,19 +111,22 @@ Scenario: OlderClientsDoNotExposeUnsupportedSessionCommands
 > Shippable state: Whole-tab movement, source-independent inherited routing and all exposed failure/ownership checks are complete together. The helper is not published as an unused prerequisite. Existing same-session transfer and ordinary session lifecycle remain valid. No successor repairs a deployed partial move.
 > Boundary verification: At this exact head, exercise API/CLI and native menu/palette movement between two isolated real Cores; record original shell/job/OMP PID/start/PTY and terminal state, prove source Core process exit after transfer, then read/send/control via destination and original inherited context. Exercise invalid/precommit-failure/uncertain-result paths, reverse/third-session moves, ID collisions, root/report fences and unaffected spectator windows. Run focused checks per behavior and the complete delivery gate once at the unit boundary.
 > Compatibility check: Run the shipped release-compatibility command manually against this exact unit and the retained baseline. Exercise legacy same-session API/CLI behavior and unsupported cross-session coordination before mutation; report compatibility changes and likely version impact without automatically selecting or publishing a version.
+> Current verification: All fifteen transfer scenarios are locally verified, including the three restricted agent-control scenarios redefined by the 2026-11-07 R4 decision. The Task 3 review unit is not published or activated.
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session-tab-transfer.feature::LiveTabRetainsProcessesAndStateInItsDestination
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: LiveTabRetainsProcessesAndStateInItsDestination
-  Given alpha contains a named split tab with distinct pane labels, working directories, shell-local markers and a background job
+  Given alpha and beta are distinct running Trailboss sessions on the same host
+  And alpha contains a named split tab with distinct pane labels, working directories, shell-local markers and a background job
   And both panes contain retained terminal content and one split is focused and zoomed
   And beta contains an unrelated live tab in space Work
   When the captured tab moves into beta Work through <entry>
   Then beta contains that tab with its split layout, labels, directories, retained content, zoom and focused split
   And the original shell and job PID, start identity and PTY remain unchanged
+  And every original tab process, including foreground programs and descendant jobs, continues running throughout without suspension or recreation, allowing only a brief terminal-I/O pause
   And input in each moved pane reads its original shell-local marker
   And alpha no longer lists the moved tab or records it as recently closed
   And unrelated source and destination tabs remain usable and unchanged
@@ -134,11 +137,11 @@ Scenario Outline: LiveTabRetainsProcessesAndStateInItsDestination
     | tab menu |
     | command palette |
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session-tab-transfer.feature::MovingATabDoesNotSwitchAnyWindowToAnotherSession
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: MovingATabDoesNotSwitchAnyWindowToAnotherSession
   Given two native windows view alpha and another views beta
   And the invoking alpha window views the tab being moved
@@ -147,26 +150,27 @@ Scenario: MovingATabDoesNotSwitchAnyWindowToAnotherSession
   And alpha viewers use their normal remaining-tab or empty-session view
   And the invoking window can explicitly choose Switch session to view the moved tab in beta
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session-tab-transfer.feature::MovedTabAndAgentControlsSurviveSourceCoreExit
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: MovedTabAndAgentControlsSurviveSourceCoreExit
-  Given a live tab containing a shell, background job and managed OMP has moved from alpha into beta
+  Given a live tab containing a shell, background job and managed OMP enrolled in the restricted app profile has moved from alpha into beta
   And its processes still contain alpha's original socket and pane handles
   When alpha is stopped and its Core process exits
   Then the moved shell, job and OMP retain their original PID, start identity and PTY
   And the moved shell accepts input and retains its shell-local marker
   And genuine OMP reports through the inherited context update only beta's moved agent
-  And fresh destination conversation reads and guarded submit/abort controls reach that same OMP
+  And fresh destination restricted reads, single-outstanding submit and input status reach that same OMP
+  And abort through beta is refused exactly as on an unmoved restricted tab
   And alpha is reported stopped rather than falsely running because a routing address remains
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session-tab-transfer.feature::InvalidDestinationDoesNotPartiallyMoveTheTab
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: InvalidDestinationDoesNotPartiallyMoveTheTab
   Given alpha has a live split tab and beta has unrelated live work
   When transfer encounters <problem> before ownership commit
@@ -182,11 +186,11 @@ Scenario Outline: InvalidDestinationDoesNotPartiallyMoveTheTab
     | stale captured source tab |
     | foreign or invalid endpoint |
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session-tab-transfer.feature::PreparationFailureRollsBackOnlyProvisionalResources
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: PreparationFailureRollsBackOnlyProvisionalResources
   Given alpha and beta contain live marker tabs with recorded process identities
   When <failure> prevents the selected transfer from committing
@@ -201,11 +205,11 @@ Scenario Outline: PreparationFailureRollsBackOnlyProvisionalResources
     | destination disappears during preparation |
     | routing admission fails |
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session-tab-transfer.feature::LostResultIsResolvedWithoutRepeatingTheMove
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: LostResultIsResolvedWithoutRepeatingTheMove
   Given a cross-session transfer uses one known operation ID
   When the result connection is lost after the destination may have committed
@@ -215,11 +219,11 @@ Scenario: LostResultIsResolvedWithoutRepeatingTheMove
   Then it identifies the committed owner and final mapping or the authoritative aborted outcome
   And only one live owner and one tab instance exist
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session-tab-transfer.feature::IndependentCoreIdsAndInheritedAliasesCannotMisroute
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: IndependentCoreIdsAndInheritedAliasesCannotMisroute
   Given alpha and beta have identical-looking public pane locators for different processes
   When alpha's tab moves into beta and requests use its original endpoint and locator
@@ -227,11 +231,11 @@ Scenario: IndependentCoreIdsAndInheritedAliasesCannotMisroute
   And beta's unrelated same-looking locator remains associated with its original process
   And neither focus nor label equality is used to resolve ambiguity
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session-tab-transfer.feature::ReturningOrMovingAgainDoesNotCreateRoutingCycles
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: ReturningOrMovingAgainDoesNotCreateRoutingCycles
   Given a tab has moved from alpha into beta while retaining its original inherited context
   When it next moves to <destination>
@@ -243,11 +247,11 @@ Scenario Outline: ReturningOrMovingAgainDoesNotCreateRoutingCycles
     | running alpha |
     | running gamma |
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session-tab-transfer.feature::SourceRestartCannotStealMovedProcessContexts
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: SourceRestartCannotStealMovedProcessContexts
   Given alpha is stopped after its tab moved into beta
   When a new alpha Core starts and creates a different tab
@@ -255,64 +259,67 @@ Scenario: SourceRestartCannotStealMovedProcessContexts
   And new alpha's contexts resolve to its own different tab
   And reusing a numeric public locator cannot redirect moved-agent reports to new alpha
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session-tab-transfer.feature::StaleControlsAndConflictingRootReportsRemainRejected
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: StaleControlsAndConflictingRootReportsRemainRejected
-  Given a managed OMP tab has moved into beta and its valid destination context has been read
+  Given a managed OMP tab enrolled in the restricted app profile has moved into beta and its valid destination context has been read
   When a <request> is submitted through a retained context
   Then the existing authority checks reject it without invoking or rebinding the moved OMP
-  And a fresh admitted control still targets the original OMP process in beta
+  And a fresh admitted restricted control still targets the original OMP process in beta
   And the rejected request cannot advance an unrelated terminal's report sequence
   Examples:
     | request |
-    | control with an old work fence |
+    | second restricted submit while an earlier instruction is outstanding |
+    | restricted submit bound to a conversation replaced by local /new |
     | report from a conflicting nested root |
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session-tab-transfer.feature::EmptyDestinationAndSourceCleanupRemainUsable
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: EmptyDestinationAndSourceCleanupRemainUsable
   Given beta is running with no space and alpha has exactly one live tab
   When the explicit create-space destination is chosen for that tab
   Then beta gains the named destination space containing the original live tab
   And alpha remains an attached empty session without starting a replacement shell
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session-tab-transfer.feature::DeletingAStoppedSourceCannotRemoveLiveRouting
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: DeletingAStoppedSourceCannotRemoveLiveRouting
-  Given alpha is stopped while moved live processes in beta still use its original endpoint
+  Given alpha is stopped while moved live processes in beta, including a managed OMP enrolled in the restricted app profile, still use its original endpoint
   When deletion of alpha would remove that endpoint
   Then deletion is rejected with an explanation that live routing still refers to it
-  And beta's processes and agent controls remain usable
+  And beta's processes and restricted agent controls remain usable
   When those moved processes end and no live references remain
   Then ordinary stopped-session deletion succeeds without leaving an active route
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session-tab-transfer.feature::TabOwnedPopupRetainsItsOriginalProcessAndOwner
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: TabOwnedPopupRetainsItsOriginalProcessAndOwner
-  Given a tab in alpha owns a live popup terminal with its own shell-local marker
+  Given alpha and beta are distinct running Trailboss sessions on the same host
+  And a tab in alpha owns a live popup terminal with its own shell-local marker
   And beta has an unrelated popup and live tab
   When the owning alpha tab moves into beta
   Then the moved popup retains its original PID, start identity, PTY and shell-local marker
+  And the original popup process continues running throughout without suspension or recreation
   And its ownership refers to the moved tab rather than a coincidentally matching source tab
   And beta's unrelated popup and tab remain unchanged
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session-tab-transfer.feature::DelayedSourceExitCannotRemoveUnrelatedSourceState
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: DelayedSourceExitCannotRemoveUnrelatedSourceState
   Given a live pane has moved from alpha into beta
   And alpha retains a different tab with a live popup and overlay
@@ -321,11 +328,11 @@ Scenario: DelayedSourceExitCannotRemoveUnrelatedSourceState
   And alpha's different tab, popup and overlay remain alive and usable
   And neither Core removes another pane by a stale location or reused public locator
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/session-tab-transfer.feature::RoutingAdoptionCannotBreakTheOriginalPublicEndpoint
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: RoutingAdoptionCannotBreakTheOriginalPublicEndpoint
   Given alpha serves real API clients through its original protected socket
   When routing adoption encounters <outcome>

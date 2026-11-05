@@ -289,7 +289,7 @@ pub(crate) fn socket_file_identity(path: &Path) -> io::Result<SocketFileIdentity
 
     #[cfg(unix)]
     {
-        let metadata = fs::metadata(path)?;
+        let metadata = fs::symlink_metadata(path)?;
         Ok(SocketFileIdentity {
             dev: metadata.dev(),
             ino: metadata.ino(),

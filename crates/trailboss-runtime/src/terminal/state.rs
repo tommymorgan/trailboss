@@ -20,7 +20,14 @@ pub struct HookAuthority {
     pub agent_label: String,
     pub state: AgentState,
     pub message: Option<String>,
-    #[serde(skip, default = "Instant::now")]
+    #[cfg_attr(
+        unix,
+        serde(
+            default = "Instant::now",
+            with = "crate::handoff_runtime::clock::instant"
+        )
+    )]
+    #[cfg_attr(not(unix), serde(skip, default = "Instant::now"))]
     pub reported_at: Instant,
     pub session_ref: Option<crate::agent_resume::AgentSessionRef>,
 }
@@ -28,9 +35,63 @@ pub struct HookAuthority {
 #[cfg(unix)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct HandoffAgentState {
-    authority: HookAuthority,
+    authority: Option<HookAuthority>,
     sequence: Option<u64>,
     acquisition_pending: bool,
+    #[serde(default)]
+    hook_report_sequences: HashMap<String, u64>,
+    #[serde(default)]
+    suppressed_reports: HashMap<String, SuppressedFullLifecycleHookReport>,
+    #[serde(default)]
+    stale_sessions: HashMap<String, Vec<StaleFullLifecycleHookSession>>,
+    #[serde(default)]
+    metadata_sequences: HashMap<String, u64>,
+    #[serde(default)]
+    metadata_agents: HashMap<String, Agent>,
+    #[serde(default)]
+    metadata_token_sources: std::collections::HashSet<String>,
+    #[serde(default)]
+    agent_name_owner: Option<AgentNameOwner>,
+    #[serde(default)]
+    fallback_state: Option<AgentState>,
+    #[serde(default)]
+    fallback_visible_blocker: bool,
+    #[serde(default)]
+    codex_prompt_ready: bool,
+    #[serde(default)]
+    managed_agent_launch_session: Option<crate::agent_resume::PersistedAgentSession>,
+    #[serde(default)]
+    metadata: HashMap<String, AgentMetadata>,
+    #[serde(default)]
+    tokens: crate::metadata_tokens::MetadataTokens,
+    #[serde(default)]
+    managed_agent: Option<ManagedAgent>,
+    #[serde(default)]
+    detected_agent: Option<Agent>,
+    #[serde(default, with = "crate::handoff_runtime::clock::optional")]
+    fallback_observed_at: Option<Instant>,
+    #[serde(default)]
+    recent_process_exit: Option<RecentAgentProcessExit>,
+    #[serde(default)]
+    respawn_shell_on_exit: bool,
+    #[serde(default)]
+    state: Option<AgentState>,
+    #[serde(default)]
+    reported_resume_revision: u64,
+    #[serde(default)]
+    last_agent_state_change_seq: Option<u64>,
+    #[serde(default)]
+    last_agent_completion_seq: Option<u64>,
+    #[serde(default)]
+    agent_name: Option<String>,
+    #[serde(default)]
+    persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
+    #[serde(default)]
+    reported_resume: Option<crate::agent_resume::ReportedAgentResume>,
+    #[serde(default)]
+    terminal_title: Option<String>,
+    #[serde(default)]
+    launch_argv: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -56,23 +117,31 @@ pub struct OrdinaryCommandState {
     pub exit_code: Option<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct SuppressedFullLifecycleHookReport {
     agent_label: String,
     session_ref: Option<crate::agent_resume::AgentSessionRef>,
+    #[cfg_attr(
+        unix,
+        serde(
+            default = "Instant::now",
+            with = "crate::handoff_runtime::clock::instant"
+        )
+    )]
+    #[cfg_attr(not(unix), serde(skip, default = "Instant::now"))]
     observed_at: Instant,
     reason: FullLifecycleHookSuppressionReason,
     replacement_session_ref: Option<crate::agent_resume::AgentSessionRef>,
     pending_replacement_report: Option<PendingFullLifecycleHookReport>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct PendingFullLifecycleHookReport {
     authority: HookAuthority,
     seq: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum FullLifecycleHookSuppressionReason {
     HookClear,
     ProcessExit,
@@ -84,16 +153,19 @@ enum FullLifecycleHookReportRoute {
     Ignore,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct StaleFullLifecycleHookSession {
     agent_label: String,
     session_ref: crate::agent_resume::AgentSessionRef,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(unix, derive(serde::Serialize, serde::Deserialize))]
 enum ManagedAgentPhase {
     Pending {
+        #[cfg_attr(unix, serde(with = "crate::handoff_runtime::clock::optional"))]
         ready_after: Option<Instant>,
+        #[cfg_attr(unix, serde(with = "crate::handoff_runtime::clock::instant"))]
         deadline: Instant,
         observed_expected: bool,
     },
@@ -102,6 +174,7 @@ enum ManagedAgentPhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(unix, derive(serde::Serialize, serde::Deserialize))]
 struct ManagedAgent {
     kind: Agent,
     phase: ManagedAgentPhase,
@@ -132,15 +205,17 @@ pub struct TerminalStateMutation {
     pub agent_released: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct AgentNameOwner {
     agent_label: String,
     session_ref: Option<crate::agent_resume::AgentSessionRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(unix, derive(serde::Serialize, serde::Deserialize))]
 struct RecentAgentProcessExit {
     agent: Agent,
+    #[cfg_attr(unix, serde(with = "crate::handoff_runtime::clock::instant"))]
     observed_at: Instant,
 }
 
@@ -256,27 +331,92 @@ impl TerminalState {
 
     #[cfg(unix)]
     pub(crate) fn handoff_agent_state(&self) -> Option<HandoffAgentState> {
-        if !self.live_full_lifecycle_hook_authority() {
-            return None;
-        }
-        let authority = self.hook_authority.as_ref()?;
         Some(HandoffAgentState {
-            authority: authority.clone(),
-            sequence: self.hook_report_sequences.get(&authority.source).copied(),
+            authority: self.hook_authority.clone(),
+            sequence: self
+                .hook_authority
+                .as_ref()
+                .and_then(|authority| self.hook_report_sequences.get(&authority.source).copied()),
             acquisition_pending: self.agent_process_acquisition_pending,
+            hook_report_sequences: self.hook_report_sequences.clone(),
+            suppressed_reports: self.suppressed_full_lifecycle_hook_reports.clone(),
+            stale_sessions: self.stale_full_lifecycle_hook_sessions.clone(),
+            metadata_sequences: self.metadata_report_sequences.clone(),
+            metadata_agents: self.metadata_report_agents.clone(),
+            metadata_token_sources: self.metadata_token_sequence_sources.clone(),
+            agent_name_owner: self.agent_name_owner.clone(),
+            fallback_state: Some(self.fallback_state),
+            fallback_visible_blocker: self.fallback_visible_blocker,
+            codex_prompt_ready: self.codex_prompt_ready,
+            managed_agent_launch_session: self.managed_agent_launch_session.clone(),
+            metadata: self.agent_metadata.clone(),
+            tokens: self.metadata_tokens.clone(),
+            managed_agent: self.managed_agent,
+            detected_agent: self.detected_agent,
+            fallback_observed_at: self.fallback_observed_at,
+            recent_process_exit: self.recent_agent_process_exit,
+            respawn_shell_on_exit: self.respawn_shell_on_exit,
+            state: Some(self.state),
+            reported_resume_revision: self.reported_resume_revision,
+            last_agent_state_change_seq: self.last_agent_state_change_seq,
+            last_agent_completion_seq: self.last_agent_completion_seq,
+            agent_name: self.agent_name.clone(),
+            persisted_agent_session: self.persisted_agent_session.clone(),
+            reported_resume: self.reported_resume.clone(),
+            terminal_title: self.terminal_title.clone(),
+            launch_argv: self.launch_argv.clone(),
         })
     }
 
     #[cfg(unix)]
     pub(crate) fn restore_handoff_agent_state(&mut self, snapshot: HandoffAgentState) {
-        if let Some(sequence) = snapshot.sequence {
-            self.hook_report_sequences
-                .insert(snapshot.authority.source.clone(), sequence);
+        self.hook_report_sequences = snapshot.hook_report_sequences;
+        if let Some(authority) = &snapshot.authority {
+            if let Some(sequence) = snapshot.sequence {
+                self.hook_report_sequences
+                    .insert(authority.source.clone(), sequence);
+            }
+            self.detected_agent = crate::detect::parse_agent_label(&authority.agent_label);
+            self.state = authority.state;
         }
-        self.detected_agent = crate::detect::parse_agent_label(&snapshot.authority.agent_label);
-        self.state = snapshot.authority.state;
-        self.hook_authority = Some(snapshot.authority);
+        self.hook_authority = snapshot.authority;
         self.agent_process_acquisition_pending = snapshot.acquisition_pending;
+        self.suppressed_full_lifecycle_hook_reports = snapshot.suppressed_reports;
+        self.stale_full_lifecycle_hook_sessions = snapshot.stale_sessions;
+        self.metadata_report_sequences = snapshot.metadata_sequences;
+        self.metadata_report_agents = snapshot.metadata_agents;
+        self.metadata_token_sequence_sources = snapshot.metadata_token_sources;
+        self.agent_name_owner = snapshot.agent_name_owner;
+        if let Some(state) = snapshot.fallback_state {
+            self.fallback_state = state;
+        }
+        self.fallback_visible_blocker = snapshot.fallback_visible_blocker;
+        self.codex_prompt_ready = snapshot.codex_prompt_ready;
+        self.managed_agent_launch_session = snapshot.managed_agent_launch_session;
+        self.agent_metadata = snapshot.metadata;
+        self.metadata_tokens = snapshot.tokens;
+        self.managed_agent = snapshot.managed_agent;
+        self.detected_agent = snapshot.detected_agent.or(self.detected_agent);
+        self.fallback_observed_at = snapshot.fallback_observed_at;
+        self.recent_agent_process_exit = snapshot.recent_process_exit;
+        self.respawn_shell_on_exit = snapshot.respawn_shell_on_exit;
+        if let Some(state) = snapshot.state {
+            self.state = state;
+        }
+        self.reported_resume_revision = snapshot.reported_resume_revision;
+        self.last_agent_state_change_seq = snapshot.last_agent_state_change_seq;
+        self.last_agent_completion_seq = snapshot.last_agent_completion_seq;
+        self.agent_name = snapshot.agent_name.or_else(|| self.agent_name.take());
+        self.persisted_agent_session = snapshot
+            .persisted_agent_session
+            .or_else(|| self.persisted_agent_session.take());
+        self.reported_resume = snapshot
+            .reported_resume
+            .or_else(|| self.reported_resume.take());
+        self.terminal_title = snapshot
+            .terminal_title
+            .or_else(|| self.terminal_title.take());
+        self.launch_argv = snapshot.launch_argv.or_else(|| self.launch_argv.take());
     }
 
     pub(crate) fn finish_agent_process_acquisition(&mut self) -> bool {

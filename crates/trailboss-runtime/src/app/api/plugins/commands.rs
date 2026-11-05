@@ -32,7 +32,7 @@ impl App {
         }
         let ordinary =
             super::sidebar_ui_rows(&self.state.installed_plugins, &self.state.plugin_ui_dynamic);
-        let (commands, _) = match projection(&self.state, ordinary, false) {
+        let (commands, _) = match projection(&self.state, ordinary, false, false) {
             Ok(publication) => publication,
             Err(error) => return encode_error(id, "ui_command_projection_failed", error),
         };
@@ -209,11 +209,9 @@ fn bounded_publication(
     Ok(publication.ui)
 }
 
-fn retain_supported_node(node: &mut Node, switch_fragment: &str) -> bool {
+fn retain_supported_node(node: &mut Node, switch_fragment: &str, unsupported_action: &str) -> bool {
     match node {
-        Node::Row { action, .. } if action.as_deref() == Some(CoreAction::SwitchSession.id()) => {
-            false
-        }
+        Node::Row { action, .. } if action.as_deref() == Some(unsupported_action) => false,
         Node::Use { name } => name != switch_fragment,
         Node::Column { children }
         | Node::Row {
@@ -221,7 +219,9 @@ fn retain_supported_node(node: &mut Node, switch_fragment: &str) -> bool {
             menu: None,
             ..
         } => {
-            children.retain_mut(|child| retain_supported_node(child, switch_fragment));
+            children.retain_mut(|child| {
+                retain_supported_node(child, switch_fragment, unsupported_action)
+            });
             true
         }
         Node::Row {
@@ -229,24 +229,28 @@ fn retain_supported_node(node: &mut Node, switch_fragment: &str) -> bool {
             menu: Some(menu),
             ..
         } => {
-            if !retain_supported_node(menu, switch_fragment) {
+            if !retain_supported_node(menu, switch_fragment, unsupported_action) {
                 return false;
             }
-            children.retain_mut(|child| retain_supported_node(child, switch_fragment));
+            children.retain_mut(|child| {
+                retain_supported_node(child, switch_fragment, unsupported_action)
+            });
             true
         }
         Node::List { entries } => {
-            entries.retain_mut(|entry| retain_supported_node(entry, switch_fragment));
+            entries.retain_mut(|entry| {
+                retain_supported_node(entry, switch_fragment, unsupported_action)
+            });
             true
         }
         Node::Flex { child, .. } | Node::When { child, .. } | Node::Modal { child } => {
-            retain_supported_node(child, switch_fragment)
+            retain_supported_node(child, switch_fragment, unsupported_action)
         }
         Node::Zone {
             fallback: Some(fallback),
             ..
         } => {
-            if !retain_supported_node(fallback, switch_fragment) {
+            if !retain_supported_node(fallback, switch_fragment, unsupported_action) {
                 if let Node::Zone { fallback, .. } = node {
                     *fallback = None;
                 }
@@ -262,9 +266,13 @@ fn retain_supported_node(node: &mut Node, switch_fragment: &str) -> bool {
     }
 }
 
-fn retain_supported_declarations(rows: &mut Vec<EndpointPluginUiItem>, switch_fragment: &str) {
+fn retain_supported_declarations(
+    rows: &mut Vec<EndpointPluginUiItem>,
+    switch_fragment: &str,
+    unsupported_action: &str,
+) {
     rows.retain_mut(|item| {
-        if item.action.as_deref() == Some(CoreAction::SwitchSession.id()) {
+        if item.action.as_deref() == Some(unsupported_action) {
             return false;
         }
         item.command_inputs
@@ -272,15 +280,15 @@ fn retain_supported_declarations(rows: &mut Vec<EndpointPluginUiItem>, switch_fr
         let Some(declaration) = item.declaration.as_mut() else {
             return true;
         };
-        declaration
-            .zones
-            .retain_mut(|placement| retain_supported_node(&mut placement.tree, switch_fragment));
+        declaration.zones.retain_mut(|placement| {
+            retain_supported_node(&mut placement.tree, switch_fragment, unsupported_action)
+        });
         declaration.fragments.retain_mut(|fragment| {
             fragment.name != switch_fragment
-                && retain_supported_node(&mut fragment.tree, switch_fragment)
+                && retain_supported_node(&mut fragment.tree, switch_fragment, unsupported_action)
         });
         if declaration.composition.as_mut().is_some_and(|composition| {
-            !retain_supported_node(&mut composition.tree, switch_fragment)
+            !retain_supported_node(&mut composition.tree, switch_fragment, unsupported_action)
         }) {
             declaration.composition = None;
         }
@@ -292,16 +300,22 @@ pub(crate) fn projection(
     state: &AppState,
     mut ordinary: Vec<EndpointPluginUiItem>,
     session_switch: bool,
+    tab_transfer: bool,
 ) -> Result<(Vec<UiCommandInfo>, Vec<EndpointPluginUiItem>), String> {
-    if !session_switch {
-        let (switch_fragment, _) = locator(
-            &state.command_boot_id,
-            &UiCommandKey::Core {
-                action_id: CoreAction::SwitchSession.id().to_owned(),
-                mode: None,
-            },
-        );
-        retain_supported_declarations(&mut ordinary, &switch_fragment);
+    for (action, supported) in [
+        (CoreAction::SwitchSession, session_switch),
+        (CoreAction::MoveToSession, tab_transfer),
+    ] {
+        if !supported {
+            let (fragment, _) = locator(
+                &state.command_boot_id,
+                &UiCommandKey::Core {
+                    action_id: action.id().to_owned(),
+                    mode: None,
+                },
+            );
+            retain_supported_declarations(&mut ordinary, &fragment, action.id());
+        }
     }
     if state.command_boot_id.is_empty() {
         return Ok((Vec::new(), ordinary));
@@ -343,7 +357,9 @@ pub(crate) fn projection(
             Ok(())
         };
     for descriptor in CORE_COMMANDS {
-        if descriptor.action == CoreAction::SwitchSession && !session_switch {
+        if (descriptor.action == CoreAction::SwitchSession && !session_switch)
+            || (descriptor.action == CoreAction::MoveToSession && !tab_transfer)
+        {
             continue;
         }
         let action = descriptor.action.id();

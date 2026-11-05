@@ -163,18 +163,26 @@ fn tab_rename(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn tab_move(args: &[String]) -> std::io::Result<i32> {
-    let usage = "usage: trailboss tab move <tab_id> --workspace <workspace_id> [--index N]";
+    let usage = "usage: trailboss tab move <tab_id> (--workspace <workspace_id> | --new-space <label>) [--to-session <session>] [--index N]";
     let Some(tab_id) = args.first().filter(|arg| !arg.starts_with('-')) else {
         eprintln!("{usage}");
         return Ok(2);
     };
     let mut workspace_id = None;
+    let mut destination_session = None;
+    let mut destination_workspace_label = None;
     let mut insert_index = None;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
             "--workspace" if workspace_id.is_none() && index + 1 < args.len() => {
                 workspace_id = Some(args[index + 1].clone());
+            }
+            "--to-session" if destination_session.is_none() && index + 1 < args.len() => {
+                destination_session = Some(args[index + 1].clone());
+            }
+            "--new-space" if destination_workspace_label.is_none() && index + 1 < args.len() => {
+                destination_workspace_label = Some(args[index + 1].clone());
             }
             "--index" if insert_index.is_none() && index + 1 < args.len() => {
                 let Ok(slot) = args[index + 1].parse::<usize>() else {
@@ -190,14 +198,28 @@ fn tab_move(args: &[String]) -> std::io::Result<i32> {
         }
         index += 2;
     }
-    let Some(workspace_id) = workspace_id else {
+    if workspace_id.is_some() == destination_workspace_label.is_some()
+        || (destination_workspace_label.is_some() && destination_session.is_none())
+    {
         eprintln!("{usage}");
         return Ok(2);
+    }
+    let operation_id = if destination_session.is_some() {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(std::io::Error::other)?
+            .as_nanos();
+        Some(format!("cli-tab-move-{}-{timestamp}", std::process::id()))
+    } else {
+        None
     };
     super::runtime::tab_transfer(TabTransferParams {
         tab_id: super::normalize_tab_id(tab_id),
         workspace_id,
         insert_index,
+        destination_session,
+        destination_workspace_label,
+        operation_id,
     })
 }
 
@@ -223,6 +245,6 @@ fn print_tab_help() {
     eprintln!("  trailboss tab get <tab_id>");
     eprintln!("  trailboss tab focus <tab_id>");
     eprintln!("  trailboss tab rename <tab_id> <label>");
-    eprintln!("  trailboss tab move <tab_id> --workspace <workspace_id> [--index N]");
+    eprintln!("  trailboss tab move <tab_id> (--workspace <workspace_id> | --new-space <label>) [--to-session <session>] [--index N]");
     eprintln!("  trailboss tab close <tab_id>");
 }

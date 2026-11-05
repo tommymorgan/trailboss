@@ -394,6 +394,8 @@ impl ClientWriterQueue {
 /// Internal event sent from client transport threads to the main event loop.
 #[derive(Debug)]
 pub(crate) enum ServerEvent {
+    #[cfg(unix)]
+    TabTransfer(Box<crate::server::tab_transfer::protocol::CoreEnvelope>),
     /// A new client completed the handshake.
     ClientConnected {
         client_id: u64,
@@ -420,6 +422,7 @@ pub(crate) enum ServerEvent {
         surface_delta: bool,
         surface_scroll: bool,
         session_switch: bool,
+        tab_transfer: bool,
         writer: ClientWriter,
     },
     /// A client sent an input message.
@@ -523,6 +526,14 @@ pub(crate) enum ServerEvent {
     ClientShellMouseCapture { client_id: u64, enabled: bool },
     /// The committed shell asks the server to replay presentation effects before input resumes.
     ClientShellPresentationSync { client_id: u64, token: String },
+    #[cfg(unix)]
+    ClientShellTabTransferDestinations { client_id: u64, data: String },
+    #[cfg(unix)]
+    ClientShellTabTransferDestinationsReady {
+        client_id: u64,
+        boot_id: String,
+        data: String,
+    },
     /// A client-owned shell invoked one endpoint operation through this connection.
     ClientShellEndpointRequest {
         client_id: u64,
@@ -789,6 +800,7 @@ pub(crate) fn handle_client_handshake(
                     hello.surface_delta,
                     hello.surface_scroll,
                     hello.session_switch,
+                    hello.tab_transfer,
                 )),
             )
         }
@@ -887,6 +899,7 @@ pub(crate) fn handle_client_handshake(
         surface_delta,
         surface_scroll,
         session_switch,
+        tab_transfer,
     )) = shell_options
     {
         ServerEvent::ClientShellConnected {
@@ -904,6 +917,7 @@ pub(crate) fn handle_client_handshake(
             surface_delta,
             surface_scroll,
             session_switch,
+            tab_transfer,
             writer,
         }
     } else {
@@ -1352,6 +1366,18 @@ fn client_read_loop_with_endpoint_controls(
                     token: data,
                 }
             }
+            #[cfg(unix)]
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::endpoint::TAB_TRANSFER_DESTINATIONS_REQUEST_KIND =>
+            {
+                if data.len() > 4096 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "tab transfer discovery request too large",
+                    ));
+                }
+                ServerEvent::ClientShellTabTransferDestinations { client_id, data }
+            }
             ClientMessage::EndpointControl { kind, data } => {
                 let Some(response) = crate::server::client_endpoint_control::response(&kind, data)
                 else {
@@ -1484,6 +1510,7 @@ mod tests {
             surface_delta: false,
             surface_scroll: false,
             session_switch: false,
+            tab_transfer: false,
             snapshot_codecs: vec![crate::protocol::endpoint::SNAPSHOT_CODEC_V1.into()],
             surface_codecs: vec![crate::protocol::endpoint::SURFACE_CODEC_V1.into()],
             input_codecs: vec![crate::protocol::endpoint::INPUT_CODEC_V1.into()],
@@ -2003,12 +2030,14 @@ mod tests {
                 surface_delta,
                 surface_scroll,
                 session_switch,
+                tab_transfer,
                 writer,
             } => {
                 assert!(!surface_reuse);
                 assert!(!surface_delta);
                 assert!(!surface_scroll);
                 assert!(!session_switch);
+                assert!(!tab_transfer);
                 assert_eq!(client_id, 43);
                 assert_eq!((surface_cols, surface_rows), (80, 29));
                 assert_eq!((cell_width_px, cell_height_px), (8, 16));

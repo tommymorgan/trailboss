@@ -118,6 +118,9 @@ core_actions! {
     SwitchSession => "host:switch-session" [
         "Switch session", ClientLocal, None, CoreCommandInteraction::Immediate
     ],
+    MoveToSession => "host:move-to-session" [
+        "Move to session…", Tab, None, CoreCommandInteraction::Immediate
+    ],
     RecentlyClosedTabs => "host:recently-closed-tabs" [
         "Recently closed tabs", Global, None, CoreCommandInteraction::Picker
     ],

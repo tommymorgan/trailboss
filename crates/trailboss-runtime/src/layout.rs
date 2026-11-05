@@ -19,6 +19,10 @@ impl PaneId {
         Self(NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
     }
 
+    pub(crate) fn reserve_through(id: u32) {
+        NEXT_PANE_ID.fetch_max(id.saturating_add(1), std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn raw(self) -> u32 {
         self.0
     }

@@ -37,6 +37,11 @@ impl TerminalRuntime {
     }
 
     #[cfg(unix)]
+    pub(crate) fn pty_identity(&self) -> std::io::Result<u64> {
+        self.0.pty_identity()
+    }
+
+    #[cfg(unix)]
     pub fn preserve_for_handoff(self) {
         self.0.preserve_for_handoff()
     }
@@ -62,6 +67,11 @@ impl TerminalRuntime {
         pane_id: u32,
     ) -> crate::handoff_runtime::HandoffRuntimeState {
         self.0.handoff_runtime_state(pane_id)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn complete_terminal_snapshot(&self) -> std::io::Result<Vec<u8>> {
+        self.0.complete_terminal_snapshot()
     }
 
     #[cfg(unix)]

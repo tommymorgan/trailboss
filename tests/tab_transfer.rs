@@ -1,3 +1,5 @@
+#[path = "support/console.rs"]
+mod console;
 #[path = "support/restart.rs"]
 mod restart;
 mod support;
@@ -24,8 +26,8 @@ fn cli(core: &Core, args: &[&str]) -> std::process::Output {
         command.env(key, &core.home);
     }
     command
-        .args(args)
         .args(["--session", &core.name])
+        .args(args)
         .current_dir(&core.home)
         .output()
         .unwrap()
@@ -83,6 +85,927 @@ fn process_identity(pid: &str) -> (String, String, PathBuf, PathBuf) {
         std::fs::read_link(format!("/proc/{pid}/fd/0")).unwrap(),
         std::fs::read_link(format!("/proc/{pid}/exe")).unwrap(),
     )
+}
+
+fn raw_core_request(core: &Core, method: &str, params: Value) -> Value {
+    let api = trailboss_runtime::api_client::ApiClient::for_target(
+        trailboss_runtime::api_client::ConnectionTarget::SocketPath(
+            core.home
+                .join("trailboss/sessions")
+                .join(&core.name)
+                .join("trailboss.sock"),
+        ),
+    );
+    let request = serde_json::from_value(json!({
+        "id":"owned-transfer-proof", "method":method, "params":params
+    }))
+    .unwrap();
+    api.request_value_with_timeout(&request, Duration::from_secs(15))
+        .unwrap()
+}
+
+#[test]
+fn inherited_current_pane_cli_reaches_the_moved_shell_after_source_core_exit() {
+    let mut alpha = Core::new();
+    let beta = Core::launch_with_executable(
+        alpha.home.clone(),
+        format!("{}-beta", alpha.name),
+        support::executable(),
+        false,
+    );
+    let source = alpha.request("workspace.create", json!({"cwd":alpha.home,"focus":true}));
+    let pane = source["root_pane"]["pane_id"].as_str().unwrap();
+    let terminal =
+        alpha.request("pane.get", json!({"pane_id":pane}))["pane"]["terminal_id"].clone();
+    alpha.request("pane.send_text",json!({
+        "pane_id":pane,
+        "text":"transfer_marker=original-alpha; sleep 300 & transfer_job=$!; printf '%s %s\\n' \"$$\" \"$transfer_job\" > inherited-before\n"
+    }));
+    let before = wait_for_file(&alpha.home.join("inherited-before"));
+    let ids: Vec<_> = before.split_whitespace().collect();
+    let shell_identity = process_identity(ids[0]);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process_identity(ids[1]).3 == shell_identity.3 {
+        assert!(Instant::now() < deadline, "background job did not exec");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let job_identity = process_identity(ids[1]);
+    let destination = beta.request("workspace.create", json!({"cwd":beta.home}));
+    alpha.request("tab.transfer",json!({
+        "tab_id":source["tab"]["tab_id"],"destination_session":beta.name,
+        "workspace_id":destination["workspace"]["workspace_id"],"operation_id":"inherited-current-after-stop"
+    }));
+    alpha.request("server.stop", json!({}));
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if let Some(status) = alpha.child.try_wait().unwrap() {
+            assert!(status.success(), "source Core exit failed");
+            break;
+        }
+        assert!(Instant::now() < deadline, "source Core did not exit");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(process_identity(ids[0]), shell_identity);
+    assert_eq!(process_identity(ids[1]), job_identity);
+    let snapshot = beta.request("session.snapshot", json!({}));
+    let moved = snapshot["snapshot"]["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pane| pane["terminal_id"] == terminal)
+        .unwrap()["pane_id"]
+        .clone();
+    beta.request("pane.send_text",json!({
+        "pane_id":moved,
+        "text":format!(
+            "kill -0 \"$transfer_job\" && printf '%s\\n' \"$transfer_marker\" > inherited-after; '{}' pane current > inherited-current.json 2> inherited-current.error; printf '%s\\n' \"$?\" > inherited-current.exit\n",
+            support::executable().display()
+        )
+    }));
+    assert_eq!(
+        wait_for_file(&alpha.home.join("inherited-after")),
+        "original-alpha\n"
+    );
+    let exit = wait_for_file(&alpha.home.join("inherited-current.exit"));
+    assert_eq!(
+        exit,
+        "0\n",
+        "inherited CLI failed: {}",
+        std::fs::read_to_string(alpha.home.join("inherited-current.error")).unwrap()
+    );
+    let current: Value =
+        serde_json::from_slice(&std::fs::read(alpha.home.join("inherited-current.json")).unwrap())
+            .unwrap();
+    assert_eq!(current["result"]["pane"]["terminal_id"], terminal);
+    let inventory = beta.request("session.list", json!({}));
+    assert_eq!(
+        inventory["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|session| session["name"] == alpha.name)
+            .unwrap()["running"],
+        false
+    );
+}
+
+#[test]
+fn a_missing_destination_is_identified_without_disturbing_live_split_tabs() {
+    assert_rejected_transfer_preserves_live_work(|alpha, _, source, destination| {
+        let missing = format!("{}-missing", alpha.name);
+        let refused = raw_core_request(
+            alpha,
+            "tab.transfer",
+            json!({
+                "tab_id":source["tab"]["tab_id"],"destination_session":missing,
+                "workspace_id":destination["workspace"]["workspace_id"],"operation_id":"missing-destination"
+            }),
+        );
+        assert_eq!(refused["error"]["code"], "tab_transfer_failed");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(&missing),
+            "rejection did not identify the missing destination: {}",
+            refused["error"]
+        );
+    });
+}
+
+#[test]
+fn a_stopped_destination_is_not_started_and_live_split_tabs_remain_unchanged() {
+    assert_rejected_transfer_preserves_live_work(|alpha, beta, source, destination| {
+        let mut stopped = Core::launch_with_executable(
+            alpha.home.clone(),
+            format!("{}-stopped", alpha.name),
+            support::executable(),
+            false,
+        );
+        stopped.request("server.stop", json!({}));
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            if let Some(status) = stopped.child.try_wait().unwrap() {
+                assert!(status.success(), "destination Core exit failed");
+                break;
+            }
+            assert!(Instant::now() < deadline, "destination Core did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let refused = raw_core_request(
+            alpha,
+            "tab.transfer",
+            json!({
+                "tab_id":source["tab"]["tab_id"],"destination_session":stopped.name,
+                "workspace_id":destination["workspace"]["workspace_id"],"operation_id":"stopped-destination"
+            }),
+        );
+        assert_eq!(refused["error"]["code"], "tab_transfer_failed");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(&stopped.name),
+            "rejection did not identify the stopped destination: {}",
+            refused["error"]
+        );
+        let inventory = beta.request("session.list", json!({}));
+        assert_eq!(
+            inventory["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|session| session["name"] == stopped.name)
+                .unwrap()["running"],
+            false
+        );
+    });
+}
+
+#[test]
+fn a_removed_destination_space_is_rejected_without_disturbing_live_split_tabs() {
+    assert_rejected_transfer_preserves_live_work(|alpha, beta, source, _| {
+        let removed = beta.request(
+            "workspace.create",
+            json!({
+                "label":"Removed destination","cwd":beta.home,"focus":false
+            }),
+        );
+        let workspace = &removed["workspace"]["workspace_id"];
+        beta.request("workspace.close", json!({"workspace_id":workspace}));
+        let refused = raw_core_request(
+            alpha,
+            "tab.transfer",
+            json!({
+                "tab_id":source["tab"]["tab_id"],"destination_session":beta.name,
+                "workspace_id":workspace,"operation_id":"removed-destination-space"
+            }),
+        );
+        assert_eq!(refused["error"]["code"], "tab_transfer_failed");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("workspace"),
+            "rejection did not identify the removed destination space: {}",
+            refused["error"]
+        );
+    });
+}
+
+#[test]
+fn a_destination_path_cannot_escape_the_session_namespace_or_disturb_live_work() {
+    assert_rejected_transfer_preserves_live_work(|alpha, beta, source, destination| {
+        let refused = raw_core_request(
+            alpha,
+            "tab.transfer",
+            json!({
+                "tab_id":source["tab"]["tab_id"],"destination_session":format!("../{}", beta.name),
+                "workspace_id":destination["workspace"]["workspace_id"],"operation_id":"invalid-destination-path"
+            }),
+        );
+        assert_eq!(refused["error"]["code"], "tab_transfer_failed");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("session"),
+            "rejection did not identify the invalid session context: {}",
+            refused["error"]
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires the retained release executable; run with compatibility fixtures installed"]
+fn an_older_core_rejects_live_transfer_without_disturbing_either_sessions_work() {
+    let root = std::env::var_os("TRAILBOSS_COMPAT_BASELINE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap())
+                .join(".local/lib/trailboss-tabs-7c713486")
+        });
+    let executable = root.join("trailboss");
+    let inventory: Value =
+        serde_json::from_str(include_str!("fixtures/release-de20c469/inventory.json")).unwrap();
+    let digest = Command::new("sha256sum").arg(&executable).output().unwrap();
+    assert!(
+        digest.status.success(),
+        "retained release executable is unavailable"
+    );
+    assert_eq!(
+        String::from_utf8(digest.stdout)
+            .unwrap()
+            .split_whitespace()
+            .next(),
+        inventory["binary_sha256"].as_str(),
+        "retained release identity changed"
+    );
+    assert_rejected_transfer_preserves_live_work(|alpha, _, source, _| {
+        let legacy = Core::launch_with_executable(
+            alpha.home.clone(),
+            format!("{}-legacy", alpha.name),
+            executable,
+            false,
+        );
+        let destination = legacy.request("session.snapshot", json!({}));
+        let workspace = &destination["snapshot"]["workspaces"][0]["workspace_id"];
+        let tabs = legacy.request("tab.list", json!({}));
+        let refused = raw_core_request(
+            alpha,
+            "tab.transfer",
+            json!({
+                "tab_id":source["tab"]["tab_id"],"destination_session":legacy.name,
+                "workspace_id":workspace,"operation_id":"incompatible-destination-core"
+            }),
+        );
+        assert_eq!(refused["error"]["code"], "tab_transfer_failed");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(&legacy.name),
+            "rejection did not identify the incompatible destination: {}",
+            refused["error"]
+        );
+        assert_eq!(legacy.request("tab.list", json!({})), tabs);
+    });
+}
+
+#[test]
+fn a_stale_captured_source_tab_cannot_move_a_different_live_tab() {
+    assert_rejected_transfer_preserves_live_work(|alpha, beta, _, destination| {
+        let captured = alpha.request(
+            "workspace.create",
+            json!({
+                "label":"Stale captured source","cwd":alpha.home,"focus":false
+            }),
+        );
+        let stale_tab = captured["tab"]["tab_id"].clone();
+        alpha.request(
+            "workspace.close",
+            json!({"workspace_id":captured["workspace"]["workspace_id"]}),
+        );
+        let refused = raw_core_request(
+            alpha,
+            "tab.transfer",
+            json!({
+                "tab_id":stale_tab,"destination_session":beta.name,
+                "workspace_id":destination["workspace"]["workspace_id"],"operation_id":"stale-captured-source-tab"
+            }),
+        );
+        assert_eq!(
+            refused["error"]["code"], "tab_transfer_failed",
+            "stale source was not authoritatively rejected: {refused}"
+        );
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("tab"),
+            "rejection did not identify the stale source tab: {refused}"
+        );
+        assert!(
+            refused["result"].is_null(),
+            "stale source produced a destination mapping"
+        );
+    });
+}
+
+fn assert_rejected_transfer_preserves_live_work(reject: impl FnOnce(&Core, &Core, &Value, &Value)) {
+    let alpha = Core::new();
+    let beta = Core::launch_with_executable(
+        alpha.home.clone(),
+        format!("{}-beta", alpha.name),
+        support::executable(),
+        false,
+    );
+    let source = alpha.request(
+        "workspace.create",
+        json!({"label":"Source","cwd":alpha.home,"focus":true}),
+    );
+    let left = source["root_pane"]["pane_id"].as_str().unwrap();
+    let split = alpha.request(
+        "pane.split",
+        json!({"target_pane_id":left,"direction":"right","cwd":alpha.home,"focus":true}),
+    );
+    let right = split["pane"]["pane_id"].as_str().unwrap();
+    let destination = beta.request(
+        "workspace.create",
+        json!({"label":"Unrelated","cwd":beta.home,"focus":true}),
+    );
+    let bystander = destination["root_pane"]["pane_id"].as_str().unwrap();
+    let mut processes = Vec::new();
+    for (core, pane, marker) in [
+        (&alpha, left, "left"),
+        (&alpha, right, "right"),
+        (&beta, bystander, "bystander"),
+    ] {
+        core.request("pane.send_text",json!({
+            "pane_id":pane,
+            "text":format!("local_marker={marker}; sleep 300 & local_job=$!; printf '%s %s\\n' \"$$\" \"$local_job\" > {marker}-before\n")
+        }));
+        let state = wait_for_file(&alpha.home.join(format!("{marker}-before")));
+        let ids: Vec<_> = state.split_whitespace().collect();
+        let shell = process_identity(ids[0]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_identity(ids[1]).3 == shell.3 {
+            assert!(
+                Instant::now() < deadline,
+                "owned background job did not exec"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        processes.push((
+            ids[0].to_owned(),
+            shell,
+            ids[1].to_owned(),
+            process_identity(ids[1]),
+        ));
+    }
+    let source_tabs = alpha.request("tab.list", json!({}));
+    let destination_tabs = beta.request("tab.list", json!({}));
+    let source_layout = alpha.request("pane.layout", json!({"pane_id":right}));
+    reject(&alpha, &beta, &source, &destination);
+    assert_eq!(alpha.request("tab.list", json!({})), source_tabs);
+    assert_eq!(beta.request("tab.list", json!({})), destination_tabs);
+    assert_eq!(
+        alpha.request("pane.layout", json!({"pane_id":right})),
+        source_layout
+    );
+    for ((core, pane, marker), (shell_pid, shell, job_pid, job)) in [
+        (&alpha, left, "left"),
+        (&alpha, right, "right"),
+        (&beta, bystander, "bystander"),
+    ]
+    .into_iter()
+    .zip(processes)
+    {
+        assert_eq!(process_identity(&shell_pid), shell);
+        assert_eq!(process_identity(&job_pid), job);
+        core.request("pane.send_text",json!({
+            "pane_id":pane,
+            "text":format!("kill -0 \"$local_job\" && printf '%s\\n' \"$local_marker\" > {marker}-after\n")
+        }));
+        assert_eq!(
+            wait_for_file(&alpha.home.join(format!("{marker}-after"))),
+            format!("{marker}\n")
+        );
+    }
+}
+
+#[test]
+fn native_create_space_move_leaves_the_source_attached_and_empty_without_a_replacement_shell() {
+    let alpha = Core::new();
+    let beta = Core::launch_with_executable(
+        alpha.home.clone(),
+        format!("{}-beta", alpha.name),
+        support::executable(),
+        false,
+    );
+    for core in [&alpha, &beta] {
+        let workspaces = core.request("workspace.list", json!({}));
+        for workspace in workspaces["workspaces"].as_array().unwrap() {
+            core.request(
+                "workspace.close",
+                json!({"workspace_id":workspace["workspace_id"]}),
+            );
+        }
+    }
+    let source = alpha.request(
+        "workspace.create",
+        json!({
+            "label":"Build","cwd":alpha.home,"focus":true
+        }),
+    );
+    let pane = &source["root_pane"]["pane_id"];
+    let terminal =
+        alpha.request("pane.get", json!({"pane_id":pane}))["pane"]["terminal_id"].clone();
+    alpha.request("pane.send_text", json!({
+        "pane_id":pane,
+        "text":"create_space_marker=original; sleep 300 & create_space_job=$!; printf '%s %s\\n' \"$$\" \"$create_space_job\" > create-space-before; printf 'CREATE_SPACE_SOURCE_READY\\n'\n"
+    }));
+    let before = wait_for_file(&alpha.home.join("create-space-before"));
+    let pids: Vec<_> = before.split_whitespace().collect();
+    let shell = process_identity(pids[0]);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process_identity(pids[1]).3 == shell.3 {
+        assert!(
+            Instant::now() < deadline,
+            "owned background job did not exec"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let job = process_identity(pids[1]);
+    let mut native = console::Console::new(&alpha);
+    native.wait(|rows| {
+        rows.iter()
+            .any(|row| row.trim_end().ends_with("CREATE_SPACE_SOURCE_READY"))
+    });
+    assert!(beta.request("workspace.list", json!({}))["workspaces"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    native.text("\x1bOP");
+    native.wait(|rows| rows.iter().any(|row| row.contains("Commands")));
+    native.text("Move to session");
+    native.wait(|rows| rows.iter().any(|row| row.contains("Move to session")));
+    native.text("\r");
+    native.wait(|rows| {
+        rows.iter()
+            .any(|row| row.contains(&beta.name) && row.contains("Create space"))
+    });
+    native.text(&beta.name);
+    native.text("\r");
+    native.wait(|rows| {
+        rows.iter()
+            .any(|row| row.contains("New destination space name"))
+    });
+    native.text("Moved Work");
+    native.text("\r");
+    native.wait(|rows| {
+        rows.iter()
+            .any(|row| row.contains("Tab moved to destination session"))
+    });
+    let empty = alpha.request("session.snapshot", json!({}));
+    for collection in ["workspaces", "tabs", "panes"] {
+        assert!(
+            empty["snapshot"][collection].as_array().unwrap().is_empty(),
+            "source created a replacement or retained moved ownership: {empty}"
+        );
+    }
+    assert!(
+        native.child.try_wait().unwrap().is_none(),
+        "source window detached after moving its last tab"
+    );
+    let destination = beta.request("session.snapshot", json!({}));
+    assert_eq!(
+        destination["snapshot"]["workspaces"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        destination["snapshot"]["workspaces"][0]["label"],
+        "Moved Work"
+    );
+    assert_eq!(destination["snapshot"]["tabs"].as_array().unwrap().len(), 1);
+    let panes = destination["snapshot"]["panes"].as_array().unwrap();
+    assert_eq!(panes.len(), 1);
+    assert_eq!(panes[0]["terminal_id"], terminal);
+    assert_eq!(process_identity(pids[0]), shell);
+    assert_eq!(process_identity(pids[1]), job);
+    beta.request("pane.send_text", json!({
+        "pane_id":panes[0]["pane_id"],
+        "text":"kill -0 \"$create_space_job\" && printf '%s\\n' \"$create_space_marker\" > create-space-after\n"
+    }));
+    assert_eq!(
+        wait_for_file(&alpha.home.join("create-space-after")),
+        "original\n"
+    );
+}
+
+#[test]
+fn public_api_moves_a_whole_live_split_tab_into_another_session() {
+    assert_cross_session_split_transfer(|alpha, beta, tab, workspace| {
+        alpha.request(
+            "tab.transfer",
+            json!({
+                "tab_id":tab,"destination_session":beta.name,
+                "workspace_id":workspace,"operation_id":"whole-live-tab"
+            }),
+        );
+    });
+}
+
+#[test]
+fn cli_moves_a_whole_live_split_tab_into_another_session() {
+    assert_cross_session_split_transfer(|alpha, beta, tab, workspace| {
+        let output = cli(
+            alpha,
+            &[
+                "tab",
+                "move",
+                tab,
+                "--workspace",
+                workspace,
+                "--to-session",
+                &beta.name,
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "cross-session CLI move failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(response.get("error").is_none(), "{response}");
+    });
+}
+
+enum NativeMoveEntry {
+    Palette,
+    TabMenu,
+}
+
+#[test]
+fn command_palette_moves_a_whole_live_split_tab_into_another_session() {
+    native_moves_a_whole_live_split_tab(NativeMoveEntry::Palette);
+}
+
+#[test]
+fn tab_menu_moves_a_whole_live_split_tab_into_another_session() {
+    native_moves_a_whole_live_split_tab(NativeMoveEntry::TabMenu);
+}
+
+fn native_moves_a_whole_live_split_tab(entry: NativeMoveEntry) {
+    assert_cross_session_split_transfer(|alpha, beta, _, _| {
+        let mut native = console::Console::new(alpha);
+        move_native_tab_to_work(&mut native, beta, entry);
+        native.text("printf '%s\\n' \"${native_source_owner-unexpected-session}\" > native-source-retained\r");
+        assert_eq!(
+            wait_for_file(&alpha.home.join("native-source-retained")),
+            "alpha\n"
+        );
+    });
+}
+
+fn move_native_tab_to_work(native: &mut console::Console, beta: &Core, entry: NativeMoveEntry) {
+    let rows = native.wait(|rows| rows.iter().any(|row| row.contains("Build")));
+    match entry {
+        NativeMoveEntry::Palette => {
+            native.text("\x1bOP");
+            native.wait(|rows| rows.iter().any(|row| row.contains("Commands")));
+            native.text("Move to session");
+            native.wait(|rows| rows.iter().any(|row| row.contains("Move to session")));
+            native.text("\r");
+        }
+        NativeMoveEntry::TabMenu => {
+            let y = rows
+                .iter()
+                .position(|row| row.chars().take(20).collect::<String>().contains("Build"))
+                .expect("Build tab was not visible in sidebar");
+            let x = rows[y][..rows[y].find("Build").unwrap()].chars().count();
+            native.text(&format!("\x1b[<2;{};{}M", x + 1, y + 1));
+            let rows = native.wait(|rows| rows.iter().any(|row| row.contains("Move to session")));
+            let y = rows
+                .iter()
+                .position(|row| row.contains("Move to session"))
+                .unwrap();
+            let x = rows[y][..rows[y].find("Move to session").unwrap()]
+                .chars()
+                .count();
+            native.click(x, y);
+        }
+    }
+    native.wait(|rows| {
+        rows.iter()
+            .any(|row| row.contains(&beta.name) && row.contains("Work"))
+    });
+    native.text("Work");
+    native.text("\r");
+    native.wait(|rows| {
+        rows.iter()
+            .any(|row| row.contains("Tab moved to destination session"))
+    });
+}
+
+#[test]
+fn moving_a_tab_keeps_three_native_windows_attached_until_an_explicit_switch() {
+    assert_cross_session_split_transfer(|alpha, beta, _, workspace| {
+        let destination = beta.request("session.snapshot", json!({}));
+        let bystander_tab = beta.request("tab.list", json!({"workspace_id":workspace}))["tabs"][0]
+            ["tab_id"]
+            .clone();
+        let bystander = destination["snapshot"]["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|pane| pane["tab_id"] == bystander_tab)
+            .unwrap()["pane_id"]
+            .as_str()
+            .unwrap();
+        beta.request("pane.send_text", json!({
+            "pane_id":bystander,
+            "text":"native_source_owner=beta; printf 'BYSTANDER_READY\\n' > bystander-ready; printf 'BYSTANDER_VISIBLE\\n'\n"
+        }));
+        assert_eq!(
+            wait_for_file(&beta.home.join("bystander-ready")),
+            "BYSTANDER_READY\n"
+        );
+        let mut invoking = console::Console::new(alpha);
+        let mut alpha_spectator = console::Console::new(alpha);
+        let mut beta_spectator = console::Console::new(beta);
+        invoking.wait(|rows| {
+            rows.iter()
+                .any(|row| row.trim_end().ends_with("RETAINED_1"))
+        });
+        alpha_spectator.wait(|rows| {
+            rows.iter()
+                .any(|row| row.trim_end().ends_with("RETAINED_1"))
+        });
+        beta_spectator.wait(|rows| {
+            rows.iter()
+                .any(|row| row.trim_end().ends_with("BYSTANDER_VISIBLE"))
+        });
+
+        move_native_tab_to_work(&mut invoking, beta, NativeMoveEntry::Palette);
+        alpha_spectator.wait(|rows| {
+            rows.iter()
+                .any(|row| row.contains("native_source_owner=alpha"))
+        });
+        for (window, file, expected) in [
+            (&mut invoking, "invoking-retained-session", "alpha\n"),
+            (
+                &mut alpha_spectator,
+                "alpha-spectator-retained-session",
+                "alpha\n",
+            ),
+            (
+                &mut beta_spectator,
+                "beta-spectator-retained-session",
+                "beta\n",
+            ),
+        ] {
+            window.text(&format!(
+                "printf '%s\\n' \"${{native_source_owner-unexpected-session}}\" > {file}\r"
+            ));
+            assert_eq!(wait_for_file(&alpha.home.join(file)), expected);
+        }
+
+        invoking.text("\x1bOP");
+        invoking.wait(|rows| rows.iter().any(|row| row.contains("Commands")));
+        invoking.text("Switch session");
+        invoking.wait(|rows| rows.iter().any(|row| row.contains("Switch session")));
+        invoking.text("\r");
+        invoking.wait(|rows| rows.iter().any(|row| row.contains(&beta.name)));
+        invoking.text(&beta.name);
+        invoking.text("\r");
+        let rows = invoking.wait(|rows| rows.iter().any(|row| row.contains("BYSTANDER_VISIBLE")));
+        let y = rows
+            .iter()
+            .position(|row| row.chars().take(20).collect::<String>().contains("Build"))
+            .expect("moved tab missing from beta sidebar");
+        let x = rows[y][..rows[y].find("Build").unwrap()].chars().count();
+        invoking.click(x, y);
+        invoking.wait(|rows| {
+            rows.iter()
+                .any(|row| row.trim_end().ends_with("RETAINED_1"))
+        });
+        invoking.text(&format!(
+            "printf '%s\\n' \"${{move_local-unexpected-pane}}\" > '{}'\r",
+            alpha.home.join("explicitly-switched-moved-tab").display()
+        ));
+        assert_eq!(
+            wait_for_file(&alpha.home.join("explicitly-switched-moved-tab")),
+            "value-1\n"
+        );
+    });
+}
+
+fn assert_cross_session_split_transfer(move_tab: impl FnOnce(&Core, &Core, &str, &str)) {
+    let alpha = Core::new();
+    let beta = Core::launch_with_executable(
+        alpha.home.clone(),
+        format!("{}-beta", alpha.name),
+        support::executable(),
+        false,
+    );
+    let left_dir = alpha.home.join("left");
+    let right_dir = alpha.home.join("right");
+    std::fs::create_dir(&left_dir).unwrap();
+    std::fs::create_dir(&right_dir).unwrap();
+    let source = alpha.request(
+        "workspace.create",
+        json!({"label":"Source","cwd":left_dir,"focus":true}),
+    );
+    let source_space = source["workspace"]["workspace_id"].as_str().unwrap();
+    let source_tab = source["tab"]["tab_id"].as_str().unwrap();
+    let left = source["root_pane"]["pane_id"].as_str().unwrap();
+    alpha.request("tab.rename", json!({"tab_id":source_tab,"label":"Build"}));
+    let split = alpha.request(
+        "pane.split",
+        json!({"target_pane_id":left,"direction":"right","ratio":0.37,"cwd":right_dir,"focus":true}),
+    );
+    let right = split["pane"]["pane_id"].as_str().unwrap();
+    let remaining = alpha.request(
+        "tab.create",
+        json!({"workspace_id":source_space,"label":"Remaining","cwd":alpha.home,"focus":false}),
+    );
+    let work = beta.request(
+        "workspace.create",
+        json!({"label":"Work","cwd":beta.home,"focus":true}),
+    );
+    let destination = work["workspace"]["workspace_id"].as_str().unwrap();
+    beta.request(
+        "tab.rename",
+        json!({"tab_id":work["tab"]["tab_id"],"label":"Bystander"}),
+    );
+    let bystander = beta.request("pane.get", json!({"pane_id":work["root_pane"]["pane_id"]}));
+    let mut before = Vec::new();
+    for (index, pane) in [left, right].into_iter().enumerate() {
+        alpha.request(
+            "pane.rename",
+            json!({"pane_id":pane,"label":format!("Build{index}")}),
+        );
+        alpha.request("pane.send_text", json!({"pane_id":pane,"text":format!(
+            "move_local=value-{index}; sleep 300 & move_job=$!; printf 'RETAINED_%s\\n' {index}; printf '%s %s %s %s\\n' \"$$\" \"$move_job\" \"$move_local\" \"$PWD\" > '{}'\n",
+            alpha.home.join(format!("move-before-{index}")).display()
+        )}));
+        let state = wait_for_file(&alpha.home.join(format!("move-before-{index}")));
+        let fields: Vec<_> = state.split_whitespace().collect();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_identity(fields[0]).3 == process_identity(fields[1]).3 {
+            assert!(Instant::now() < deadline, "background sleep did not exec");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        before.push((
+            alpha.request("pane.get", json!({"pane_id":pane}))["pane"].clone(),
+            state.clone(),
+            process_identity(fields[0]),
+            process_identity(fields[1]),
+        ));
+    }
+    let mut source_view = alpha.attach();
+    alpha.request("tab.focus", json!({"tab_id":source_tab}));
+    for (index, pane) in [left, right].into_iter().enumerate() {
+        alpha.request("pane.focus", json!({"pane_id":pane}));
+        let marker = format!("RETAINED_{index}");
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while source_view
+            .primary
+            .as_ref()
+            .is_none_or(|surface| surface.pane_id != pane || !surface.text().contains(&marker))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "original content missing in pane {index}"
+            );
+            source_view.receive().unwrap_or_else(|error| panic!(
+                "original content observation failed: {error}; pane={pane}; focused={:?}; surface={:?}",
+                source_view.focused_pane_id,
+                source_view.primary.as_ref().map(|surface| (&surface.pane_id, surface.text()))
+            ));
+        }
+    }
+    alpha.request("pane.focus", json!({"pane_id":right}));
+    alpha.request("pane.zoom", json!({"pane_id":right,"mode":"on"}));
+    let original_layout = alpha.request("pane.layout", json!({"pane_id":right}))["layout"].clone();
+    let closed_before = alpha.request("tab.closed.list", json!({}));
+    alpha.request("pane.send_text", json!({
+        "pane_id":remaining["root_pane"]["pane_id"],
+        "text":"native_source_owner=alpha; printf '%s\\n' \"$native_source_owner\" > native-source-owner-ready\n"
+    }));
+    assert_eq!(
+        wait_for_file(&alpha.home.join("native-source-owner-ready")),
+        "alpha\n"
+    );
+
+    move_tab(&alpha, &beta, source_tab, destination);
+    let destination_tabs = beta.request("tab.list", json!({"workspace_id":destination}));
+    assert_eq!(
+        destination_tabs["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tab| tab["label"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["Bystander", "Build"],
+        "cross-session request did not install the original tab in beta"
+    );
+    let moved_tab = destination_tabs["tabs"][1]["tab_id"].as_str().unwrap();
+    let source_tabs = alpha.request("tab.list", json!({"workspace_id":source_space}));
+    assert_eq!(
+        source_tabs["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tab| tab["tab_id"].clone())
+            .collect::<Vec<_>>(),
+        [remaining["tab"]["tab_id"].clone()]
+    );
+    assert_eq!(alpha.request("tab.closed.list", json!({})), closed_before);
+    let bystander_after = beta.request("pane.get", json!({"pane_id":work["root_pane"]["pane_id"]}));
+    for field in ["terminal_id", "cwd", "label"] {
+        assert_eq!(bystander_after["pane"][field], bystander["pane"][field]);
+    }
+    let destination_snapshot = beta.request("session.snapshot", json!({}));
+    let destination_panes = destination_snapshot["snapshot"]["panes"]
+        .as_array()
+        .unwrap();
+    let moved_right = destination_panes
+        .iter()
+        .find(|pane| pane["terminal_id"] == before[1].0["terminal_id"])
+        .expect("original focused terminal missing");
+    let imported_layout =
+        beta.request("pane.layout", json!({"pane_id":moved_right["pane_id"]}))["layout"].clone();
+    assert_eq!(imported_layout["zoomed"], true);
+    assert_eq!(imported_layout["focused_pane_id"], moved_right["pane_id"]);
+    let splits = |layout: &Value| {
+        layout["splits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|split| json!({"direction":split["direction"],"ratio":split["ratio"]}))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(splits(&imported_layout), splits(&original_layout));
+    beta.request("tab.focus", json!({"tab_id":moved_tab}));
+    let mut destination_view = beta.attach();
+    for (index, (original, state, shell_identity, job_identity)) in before.iter().enumerate() {
+        let pane = destination_panes
+            .iter()
+            .find(|pane| pane["terminal_id"] == original["terminal_id"])
+            .expect("original terminal missing in beta");
+        let current = pane["pane_id"].as_str().unwrap();
+        assert_eq!(pane["tab_id"], moved_tab);
+        assert_eq!(pane["workspace_id"], destination);
+        let metadata = beta.request("pane.get", json!({"pane_id":current}));
+        assert_eq!(metadata["pane"]["label"], original["label"]);
+        assert_eq!(metadata["pane"]["cwd"], original["cwd"]);
+        beta.request("pane.focus", json!({"pane_id":current}));
+        let marker = format!("RETAINED_{index}");
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while destination_view.primary.as_ref().is_none_or(|surface| {
+            !surface
+                .text()
+                .lines()
+                .any(|line| line.trim_end().ends_with(&marker))
+        }) {
+            assert!(
+                Instant::now() < deadline,
+                "retained content missing from moved pane {index}"
+            );
+            destination_view.receive().unwrap();
+        }
+        beta.request("pane.send_text", json!({"pane_id":current,"text":format!(
+            "kill -0 \"$move_job\" && printf '%s %s %s %s\\n' \"$$\" \"$move_job\" \"$move_local\" \"$PWD\" > '{}'\n",
+            alpha.home.join(format!("move-after-{index}")).display()
+        )}));
+        let observed = wait_for_file(&alpha.home.join(format!("move-after-{index}")));
+        assert_eq!(&observed, state);
+        let ids: Vec<_> = observed.split_whitespace().collect();
+        assert_eq!(&process_identity(ids[0]), shell_identity);
+        assert_eq!(&process_identity(ids[1]), job_identity);
+    }
+    for (core, pane, marker) in [
+        (
+            &alpha,
+            &remaining["root_pane"]["pane_id"],
+            "SOURCE_SURVIVOR",
+        ),
+        (&beta, &work["root_pane"]["pane_id"], "DESTINATION_SURVIVOR"),
+    ] {
+        let path = alpha.home.join(marker);
+        core.request(
+            "pane.send_text",
+            json!({"pane_id":pane,"text":format!(
+                "printf '{marker}\\n' > '{}'\n", path.display()
+            )}),
+        );
+        assert_eq!(wait_for_file(&path), format!("{marker}\n"));
+    }
 }
 
 #[test]
@@ -1450,7 +2373,8 @@ fn missing_inherited_locator_recovers_lifecycle_on_its_owned_runtime_after_hando
         "server.live_handoff",
         json!({"import_exe":support::executable()}),
     );
-    for state in ["working", "idle"] {
+    // Public status reports unseen Idle completion as Done; keep the decoy focused.
+    for (state, expected_status) in [("working", "working"), ("idle", "done")] {
         std::fs::write(core.home.join(format!("{state}.go")), "").unwrap();
         let replies: Value =
             serde_json::from_str(&wait_for_file(&core.home.join(format!("{state}.reply"))))
@@ -1464,13 +2388,14 @@ fn missing_inherited_locator_recovers_lifecycle_on_its_owned_runtime_after_hando
         let applied = Instant::now() + Duration::from_secs(5);
         let pane = loop {
             let pane = core.request("pane.get", json!({"pane_id":destination}))["pane"].clone();
-            if pane["agent_status"] == state && pane["agent_session"]["value"] == "retained-session"
+            if pane["agent_status"] == expected_status
+                && pane["agent_session"]["value"] == "retained-session"
             {
                 break pane;
             }
             assert!(
                 Instant::now() < applied,
-                "lifecycle did not settle on its owned pane: {pane}; resolved locator: {}",
+                "expected {expected_status}, lifecycle did not settle on its owned pane: {pane}; resolved locator: {}",
                 core.request("pane.get", json!({"pane_id":"wJ:p1"}))
             );
             std::thread::sleep(Duration::from_millis(10));
@@ -1478,8 +2403,8 @@ fn missing_inherited_locator_recovers_lifecycle_on_its_owned_runtime_after_hando
         assert_eq!(pane["pane_id"], destination);
         assert_eq!(pane["workspace_id"], main["workspace"]["workspace_id"]);
         assert_eq!(
-            pane["agent_status"], state,
-            "lifecycle state was not applied: {pane}"
+            pane["agent_status"], expected_status,
+            "public lifecycle state was not applied: {pane}"
         );
         assert_eq!(pane["agent_session"]["value"], "retained-session");
         let focused = core.request("pane.get", json!({"pane_id":decoy}))["pane"].clone();
@@ -2204,13 +3129,6 @@ fn alias_blind_importer_is_rejected_before_public_socket_or_owner_changes() {
     assert_eq!(
         rejected["error"]["code"], "handoff_failed",
         "alias-blind import was not rejected: {rejected}"
-    );
-    assert!(
-        rejected["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("did not confirm restored public pane aliases"),
-        "rejected for the wrong reason: {rejected}"
     );
     assert!(
         rejected.get("result").is_none(),

@@ -235,6 +235,8 @@ pub fn session_info(name: Option<&str>) -> SessionInfo {
     let session_dir = data_dir_for(name);
     let connection = crate::ipc::connect_local_stream(&socket_path);
     let running = connection.is_ok();
+    #[cfg(unix)]
+    let running = crate::server::tab_transfer::core_running(&display_name).unwrap_or(running);
     let connection_error = connection
         .err()
         .filter(|error| !crate::cli::server_not_running_error(error))
@@ -259,6 +261,10 @@ pub fn stop_session(name: Option<&str>) -> Result<SessionInfo, String> {
 
 pub(crate) fn stop_active_server() -> Result<(), String> {
     let socket_path = active_api_socket_path();
+    #[cfg(unix)]
+    if crate::server::tab_transfer::retained_endpoint(&socket_path) {
+        return stop_session_with_timeout(active_name().as_deref(), STOP_WAIT_TIMEOUT).map(|_| ());
+    }
     let client_socket_path = crate::server::socket_paths::client_socket_path();
     stop_socket_with_timeout(
         socket_path.clone(),
@@ -270,6 +276,19 @@ pub(crate) fn stop_active_server() -> Result<(), String> {
 
 fn stop_session_with_timeout(name: Option<&str>, timeout: Duration) -> Result<SessionInfo, String> {
     let socket_path = api_socket_path_for(name);
+    #[cfg(unix)]
+    if crate::server::tab_transfer::retained_endpoint(&socket_path) {
+        let session = name.unwrap_or(DEFAULT_SESSION_NAME);
+        let endpoint =
+            crate::server::tab_transfer::core_endpoint(session).map_err(|e| e.to_string())?;
+        stop_socket_with_timeout(
+            endpoint.clone(),
+            vec![endpoint],
+            timeout,
+            &format!("session {session}"),
+        )?;
+        return Ok(session_info(name));
+    }
     let client_socket_path = client_socket_path_for(name);
     let label = format!("session {}", name.unwrap_or(DEFAULT_SESSION_NAME));
     stop_socket_with_timeout(
@@ -328,12 +347,20 @@ pub fn delete_session(name: &str) -> Result<SessionInfo, String> {
     let Some(dir) = exact_session_dir_for_delete(name)? else {
         return Ok(session_info(Some(name)));
     };
-    let socket_path = dir.join("trailboss.sock");
-    if is_running_at(&socket_path) {
+    #[cfg(unix)]
+    if crate::server::tab_transfer::has_live_routes(&dir.join("trailboss.sock"))
+        .map_err(|e| e.to_string())?
+    {
+        return Err(format!("session {name} retains live moved process addresses; wait for those processes to exit before deleting"));
+    }
+    if session_info(Some(name)).running {
         return Err(format!(
             "session {name} is running; stop it before deleting"
         ));
     }
+    #[cfg(unix)]
+    crate::server::tab_transfer::release_retained_endpoint(&dir.join("trailboss.sock"))
+        .map_err(|e| e.to_string())?;
     let info = session_info(Some(name));
     match std::fs::remove_dir_all(&dir) {
         Ok(()) => Ok(info),

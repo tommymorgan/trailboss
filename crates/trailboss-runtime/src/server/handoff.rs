@@ -395,7 +395,7 @@ fn read_line_unbuffered(stream: &mut UnixStream) -> io::Result<String> {
 }
 
 #[cfg(unix)]
-fn send_fds(stream: &UnixStream, fds: &[RawFd]) -> io::Result<()> {
+pub(crate) fn send_fds(stream: &UnixStream, fds: &[RawFd]) -> io::Result<()> {
     for batch in fds.chunks(FDS_PER_MESSAGE) {
         send_fd_batch(stream, batch)?;
     }
@@ -444,7 +444,7 @@ fn close_raw_fds(fds: &[RawFd]) {
 }
 
 #[cfg(unix)]
-fn recv_fds(stream: &UnixStream, expected: usize) -> io::Result<Vec<RawFd>> {
+pub(crate) fn recv_fds(stream: &UnixStream, expected: usize) -> io::Result<Vec<RawFd>> {
     let mut out: Vec<RawFd> = Vec::with_capacity(expected);
     while out.len() < expected {
         let wanted = (expected - out.len()).min(FDS_PER_MESSAGE);

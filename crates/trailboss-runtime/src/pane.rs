@@ -1681,6 +1681,17 @@ impl PaneRuntimeIo {
     }
 
     #[cfg(unix)]
+    fn pty_identity(&self) -> std::io::Result<u64> {
+        match self {
+            PaneRuntimeIo::Actor(actor) => actor.pty_identity(),
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { .. } => {
+                Err(std::io::Error::other("test runtime has no PTY master fd"))
+            }
+        }
+    }
+
+    #[cfg(unix)]
     fn foreground_process_group_id(&self) -> Option<u32> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.foreground_process_group_id(),
@@ -2438,6 +2449,11 @@ impl PaneRuntime {
     }
 
     #[cfg(unix)]
+    pub(crate) fn pty_identity(&self) -> std::io::Result<u64> {
+        self.io.pty_identity()
+    }
+
+    #[cfg(unix)]
     pub fn preserve_for_handoff(mut self) {
         if let Err(err) = self.io.release_after_commit() {
             warn!(
@@ -2498,9 +2514,26 @@ impl PaneRuntime {
             input_state: self.input_state(),
             terminal_title: self.terminal_title(),
             initial_history_ansi: None,
+            terminal_snapshot: None,
+            popup: None,
+            terminal_id: None,
+            route_admission: None,
             agent_state: None,
             ordinary_command: None,
         }
+    }
+
+    #[cfg(unix)]
+    pub fn complete_terminal_snapshot(&self) -> std::io::Result<Vec<u8>> {
+        let core = self
+            .terminal
+            .ghostty
+            .core
+            .lock()
+            .map_err(|_| std::io::Error::other("terminal lock poisoned"))?;
+        core.terminal
+            .snapshot()
+            .map_err(|error| std::io::Error::other(error.to_string()))
     }
 
     #[cfg(unix)]
@@ -2711,6 +2744,10 @@ impl PaneRuntime {
             input_state,
             terminal_title,
             initial_history_ansi,
+            terminal_snapshot,
+            popup: _,
+            terminal_id: _,
+            route_admission: _,
             agent_state: _,
             ordinary_command,
         } = state;
@@ -2720,8 +2757,13 @@ impl PaneRuntime {
         let master_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(master_fd) };
 
         let (response_tx, _response_rx) = mpsc::channel::<Bytes>(1);
-        let mut terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let mut terminal = match terminal_snapshot.as_deref() {
+            Some(snapshot) => {
+                crate::ghostty::Terminal::from_snapshot(snapshot, scrollback_limit_bytes)
+            }
+            None => crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes),
+        }
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
         terminal
             .resize(cols, rows, cell_width_px, cell_height_px)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -2745,7 +2787,10 @@ impl PaneRuntime {
         } else {
             pane_terminal.seed_keyboard_protocol_flags(keyboard_protocol_flags);
         }
-        if let Some(ansi) = initial_history_ansi.as_deref() {
+        if let Some(ansi) = initial_history_ansi
+            .as_deref()
+            .filter(|_| terminal_snapshot.is_none())
+        {
             pane_terminal.seed_history_ansi(ansi);
         }
         let terminal = Arc::new(PaneTerminal::new(pane_terminal));

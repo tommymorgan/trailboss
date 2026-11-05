@@ -117,6 +117,8 @@ pub enum Method {
     TabMove(TabMoveParams),
     #[serde(rename = "tab.transfer")]
     TabTransfer(TabTransferParams),
+    #[serde(rename = "tab.transfer.status")]
+    TabTransferStatus(TabTransferStatusParams),
     #[serde(rename = "tab.close")]
     TabClose(TabTarget),
     #[serde(rename = "tab.closed.list")]

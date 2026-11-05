@@ -12,6 +12,7 @@ use trailboss::{terminal, Client};
 mod attachment;
 mod selection;
 mod session_switch;
+mod tab_transfer;
 use std::{
     io::{self, Write},
     process::{Command, Stdio},
@@ -103,6 +104,7 @@ fn run() -> io::Result<()> {
                 | "notification"
                 | "integration"
                 | "plugin"
+                | "__tab-transfer-helper"
         )
     ) {
         if let trailboss_runtime::cli::CommandOutcome::Handled(code) =
@@ -351,6 +353,7 @@ fn run_client_inner(
     let mut surface = client.primary.take();
     let mut declarations = client.declarations.take().unwrap_or_default();
     session_switch::mount_command(&mut declarations);
+    tab_transfer::mount_command(&mut declarations, &core);
     core.command_ui = client.command_ui.take();
     let mut boot_id = client.boot_id.clone();
     let mut snapshot = client.snapshot.take();
@@ -386,6 +389,7 @@ fn run_client_inner(
     let mut pointer_dirty = true;
     let mut pending_input = None;
     let mut discovery = session_switch::Discovery::default();
+    let mut transfer_picker = tab_transfer::Picker::default();
     let mut preparation: Option<attachment::Preparation> = None;
     // Match the existing endpoint health probe cadence. Quiet native sessions
     // must keep the remote bridge alive without input or redraws.
@@ -401,6 +405,48 @@ fn run_client_inner(
     );
     loop {
         let now = Instant::now();
+        if let Some(tab) = core.move_to_session_requested.take() {
+            discovery.cancel(&mut declarations);
+            renderer.controls.reset();
+            match transfer_picker.begin(&mut input, &boot_id, tab, &mut declarations) {
+                Ok(()) => {
+                    renderer
+                        .controls
+                        .open_fragment(&core, &declarations, tab_transfer::FRAGMENT);
+                }
+                Err(error) => core.show_endpoint_notice(format!("Cannot move tab: {error}")),
+            }
+            dirty = true;
+        }
+        if let Some(index) = core.move_to_session_destination.take() {
+            if let Err(error) =
+                transfer_picker.select(index, &mut core, &mut input, &mut declarations)
+            {
+                transfer_picker.cancel(&mut declarations);
+                renderer.controls.reset();
+                core.show_endpoint_notice(format!("Cannot move tab: {error}"));
+            }
+            dirty = true;
+        }
+        if let Some(label) = core.move_to_session_label.take() {
+            if let Err(error) = transfer_picker.label(label, &mut input, &mut declarations) {
+                transfer_picker.cancel(&mut declarations);
+                core.show_endpoint_notice(format!("Cannot move tab: {error}"));
+            }
+            renderer.controls.reset();
+            dirty = true;
+        }
+        if (transfer_picker.open() && !renderer.controls.palette_is(tab_transfer::FRAGMENT))
+            || (transfer_picker.creating() && !core.transfer_space_input())
+        {
+            transfer_picker.cancel(&mut declarations);
+        }
+        if let Err(error) = transfer_picker.tick(&mut input, now) {
+            transfer_picker.cancel(&mut declarations);
+            renderer.controls.reset();
+            core.show_endpoint_notice(format!("Cannot move tab: {error}"));
+            dirty = true;
+        }
         if std::mem::take(&mut core.session_switch_requested) {
             if preparation.is_some() {
                 renderer.controls.reset();
@@ -479,6 +525,12 @@ fn run_client_inner(
                         surface = next.initial.surface;
                         declarations = next.initial.declarations.unwrap_or_default();
                         session_switch::mount_command(&mut declarations);
+                        transfer_picker.reset_boot(
+                            &next.initial.boot,
+                            &mut declarations,
+                            &mut core,
+                        );
+                        tab_transfer::mount_command(&mut declarations, &core);
                         boot_id = next.initial.boot;
                         snapshot = next.initial.snapshot;
                         if let Some(snapshot) = &snapshot {
@@ -551,8 +603,16 @@ fn run_client_inner(
                 response: endpoint_response,
                 commands: command_ui,
             } = update?;
+            let command_mount_changed = next_declarations.is_some() || session.is_some();
             if boot_id != next_boot {
                 discovery.cancel(&mut declarations);
+                transfer_picker.reset_boot(&next_boot, &mut declarations, &mut core);
+                core.move_to_session_requested = None;
+                core.move_to_session_destination = None;
+                core.move_to_session_label = None;
+                if core.transfer_space_input() {
+                    core.invoke("host:cancel", &Default::default(), None);
+                }
                 core.command_ui = None;
                 core.argument_editing = false;
                 core.clear_argument_invocation();
@@ -574,6 +634,7 @@ fn run_client_inner(
             }
             if let Some(mut next) = next_declarations {
                 session_switch::Discovery::preserve(&mut declarations, &mut next);
+                tab_transfer::Picker::preserve(&mut declarations, &mut next);
                 session_switch::mount_command(&mut next);
                 declarations = next;
             }
@@ -590,6 +651,9 @@ fn run_client_inner(
                 }
                 core.update_session(workspace, tab, pane.is_some());
             }
+            if command_mount_changed {
+                tab_transfer::mount_command(&mut declarations, &core);
+            }
             if let Some(next) = next_snapshot {
                 core.reconcile_tab_history(&next);
                 snapshot = Some(next);
@@ -599,6 +663,12 @@ fn run_client_inner(
                     discovery.cancel(&mut declarations);
                     renderer.controls.reset();
                     core.show_endpoint_notice(format!("Cannot list sessions: {error}"));
+                }
+                if let Err(error) = transfer_picker.response(response, &mut core, &mut declarations)
+                {
+                    transfer_picker.cancel(&mut declarations);
+                    renderer.controls.reset();
+                    core.show_endpoint_notice(format!("Cannot move tab: {error}"));
                 }
                 core.tab_transfer_response(response, &next_boot, Instant::now());
                 core.argument_response(response, &next_boot, Instant::now());
@@ -1390,6 +1460,16 @@ fn apply_menu_response(
             Ok(true)
         }
         terminal::menus::Response::Prepare(action) => {
+            if action.plugin == tab_transfer::OWNER {
+                if let Some(index) = action
+                    .action
+                    .strip_prefix(tab_transfer::SELECT)
+                    .and_then(|index| index.parse().ok())
+                {
+                    core.move_to_session_destination = Some(index);
+                    return Ok(true);
+                }
+            }
             match core.prepare_palette(&action.action, &action.context) {
                 trailboss::core::Effect::Consumed => {}
                 trailboss::core::Effect::Request { method, params } => {
@@ -1408,6 +1488,16 @@ fn apply_menu_response(
             Ok(true)
         }
         terminal::menus::Response::Invoke(action) => {
+            if action.plugin == tab_transfer::OWNER {
+                if let Some(index) = action
+                    .action
+                    .strip_prefix(tab_transfer::SELECT)
+                    .and_then(|index| index.parse().ok())
+                {
+                    core.move_to_session_destination = Some(index);
+                    return Ok(true);
+                }
+            }
             if action.plugin == session_switch::OWNER {
                 if let Some(name) = action.action.strip_prefix(session_switch::SELECT) {
                     core.session_switch_target = Some(name.to_owned());

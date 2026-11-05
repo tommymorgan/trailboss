@@ -5,6 +5,24 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "linux")]
+pub(crate) fn pty_identity(fd: RawFd) -> std::io::Result<u64> {
+    let mut index: libc::c_uint = 0;
+    if unsafe { libc::ioctl(fd, libc::TIOCGPTN, &mut index) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(u64::from(index) + 1)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub(crate) fn pty_identity(fd: RawFd) -> std::io::Result<u64> {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(stat.st_rdev as u64)
+}
+
 #[cfg(unix)]
 pub(crate) fn duplicate_fd(fd: RawFd) -> std::io::Result<RawFd> {
     let duplicated = unsafe { libc::dup(fd) };

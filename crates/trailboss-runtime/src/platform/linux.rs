@@ -879,8 +879,12 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
 }
 
-/// A cached locator from the live session leader attached to an imported PTY.
-pub(crate) fn inherited_pane_id_for_pty(pid: u32, pty_fd: RawFd) -> Option<String> {
+/// A cached locator bound to this endpoint and the live PTY session leader.
+pub(crate) fn inherited_pane_id_for_pty(
+    pid: u32,
+    pty_fd: RawFd,
+    endpoint: &std::path::Path,
+) -> Option<String> {
     let before = process_job_stat(pid)?;
     let session = i32::try_from(pid).ok()?;
     if session <= 0
@@ -891,9 +895,22 @@ pub(crate) fn inherited_pane_id_for_pty(pid: u32, pty_fd: RawFd) -> Option<Strin
         return None;
     }
     let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
-    let locator = environ
-        .split(|&byte| byte == 0)
-        .find_map(|entry| entry.strip_prefix(b"HERDR_PANE_ID="))?;
+    let mut locator = None;
+    let mut origin = None;
+    for entry in environ.split(|&byte| byte == 0) {
+        if let Some(value) = entry.strip_prefix(b"HERDR_PANE_ID=") {
+            locator = Some(value);
+        } else if let Some(value) = entry.strip_prefix(b"HERDR_SOCKET_PATH=") {
+            origin = Some(value);
+        }
+        if locator.is_some() && origin.is_some() {
+            break;
+        }
+    }
+    if origin? != endpoint.as_os_str().as_encoded_bytes() {
+        return None;
+    }
+    let locator = locator?;
     if process_start_token(pid)? != before.start_time {
         return None;
     }

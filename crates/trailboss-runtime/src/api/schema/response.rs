@@ -107,6 +107,9 @@ pub enum ResponseResult {
     TabTransfer {
         transfer: TabTransferResult,
     },
+    TabTransferStatus {
+        status: super::tabs::TabTransferStatus,
+    },
     AgentInfo {
         agent: AgentInfo,
     },

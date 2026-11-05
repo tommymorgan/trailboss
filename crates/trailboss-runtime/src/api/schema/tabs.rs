@@ -54,9 +54,42 @@ pub struct TabMoveParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TabTransferParams {
     pub tab_id: String,
-    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_workspace_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub insert_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TabTransferStatusParams {
+    pub operation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TabTransferPhase {
+    Preparing,
+    Committed,
+    Aborted,
+    Unresolved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TabTransferStatus {
+    pub operation_id: String,
+    pub phase: TabTransferPhase,
+    pub source_session: String,
+    pub destination_session: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<TabTransferResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

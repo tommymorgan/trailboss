@@ -1,4 +1,6 @@
 #[cfg(unix)]
+pub(crate) mod clock;
+#[cfg(unix)]
 use serde::{Deserialize, Serialize};
 
 /// Long-lived pane runtime transferred during server replacement.
@@ -31,11 +33,28 @@ pub(crate) struct HandoffRuntimeState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_history_ansi: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_snapshot: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub popup: Option<HandoffPopupState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_id: Option<crate::terminal::TerminalId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_admission: Option<crate::server::tab_transfer::RouteAdmission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_state: Option<crate::terminal::state::HandoffAgentState>,
     /// Ordinary OSC 133 command lifecycle at handoff time. Private internal
     /// snapshot; serde-optional so older snapshots import unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ordinary_command: Option<crate::terminal::state::OrdinaryCommandState>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct HandoffPopupState {
+    pub tab_id: String,
+    pub state: crate::app::state::PopupPaneState,
+    pub cwd: std::path::PathBuf,
+    pub label: Option<String>,
 }
 
 #[cfg(unix)]

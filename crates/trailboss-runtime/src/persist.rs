@@ -11,6 +11,8 @@ mod restore;
 mod snapshot;
 mod writer;
 pub(crate) use self::closed_tabs::ClosedTabSnapshot;
+#[cfg(unix)]
+pub(crate) use self::restore::restore_transfer_tab;
 pub(crate) use self::restore::{restore_closed_workspace, RestoreRuntimeContext};
 pub(crate) use self::snapshot::capture_tab;
 

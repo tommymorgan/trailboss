@@ -202,6 +202,7 @@ pub(super) fn do_handshake(
             surface_delta: true,
             surface_scroll: true,
             session_switch: false,
+            tab_transfer: false,
             snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
             surface_codecs: vec![SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],

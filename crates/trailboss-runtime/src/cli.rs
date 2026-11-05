@@ -98,6 +98,11 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         return Ok(CommandOutcome::NotCli);
     };
 
+    #[cfg(unix)]
+    if command == "__tab-transfer-helper" {
+        crate::server::tab_transfer::run_helper()?;
+        return Ok(CommandOutcome::Handled(0));
+    }
     if spec::print_requested_help(args)? {
         return Ok(CommandOutcome::Handled(0));
     }
@@ -766,6 +771,10 @@ pub(super) fn send_ok_request(method: Method) -> std::io::Result<i32> {
 }
 
 pub(super) fn send_request(request: &Request) -> std::io::Result<serde_json::Value> {
+    #[cfg(unix)]
+    if let Some(response) = send_inherited_request(request, true)? {
+        return Ok(response);
+    }
     let client = target::api_client()?;
     ensure_server_protocol_compatible(&client, &request.id)?;
     client
@@ -774,10 +783,92 @@ pub(super) fn send_request(request: &Request) -> std::io::Result<serde_json::Val
 }
 
 pub(super) fn send_request_unchecked(request: &Request) -> std::io::Result<serde_json::Value> {
+    #[cfg(unix)]
+    if let Some(response) = send_inherited_request(request, false)? {
+        return Ok(response);
+    }
     let client = target::api_client()?;
     client
         .request_value(request)
         .map_err(|err| map_server_not_running_or_io(err, &request.id, &client))
+}
+
+#[cfg(unix)]
+fn send_inherited_request(
+    request: &Request,
+    check_protocol: bool,
+) -> std::io::Result<Option<serde_json::Value>> {
+    if target::is_remote() || crate::session::explicit_session_requested() {
+        return Ok(None);
+    }
+    // Only a pane-local current target may inherit the moved terminal's owner.
+    // An explicit tab, workspace, or unrelated pane keeps its original route.
+    let current_target = match &request.method {
+        Method::PaneCurrent(params) => &params.caller_pane_id,
+        Method::PaneSplit(params) if params.workspace_id.is_none() => &params.target_pane_id,
+        Method::PaneLayout(params) => &params.pane_id,
+        Method::PaneProcessInfo(params) => &params.pane_id,
+        Method::PaneZoom(params) => &params.pane_id,
+        Method::PaneNeighbor(params) => &params.pane_id,
+        Method::PaneEdges(params) => &params.pane_id,
+        Method::PaneFocusDirection(params) => &params.pane_id,
+        Method::PaneResize(params) => &params.pane_id,
+        Method::PaneSwap(params)
+            if params.source_pane_id.is_none() && params.target_pane_id.is_none() =>
+        {
+            &params.pane_id
+        }
+        Method::LayoutExport(params) if params.tab_id.is_none() => &params.pane_id,
+        Method::LayoutSetSplitRatio(params) if params.tab_id.is_none() => &params.pane_id,
+        Method::CommandInvoke(params)
+            if params.workspace_id.is_none() && params.tab_id.is_none() =>
+        {
+            &params.pane_id
+        }
+        _ => return Ok(None),
+    };
+    let Some(caller_pane) = target::caller_pane_id() else {
+        return Ok(None);
+    };
+    if current_target
+        .as_ref()
+        .is_some_and(|pane| pane != &caller_pane)
+    {
+        return Ok(None);
+    }
+    let Some((endpoint, admission)) = crate::server::tab_transfer::inherited_context()? else {
+        return Ok(None);
+    };
+    let mut forwarded = request.clone();
+    let pane = match &mut forwarded.method {
+        Method::PaneCurrent(params) => &mut params.caller_pane_id,
+        Method::PaneSplit(params) => &mut params.target_pane_id,
+        Method::PaneLayout(params) => &mut params.pane_id,
+        Method::PaneProcessInfo(params) => &mut params.pane_id,
+        Method::PaneZoom(params) => &mut params.pane_id,
+        Method::PaneNeighbor(params) => &mut params.pane_id,
+        Method::PaneEdges(params) => &mut params.pane_id,
+        Method::PaneFocusDirection(params) => &mut params.pane_id,
+        Method::PaneResize(params) => &mut params.pane_id,
+        Method::PaneSwap(params) => &mut params.pane_id,
+        Method::LayoutExport(params) => &mut params.pane_id,
+        Method::LayoutSetSplitRatio(params) => &mut params.pane_id,
+        Method::CommandInvoke(params) => &mut params.pane_id,
+        _ => unreachable!("inherited request was selected above"),
+    };
+    // Carry the original alias only as a selector. The destination resolves the
+    // exact admitted terminal again, under its final generation/process fence.
+    *pane = Some(caller_pane);
+    if check_protocol {
+        let client = ApiClient::for_target(crate::api::client::ConnectionTarget::SocketPath(
+            endpoint.clone(),
+        ));
+        ensure_server_protocol_compatible(&client, &request.id)?;
+    }
+    let response = crate::api::request_guarded(&endpoint, &forwarded, &admission)?;
+    serde_json::from_str(&response)
+        .map(Some)
+        .map_err(std::io::Error::other)
 }
 
 fn ensure_server_protocol_compatible(client: &ApiClient, request_id: &str) -> std::io::Result<()> {

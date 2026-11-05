@@ -4726,6 +4726,18 @@
         },
         "TabTransferParams": {
           "properties": {
+            "destination_session": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "destination_workspace_label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "insert_index": {
               "format": "uint",
               "minimum": 0,
@@ -4734,16 +4746,35 @@
                 "null"
               ]
             },
+            "operation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "tab_id": {
               "type": "string"
             },
             "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "tab_id"
+          ],
+          "type": "object"
+        },
+        "TabTransferStatusParams": {
+          "properties": {
+            "operation_id": {
               "type": "string"
             }
           },
           "required": [
-            "tab_id",
-            "workspace_id"
+            "operation_id"
           ],
           "type": "object"
         },
@@ -5639,6 +5670,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/TabTransferParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "tab.transfer.status",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TabTransferStatusParams"
             }
           },
           "required": [
@@ -10706,6 +10753,22 @@
             },
             {
               "properties": {
+                "status": {
+                  "$ref": "#/schemas/success_response/$defs/TabTransferStatus"
+                },
+                "type": {
+                  "const": "tab_transfer_status",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "status"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "agent": {
                   "$ref": "#/schemas/success_response/$defs/AgentInfo"
                 },
@@ -11987,6 +12050,15 @@
           ],
           "type": "object"
         },
+        "TabTransferPhase": {
+          "enum": [
+            "preparing",
+            "committed",
+            "aborted",
+            "unresolved"
+          ],
+          "type": "string"
+        },
         "TabTransferResult": {
           "properties": {
             "changed": {
@@ -12026,6 +12098,45 @@
             "tab",
             "index",
             "panes"
+          ],
+          "type": "object"
+        },
+        "TabTransferStatus": {
+          "properties": {
+            "destination_session": {
+              "type": "string"
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "phase": {
+              "$ref": "#/schemas/success_response/$defs/TabTransferPhase"
+            },
+            "source_session": {
+              "type": "string"
+            },
+            "transfer": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/TabTransferResult"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "operation_id",
+            "phase",
+            "source_session",
+            "destination_session"
           ],
           "type": "object"
         },

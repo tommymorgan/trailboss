@@ -346,6 +346,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         surface_delta: false,
         surface_scroll: false,
         session_switch: false,
+        tab_transfer: false,
         snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
         surface_codecs: vec![SURFACE_CODEC_V1.into()],
         input_codecs: vec![INPUT_CODEC_V1.into()],

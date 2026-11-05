@@ -404,6 +404,11 @@ fn full_screen_pty_burst_preserves_stable_content_between_updates() {
     while client.focused_pane_id.is_none() {
         client.receive().unwrap();
     }
+    let pane = client.focused_pane_id.as_deref().unwrap();
+    let shell_pid = core.request("pane.process_info", serde_json::json!({"pane_id":pane}))
+        ["process_info"]["shell_pid"]
+        .as_u64()
+        .expect("the rendering fixture must have a live shell");
     let binary = std::env::var_os("TRAILBOSS_RENDERER_BASELINE_BINARY")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(support::executable);
@@ -493,6 +498,13 @@ fn full_screen_pty_burst_preserves_stable_content_between_updates() {
     assert!(
         samples >= 20,
         "burst did not exercise repeated real PTY output"
+    );
+    assert_eq!(
+        core.request("pane.process_info", serde_json::json!({"pane_id":pane}))["process_info"]
+            ["shell_pid"]
+            .as_u64(),
+        Some(shell_pid),
+        "rendering the burst must retain the original shell"
     );
 }
 

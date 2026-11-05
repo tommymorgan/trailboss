@@ -116,6 +116,7 @@ impl Client {
             surface_delta: false,
             surface_scroll: false,
             session_switch: true,
+            tab_transfer: true,
             snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
             surface_codecs: vec![SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
@@ -384,9 +385,15 @@ impl Client {
                 self.projection_pair = Some((s.boot_id.clone(), s.revision));
                 self.snapshot = Some(s);
             }
+            message @ ServerMessage::EndpointControl { .. }
+                if matches!(&message, ServerMessage::EndpointControl { kind, .. }
+                    if kind == protocol::endpoint::TAB_TRANSFER_DESTINATIONS_RESPONSE_KIND) =>
+            {
+                self.endpoint_response = Some(message);
+            }
             message @ ServerMessage::ClientShellEndpointResponseChunk { .. }
                 if matches!(&message, ServerMessage::ClientShellEndpointResponseChunk { request_id, .. }
-                    if request_id.starts_with("tab-cycle-") || request_id.starts_with("tab-transfer-") || request_id.starts_with("closed-tab-restore-") || request_id.starts_with("widget-action-") || request_id.starts_with("argument-log-") || request_id.starts_with("session-list-")) =>
+                    if request_id.starts_with("tab-cycle-") || request_id.starts_with("tab-transfer-") || request_id.starts_with("tab-move-") || request_id.starts_with("closed-tab-restore-") || request_id.starts_with("widget-action-") || request_id.starts_with("argument-log-") || request_id.starts_with("session-list-")) =>
             {
                 self.endpoint_response = Some(message);
             }

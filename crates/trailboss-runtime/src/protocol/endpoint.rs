@@ -34,6 +34,8 @@ pub const AGENT_COMPLETIONS_CAPABILITY: &str = "agent_completions";
 pub const AGENT_COMPLETIONS_KIND: &str = "endpoint.agent-completions.v1";
 pub const PLUGIN_UI_CAPABILITY: &str = "plugin_ui";
 pub const PLUGIN_UI_KIND: &str = "endpoint.plugin-ui.v1";
+pub const TAB_TRANSFER_DESTINATIONS_REQUEST_KIND: &str = "tab_transfer.destinations.request.v1";
+pub const TAB_TRANSFER_DESTINATIONS_RESPONSE_KIND: &str = "tab_transfer.destinations.response.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointAgentCompletions {
@@ -70,6 +72,9 @@ pub struct EndpointClientHello {
     /// Offer client-local session switching only to clients that implement it.
     #[serde(default)]
     pub session_switch: bool,
+    /// Offer live tab transfers only to clients that implement the destination picker.
+    #[serde(default)]
+    pub tab_transfer: bool,
     #[serde(default)]
     pub snapshot_codecs: Vec<String>,
     #[serde(default)]
@@ -295,6 +300,7 @@ mod tests {
             surface_delta: false,
             surface_scroll: false,
             session_switch: false,
+            tab_transfer: false,
             snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
             surface_codecs: vec![SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],

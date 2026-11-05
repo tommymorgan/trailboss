@@ -520,6 +520,69 @@ pub(crate) fn restored_worktree_space_membership(
     })
 }
 
+#[cfg(unix)]
+pub(crate) fn restore_transfer_tab(
+    snapshot: &TabSnapshot,
+    context: &RestoreRuntimeContext<'_>,
+    imports: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
+    identities: &HashMap<u32, TerminalId>,
+) -> Result<RestoredTab, String> {
+    let mut pane_ids = Vec::new();
+    collect_layout_snapshot_pane_ids(&snapshot.layout, &mut pane_ids);
+    if pane_ids
+        .iter()
+        .any(|id| !imports.contains_key(id) || !identities.contains_key(id))
+    {
+        return Err("transfer requires every live runtime; shell fallback is forbidden".into());
+    }
+    let (restored, failed) = restore_tab(
+        snapshot,
+        None,
+        1,
+        "",
+        24,
+        80,
+        context,
+        &mut HashSet::new(),
+        imports,
+        &HashMap::new(),
+    );
+    let (mut tab, mut terminals, runtimes, mapping) =
+        restored.ok_or_else(|| "transfer layout restoration failed".to_string())?;
+    if failed != 0
+        || terminals
+            .iter()
+            .any(|terminal| terminal.restore_error.is_some())
+    {
+        for runtime in runtimes.into_values() {
+            runtime.preserve_for_handoff();
+        }
+        return Err("transfer runtime restoration failed".into());
+    }
+    let mut remapped = HashMap::new();
+    for (pane_id, old_id) in &mapping {
+        let pane = tab.panes.get_mut(pane_id).ok_or("missing restored pane")?;
+        let previous = pane.attached_terminal_id.clone();
+        let identity = identities
+            .get(old_id)
+            .ok_or("missing terminal identity")?
+            .clone();
+        pane.attached_terminal_id = identity.clone();
+        if let Some(terminal) = terminals
+            .iter_mut()
+            .find(|terminal| terminal.id == previous)
+        {
+            terminal.id = identity.clone();
+        }
+        remapped.insert(previous, identity);
+    }
+    let runtimes = runtimes
+        .into_iter()
+        .map(|(id, runtime)| (remapped.remove(&id).unwrap(), runtime))
+        .collect();
+    Ok((tab, terminals, runtimes, mapping))
+}
+
 fn restore_tab(
     snap: &TabSnapshot,
     history: Option<&TabHistorySnapshot>,
@@ -612,6 +675,10 @@ fn restore_tab(
             .unwrap_or_default();
         let imported_runtime = old_pane_id.and_then(|old_id| imported_panes.remove(&old_id));
         let was_imported = imported_runtime.is_some();
+        #[cfg(unix)]
+        let imported_terminal_id = imported_runtime
+            .as_ref()
+            .and_then(|import| import.state.terminal_id.clone());
         #[cfg(unix)]
         let handoff_agent_state = imported_runtime
             .as_ref()
@@ -722,6 +789,9 @@ fn restore_tab(
 
         match runtime_result {
             Ok(runtime) => {
+                #[cfg(unix)]
+                let terminal_id = imported_terminal_id.unwrap_or_else(TerminalId::alloc);
+                #[cfg(not(unix))]
                 let terminal_id = TerminalId::alloc();
                 let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
                 if was_imported {

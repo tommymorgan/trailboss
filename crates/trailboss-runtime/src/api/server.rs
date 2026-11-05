@@ -4,8 +4,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use interprocess::local_socket::traits::{ListenerExt as _, Stream as _};
-use tracing::{debug, error, info, warn};
+#[cfg(not(unix))]
+use interprocess::local_socket::traits::ListenerExt as _;
+use interprocess::local_socket::traits::Stream as _;
+#[cfg(any(not(unix), test))]
+use tracing::error;
+use tracing::{debug, info, warn};
 
 #[cfg(all(test, unix))]
 use std::fs;
@@ -23,6 +27,10 @@ use crate::ipc::{
 };
 use crate::server::shutdown::{ServerStop, ShutdownReason};
 
+#[cfg(unix)]
+mod front_door;
+#[cfg(unix)]
+pub(crate) use front_door::request_guarded;
 #[cfg(test)]
 mod subscription_socket_tests;
 
@@ -34,16 +42,60 @@ const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_INITIAL_REQUEST_BYTES: usize = 1024 * 1024;
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
 
+struct ApiServices {
+    api_tx: ApiRequestSender,
+    event_hub: EventHub,
+    capabilities: Option<ServerCapabilities>,
+    server_stop: Option<ServerStop>,
+    #[cfg(unix)]
+    ssh_agents: Option<crate::platform::ssh_agent::SshAgentRegistry>,
+}
+
+impl ApiServices {
+    fn accept(
+        self: &Arc<Self>,
+        stream: LocalStream,
+        running: Arc<AtomicBool>,
+        #[cfg(unix)] private: bool,
+    ) {
+        let services = Arc::clone(self);
+        spawn_connection_handler(move || {
+            if let Err(err) = handle_connection_inner(
+                stream,
+                &services.api_tx,
+                &services.event_hub,
+                &running,
+                services.capabilities.clone(),
+                services.server_stop.as_ref(),
+                #[cfg(unix)]
+                services.ssh_agents.as_ref(),
+                #[cfg(unix)]
+                private,
+            ) {
+                warn!(err = %err, "api connection failed");
+            }
+        });
+    }
+}
+
 pub struct ServerHandle {
+    #[cfg(not(unix))]
     _thread: std::thread::JoinHandle<()>,
+    #[cfg(unix)]
+    acceptor: front_door::Acceptor,
+    #[cfg(unix)]
+    services: Arc<ApiServices>,
     path: PathBuf,
     identity: SocketFileIdentity,
     running: Arc<AtomicBool>,
+    owns_socket: bool,
 }
 
 impl Drop for ServerHandle {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
+        #[cfg(unix)]
+        self.acceptor.stop();
 
         if let Err(err) = self.remove_socket_file_if_owned() {
             if err.kind() != std::io::ErrorKind::NotFound {
@@ -55,7 +107,11 @@ impl Drop for ServerHandle {
 
 impl ServerHandle {
     pub(crate) fn remove_socket_file_if_owned(&self) -> std::io::Result<()> {
-        remove_socket_file_if_owned(&self.path, &self.identity)
+        if self.owns_socket {
+            remove_socket_file_if_owned(&self.path, &self.identity)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -65,6 +121,26 @@ pub(crate) fn start_server_with_stop_control(
     server_stop: ServerStop,
 ) -> std::io::Result<ServerHandle> {
     start_server_inner(api_tx, event_hub, default_capabilities(), Some(server_stop))
+}
+
+/// Starts a Core directly on its protected private endpoint when the routing
+/// helper already owns the inherited public address.
+#[cfg(unix)]
+pub(crate) fn start_server_at_with_stop_control(
+    api_tx: ApiRequestSender,
+    event_hub: EventHub,
+    server_stop: ServerStop,
+    path: &Path,
+) -> io::Result<ServerHandle> {
+    front_door::validate_private_path(path)?;
+    start_server_inner_at(
+        api_tx,
+        event_hub,
+        default_capabilities(),
+        Some(server_stop),
+        path.to_owned(),
+        true,
+    )
 }
 
 fn default_capabilities() -> Option<ServerCapabilities> {
@@ -81,10 +157,28 @@ fn default_capabilities() -> Option<ServerCapabilities> {
 fn start_server_inner(
     api_tx: ApiRequestSender,
     event_hub: EventHub,
-    mut capabilities: Option<ServerCapabilities>,
+    capabilities: Option<ServerCapabilities>,
     server_stop: Option<ServerStop>,
 ) -> std::io::Result<ServerHandle> {
-    let path = socket_path();
+    start_server_inner_at(
+        api_tx,
+        event_hub,
+        capabilities,
+        server_stop,
+        socket_path(),
+        #[cfg(unix)]
+        false,
+    )
+}
+
+fn start_server_inner_at(
+    api_tx: ApiRequestSender,
+    event_hub: EventHub,
+    mut capabilities: Option<ServerCapabilities>,
+    server_stop: Option<ServerStop>,
+    path: PathBuf,
+    #[cfg(unix)] private: bool,
+) -> io::Result<ServerHandle> {
     prepare_socket_path(&path)?;
 
     let listener = bind_local_listener(&path)?;
@@ -117,53 +211,72 @@ fn start_server_inner(
         };
     }
 
-    let running = Arc::new(AtomicBool::new(true));
-    let listener_running = Arc::clone(&running);
-    let spawned = crate::thread_spawn::spawn_named("trailboss-api-accept", move || {
-        run_accept_loop(
-            listener.incoming(),
-            &listener_running,
-            ACCEPT_ERROR_BACKOFF,
-            |stream| {
-                let api_tx = api_tx.clone();
-                let event_hub = event_hub.clone();
-                let capabilities = capabilities.clone();
-                let server_stop = server_stop.clone();
-                let connection_running = Arc::clone(&listener_running);
-                #[cfg(unix)]
-                let ssh_agents = ssh_agents.clone();
-                spawn_connection_handler(move || {
-                    if let Err(err) = handle_connection_with_stop(
-                        stream,
-                        &api_tx,
-                        &event_hub,
-                        &connection_running,
-                        capabilities,
-                        server_stop.as_ref(),
-                        #[cfg(unix)]
-                        ssh_agents.as_ref(),
-                    ) {
-                        warn!(err = %err, "api connection failed");
-                    }
-                });
-            },
-        );
-        debug!("api server thread exiting");
+    let services = Arc::new(ApiServices {
+        api_tx,
+        event_hub,
+        capabilities,
+        server_stop,
+        #[cfg(unix)]
+        ssh_agents,
     });
-    let thread = match spawned {
-        Ok(thread) => thread,
+    start_bound_server(
+        path,
+        identity,
+        listener,
+        services,
+        #[cfg(unix)]
+        private,
+    )
+}
+
+fn start_bound_server(
+    path: PathBuf,
+    identity: SocketFileIdentity,
+    listener: crate::ipc::LocalListener,
+    services: Arc<ApiServices>,
+    #[cfg(unix)] private: bool,
+) -> io::Result<ServerHandle> {
+    let running = Arc::new(AtomicBool::new(true));
+    #[cfg(unix)]
+    let spawned = front_door::Acceptor::start(
+        listener,
+        Arc::clone(&services),
+        Arc::clone(&running),
+        private,
+    );
+    #[cfg(not(unix))]
+    let spawned = {
+        let listener_running = Arc::clone(&running);
+        let services = Arc::clone(&services);
+        crate::thread_spawn::spawn_named("trailboss-api-accept", move || {
+            run_accept_loop(
+                listener.incoming(),
+                &listener_running,
+                ACCEPT_ERROR_BACKOFF,
+                |stream| services.accept(stream, Arc::clone(&listener_running)),
+            );
+            debug!("api server thread exiting");
+        })
+    };
+    let acceptor = match spawned {
+        Ok(acceptor) => acceptor,
         Err(err) => {
-            // No ServerHandle owns the socket yet, so its Drop cleanup won't run.
             let _ = remove_socket_file_if_owned(&path, &identity);
             return Err(err);
         }
     };
 
     Ok(ServerHandle {
-        _thread: thread,
+        #[cfg(not(unix))]
+        _thread: acceptor,
+        #[cfg(unix)]
+        acceptor,
+        #[cfg(unix)]
+        services,
         path,
         identity,
         running,
+        owns_socket: true,
     })
 }
 
@@ -175,6 +288,7 @@ fn spawn_connection_handler(work: impl FnOnce() + Send + 'static) {
     }
 }
 
+#[cfg(any(not(unix), test))]
 fn run_accept_loop<S>(
     incoming: impl IntoIterator<Item = io::Result<S>>,
     running: &AtomicBool,
@@ -325,7 +439,46 @@ fn handle_connection(
     )
 }
 
+#[cfg(test)]
 fn handle_connection_with_stop(
+    stream: LocalStream,
+    api_tx: &ApiRequestSender,
+    event_hub: &EventHub,
+    running: &Arc<AtomicBool>,
+    capabilities: Option<ServerCapabilities>,
+    server_stop: Option<&ServerStop>,
+    #[cfg(unix)] ssh_agents: Option<&crate::platform::ssh_agent::SshAgentRegistry>,
+) -> std::io::Result<()> {
+    handle_connection_inner(
+        stream,
+        api_tx,
+        event_hub,
+        running,
+        capabilities,
+        server_stop,
+        #[cfg(unix)]
+        ssh_agents,
+        #[cfg(unix)]
+        false,
+    )
+}
+
+fn has_route_metadata(line: &str) -> Result<bool, serde_json::Error> {
+    fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+        <serde::de::IgnoredAny as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(true)
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        #[serde(rename = "_transfer_route", default, deserialize_with = "present")]
+        route: bool,
+    }
+
+    serde_json::from_str::<Envelope>(line).map(|envelope| envelope.route)
+}
+
+fn handle_connection_inner(
     mut stream: LocalStream,
     api_tx: &ApiRequestSender,
     event_hub: &EventHub,
@@ -333,6 +486,7 @@ fn handle_connection_with_stop(
     capabilities: Option<ServerCapabilities>,
     server_stop: Option<&ServerStop>,
     #[cfg(unix)] ssh_agents: Option<&crate::platform::ssh_agent::SshAgentRegistry>,
+    #[cfg(unix)] private: bool,
 ) -> std::io::Result<()> {
     if let Err(err) = stream.set_send_timeout(Some(STREAM_WRITE_TIMEOUT)) {
         debug!(err = %err, "api connection write timeout unavailable");
@@ -375,6 +529,31 @@ fn handle_connection_with_stop(
             return Ok(());
         }
     };
+
+    #[cfg(not(unix))]
+    if has_route_metadata(line).unwrap_or(true) {
+        return write_text_line_allow_disconnect(
+            &mut stream,
+            &error_response_json(
+                request.id,
+                "invalid_request",
+                "route admission is private-only".into(),
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    let guarded_sender = match front_door::guarded_sender_for(line, private, api_tx) {
+        Ok(sender) => sender,
+        Err(err) => {
+            return write_text_line_allow_disconnect(
+                &mut stream,
+                &error_response_json(request.id, "invalid_request", err.to_string()),
+            );
+        }
+    };
+    #[cfg(unix)]
+    let api_tx = guarded_sender.as_ref().map_or(api_tx, |sender| &sender.tx);
 
     let request_id = request.id.clone();
     let method = api_method_name(&request.method);
@@ -639,6 +818,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::TabRename(_) => "tab.rename",
         Method::TabMove(_) => "tab.move",
         Method::TabTransfer(_) => "tab.transfer",
+        Method::TabTransferStatus(_) => "tab.transfer.status",
         Method::TabClose(_) => "tab.close",
         Method::TabClosedList(_) => "tab.closed.list",
         Method::TabClosedRestore(_) => "tab.closed.restore",
@@ -1100,6 +1280,8 @@ fn dispatch_to_app(
         request,
         respond_to,
         response_write_complete,
+        #[cfg(unix)]
+        route_admission: None,
     }) {
         return error_response_json(
             request_id,

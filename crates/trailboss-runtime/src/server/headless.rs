@@ -82,6 +82,10 @@ mod notifications;
 mod render;
 mod retained_surface;
 mod surface_interest;
+#[cfg(unix)]
+mod tab_transfer;
+#[cfg(unix)]
+mod tab_transfer_discovery;
 
 // Producers can refill even a bounded channel while it is being drained.
 // Yield to scheduled work and rendering between batches; select! below
@@ -191,6 +195,10 @@ pub struct HeadlessServer {
     // Kept on every platform so dropping HeadlessServer owns API server shutdown.
     #[cfg_attr(windows, allow(dead_code))]
     api_server: Option<api::ServerHandle>,
+    #[cfg(unix)]
+    transfer_control: Option<crate::server::tab_transfer::ControlServer>,
+    #[cfg(unix)]
+    transfer_private_api: Option<api::ServerHandle>,
     #[cfg(unix)]
     client_listener: LocalListener,
     client_socket_path: PathBuf,
@@ -348,11 +356,24 @@ impl HeadlessServer {
                 .as_nanos()
         );
         app.state.command_boot_id.clone_from(&client_shell_boot_id);
+        #[cfg(unix)]
+        let transfer_control = if api_server.is_some() && api_tx.is_some() {
+            Some(crate::server::tab_transfer::ControlServer::start(
+                client_shell_boot_id.clone(),
+                server_event_tx.clone(),
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
             app,
             #[cfg(unix)]
             api_tx,
             api_server,
+            #[cfg(unix)]
+            transfer_control,
+            #[cfg(unix)]
+            transfer_private_api: None,
             #[cfg(unix)]
             client_listener: listener,
             client_socket_path: client_path,
@@ -682,6 +703,8 @@ impl HeadlessServer {
                 }
             }
         }
+        #[cfg(unix)]
+        self.app.preserve_uncertain_live_sources_on_shutdown();
 
         // Save session on exit.
         if self.app.policy.persist_session {
@@ -1840,8 +1863,37 @@ impl HeadlessServer {
         if self.handoff_in_progress && Self::ignore_client_event_during_handoff(&ev) {
             return false;
         }
+        #[cfg(unix)]
+        {
+            let client = match &ev {
+                ServerEvent::ClientShellPaneInput { client_id, .. }
+                | ServerEvent::ClientShellPopupInput { client_id, .. }
+                | ServerEvent::ClientShellResize { client_id, .. }
+                | ServerEvent::ClientShellEndpointRequest { client_id, .. } => Some(*client_id),
+                _ => None,
+            };
+            if let Some(client) = client {
+                self.activate_tab_popup(self.shell_tab_id_for_client(client));
+            }
+        }
 
         match ev {
+            #[cfg(unix)]
+            ServerEvent::TabTransfer(envelope) => self.handle_transfer_envelope(*envelope),
+            #[cfg(unix)]
+            ServerEvent::ClientShellTabTransferDestinations { client_id, data } => {
+                self.handle_tab_transfer_destinations(client_id, data);
+                false
+            }
+            #[cfg(unix)]
+            ServerEvent::ClientShellTabTransferDestinationsReady {
+                client_id,
+                boot_id,
+                data,
+            } => {
+                self.finish_tab_transfer_destinations(client_id, boot_id, data);
+                false
+            }
             ServerEvent::ClientConnected {
                 client_id,
                 cols,
@@ -1901,6 +1953,7 @@ impl HeadlessServer {
                 surface_delta,
                 surface_scroll,
                 session_switch,
+                tab_transfer,
                 writer,
             } => {
                 if self.handoff_in_progress {
@@ -1949,6 +2002,7 @@ impl HeadlessServer {
                 connection.shell_mouse_capture = mouse_capture;
                 connection.shell_surface_active = surface_active;
                 connection.shell_session_switch = session_switch;
+                connection.shell_tab_transfer = tab_transfer;
                 connection.render_state.enable_surface_reuse(surface_reuse);
                 connection.render_state.enable_surface_delta(surface_delta);
                 connection
@@ -1970,21 +2024,24 @@ impl HeadlessServer {
                 let location =
                     crate::server::clients::ClientShellLocation::from_snapshot(&seed_snapshot);
                 let agent_view = self.app.state.agent_view_override.clone();
-                let plugin_ui_rows =
-                    match crate::app::sidebar_plugin_ui_rows(&self.app, session_switch) {
-                        Ok(rows) => rows,
-                        Err(error) => {
-                            if let (Some(writer), Ok(message)) = (
-                                connection.writer.as_ref(),
-                                Self::frame_server_message(&ServerMessage::ClientShellError {
-                                    message: error,
-                                }),
-                            ) {
-                                let _ = writer.control.send(message);
-                            }
-                            return false;
+                let plugin_ui_rows = match crate::app::sidebar_plugin_ui_rows(
+                    &self.app,
+                    session_switch,
+                    tab_transfer,
+                ) {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        if let (Some(writer), Ok(message)) = (
+                            connection.writer.as_ref(),
+                            Self::frame_server_message(&ServerMessage::ClientShellError {
+                                message: error,
+                            }),
+                        ) {
+                            let _ = writer.control.send(message);
                         }
-                    };
+                        return false;
+                    }
+                };
                 let projection_message = match agent_view.as_ref() {
                     Some(view) => match crate::protocol::endpoint::agent_view_projection_message(
                         &seed_snapshot.boot_id,
@@ -2490,18 +2547,36 @@ impl HeadlessServer {
                     client.pixel_mouse && client.host_sgr_pixels_active == Some(true)
                 });
                 let mut events = events;
-                let Some(popup_terminal_id) = self
+                let client_tab = self.shell_tab_id_for_client(client_id);
+                let popup_target = self
                     .app
                     .state
                     .popup_pane
                     .as_ref()
-                    .map(|popup| popup.terminal_id.clone())
-                else {
+                    .filter(|popup| popup.terminal_id.as_str() == terminal_id)
+                    .map(|popup| {
+                        (
+                            popup.terminal_id.clone(),
+                            self.popup_owner_tab_id == client_tab,
+                        )
+                    });
+                #[cfg(unix)]
+                let popup_target = popup_target.or_else(|| {
+                    self.app
+                        .live_transfers
+                        .parked_popups
+                        .iter()
+                        .find(|(_, popup)| popup.terminal_id.as_str() == terminal_id)
+                        .map(|(owner, popup)| {
+                            (
+                                popup.terminal_id.clone(),
+                                client_tab.as_ref() == Some(owner),
+                            )
+                        })
+                });
+                let Some((popup_terminal_id, owns_popup)) = popup_target else {
                     return false;
                 };
-                if popup_terminal_id.as_str() != terminal_id {
-                    return false;
-                }
                 let Some(runtime) = self.app.terminal_runtimes.get(&popup_terminal_id) else {
                     return false;
                 };
@@ -2511,7 +2586,7 @@ impl HeadlessServer {
                     runtime.current_size(),
                     runtime.pixel_size(),
                 );
-                if self.popup_owner_tab_id != self.shell_tab_id_for_client(client_id) {
+                if !owns_popup {
                     let releases = events
                         .into_iter()
                         .filter(client_pane_input_releases_press)
@@ -2915,13 +2990,47 @@ impl HeadlessServer {
 
     fn handle_api_request_with_shutdown_check_inner(
         &mut self,
-        msg: api::ApiRequestMessage,
+        mut msg: api::ApiRequestMessage,
         skip_default_workspace_for_request: bool,
         client_local: bool,
     ) -> bool {
         if self.shutting_down || self.host_shutdown_requested() {
             // During shutdown, respond with server_unavailable.
             Self::reject_api_request_for_shutdown(msg);
+            return false;
+        }
+        #[cfg(unix)]
+        if let Some(admission) = &msg.route_admission {
+            match self
+                .app
+                .validate_forward(
+                    &admission.terminal_id,
+                    admission.generation,
+                    &admission.process,
+                )
+                .and_then(|()| {
+                    self.app
+                        .canonical_forward_request(&admission.terminal_id, msg.request.clone())
+                }) {
+                Ok(request) => msg.request = request,
+                Err(message) => {
+                    let response = serde_json::to_string(&api::schema::ErrorResponse {
+                        id: msg.request.id,
+                        error: api::schema::ErrorBody {
+                            code: "stale_terminal_route".into(),
+                            message,
+                        },
+                    });
+                    if let Ok(response) = response {
+                        let _ = msg.respond_to.send(response);
+                    }
+                    return false;
+                }
+            }
+        }
+        #[cfg(unix)]
+        if self.intercept_live_transfer_api(&msg.request.method) {
+            self.dispatch_live_transfer_api(msg);
             return false;
         }
 
@@ -2934,9 +3043,33 @@ impl HeadlessServer {
             }
         };
 
+        #[cfg(unix)]
+        if self.app.live_transfer_reserves_request(&msg.request) {
+            let response = serde_json::to_string(&api::schema::ErrorResponse {
+                id: msg.request.id,
+                error: api::schema::ErrorBody {
+                    code: "transfer_in_progress".into(),
+                    message: "target topology is reserved by a live tab transfer".into(),
+                },
+            });
+            if let Ok(response) = response {
+                let _ = msg.respond_to.send(response);
+            }
+            return false;
+        }
         let metadata_expired = self.app.expire_due_metadata(Instant::now());
         if let api::schema::Method::ServerLiveHandoff(params) = &msg.request.method {
-            let handoff_result = self.perform_live_handoff(params.clone());
+            #[cfg(unix)]
+            let transfer_reserved = self.app.has_pending_live_transfer();
+            #[cfg(not(unix))]
+            let transfer_reserved = false;
+            let handoff_result = if transfer_reserved {
+                Err(io::Error::other(
+                    "live tab transfer reserves runtime ownership",
+                ))
+            } else {
+                self.perform_live_handoff(params.clone())
+            };
             let handoff_succeeded = handoff_result.is_ok();
             let response = match handoff_result {
                 Ok(()) => serde_json::to_string(&api::schema::SuccessResponse {
@@ -3421,6 +3554,19 @@ fn client_pane_input_has_interaction(events: &[protocol::ClientPaneInputEvent]) 
 
 impl Drop for HeadlessServer {
     fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            self.app.preserve_uncertain_live_sources_on_shutdown();
+            if let Some(control) = &self.transfer_control {
+                if crate::server::tab_transfer::retained_endpoint(
+                    &control.registration().public_endpoint,
+                ) {
+                    if let Some(server) = self.api_server.as_mut() {
+                        server.commit_public_adoption();
+                    }
+                }
+            }
+        }
         let staged_files = self
             .clients
             .drain()

@@ -1,18 +1,28 @@
 use super::*;
 
 impl HeadlessServer {
+    fn shell_popup(&self, client_id: u64) -> Option<&crate::app::state::PopupPaneState> {
+        let tab = self.shell_tab_id_for_client(client_id)?;
+        if self.popup_owner_tab_id.as_deref() == Some(tab.as_str()) {
+            return self.app.state.popup_pane.as_ref();
+        }
+        #[cfg(unix)]
+        {
+            self.app.live_transfers.parked_popups.get(&tab)
+        }
+        #[cfg(not(unix))]
+        None
+    }
     fn shell_focused_runtime(
         &self,
         client_id: u64,
     ) -> Option<(&crate::terminal::TerminalRuntime, crate::layout::PaneId)> {
-        if self.popup_owner_tab_id == self.shell_tab_id_for_client(client_id) {
-            if let Some(popup) = &self.app.state.popup_pane {
-                return self
-                    .app
-                    .terminal_runtimes
-                    .get(&popup.terminal_id)
-                    .map(|runtime| (runtime, popup.pane_id));
-            }
+        if let Some(popup) = self.shell_popup(client_id) {
+            return self
+                .app
+                .terminal_runtimes
+                .get(&popup.terminal_id)
+                .map(|runtime| (runtime, popup.pane_id));
         }
         let target = self.shell_target_for_client(client_id)?;
         let tab = self
@@ -284,10 +294,8 @@ impl HeadlessServer {
                 } else {
                     pane_ids.extend(tab.layout.pane_ids());
                 }
-                if self.popup_owner_tab_id == self.shell_tab_id_for_client(client_id) {
-                    if let Some(popup) = &self.app.state.popup_pane {
-                        pane_ids.insert(popup.pane_id);
-                    }
+                if let Some(popup) = self.shell_popup(client_id) {
+                    pane_ids.insert(popup.pane_id);
                 }
             }
         }
@@ -302,6 +310,12 @@ impl HeadlessServer {
                 }
             }
             if let Some(popup) = &self.app.state.popup_pane {
+                if direct_terminal_targets.contains(popup.terminal_id.as_str()) {
+                    pane_ids.insert(popup.pane_id);
+                }
+            }
+            #[cfg(unix)]
+            for popup in self.app.live_transfers.parked_popups.values() {
                 if direct_terminal_targets.contains(popup.terminal_id.as_str()) {
                     pane_ids.insert(popup.pane_id);
                 }
@@ -366,6 +380,16 @@ impl HeadlessServer {
         &self,
         pane_id: crate::layout::PaneId,
     ) -> Option<&crate::terminal::TerminalId> {
+        #[cfg(unix)]
+        if let Some(popup) = self
+            .app
+            .live_transfers
+            .parked_popups
+            .values()
+            .find(|popup| popup.pane_id == pane_id)
+        {
+            return Some(&popup.terminal_id);
+        }
         if let Some(popup) = self
             .app
             .state
@@ -386,13 +410,10 @@ impl HeadlessServer {
                 return false;
             }
             if self
-                .app
-                .state
-                .popup_pane
-                .as_ref()
+                .shell_popup(client_id)
                 .is_some_and(|popup| popup.pane_id == pane_id)
             {
-                return self.popup_owner_tab_id == self.shell_tab_id_for_client(client_id);
+                return true;
             }
             let Some(target) = self.shell_target_for_client(client_id) else {
                 return false;
@@ -526,26 +547,42 @@ impl HeadlessServer {
         }
 
         let mut broken_clients: Vec<u64> = Vec::new();
-        let mut needs_plugin_ui = [false; 2];
+        let mut needs_plugin_ui = [false; 4];
         for (client_id, _, _, _, mode) in &render_targets {
             if matches!(mode, ClientConnectionMode::ClientShell) {
                 let session_switch = self
                     .clients
                     .get(client_id)
                     .is_some_and(|client| client.shell_session_switch);
-                needs_plugin_ui[usize::from(session_switch)] = true;
+                let tab_transfer = self
+                    .clients
+                    .get(client_id)
+                    .is_some_and(|client| client.shell_tab_transfer);
+                needs_plugin_ui[usize::from(session_switch) | (usize::from(tab_transfer) << 1)] =
+                    true;
             }
         }
-        let plugin_ui_rows: [_; 2] = std::array::from_fn(|index| {
-            needs_plugin_ui[index]
-                .then(|| crate::app::sidebar_plugin_ui_rows(&self.app, index == 1))
+        let plugin_ui_rows: [_; 4] = std::array::from_fn(|index| {
+            needs_plugin_ui[index].then(|| {
+                crate::app::sidebar_plugin_ui_rows(&self.app, index & 1 != 0, index & 2 != 0)
+            })
         });
         for (client_id, (cols, rows), cell_size, _is_foreground, mode) in render_targets {
+            #[cfg(unix)]
+            if matches!(mode, ClientConnectionMode::ClientShell) {
+                self.activate_tab_popup(self.shell_tab_id_for_client(client_id));
+            }
             let session_switch = self
                 .clients
                 .get(&client_id)
                 .is_some_and(|client| client.shell_session_switch);
-            let plugin_ui_rows = plugin_ui_rows[usize::from(session_switch)].as_ref();
+            let tab_transfer = self
+                .clients
+                .get(&client_id)
+                .is_some_and(|client| client.shell_tab_transfer);
+            let plugin_ui_rows = plugin_ui_rows
+                [usize::from(session_switch) | (usize::from(tab_transfer) << 1)]
+                .as_ref();
             let plugin_ui_projection = plugin_ui_rows
                 .and_then(|rows| rows.as_ref().ok())
                 .filter(|rows| !rows.is_empty())

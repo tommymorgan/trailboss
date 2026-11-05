@@ -4527,6 +4527,7 @@ fn c17_actual_paired_revisions_refresh_owners_and_restart_invalidates_old_locato
             surface_delta: false,
             surface_scroll: false,
             session_switch: false,
+            tab_transfer: false,
             snapshot_codecs: vec!["shell.snapshot.v1".into()],
             surface_codecs: vec!["shell.surface.v1".into()],
             input_codecs: vec!["shell.input.semantic.v1".into()],

@@ -2,12 +2,15 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(unix, derive(serde::Serialize, serde::Deserialize))]
 struct MetadataToken {
     value: String,
+    #[cfg_attr(unix, serde(with = "crate::handoff_runtime::clock::optional"))]
     expires_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(unix, derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct MetadataTokens {
     entries: HashMap<String, MetadataToken>,
 }

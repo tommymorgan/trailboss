@@ -648,6 +648,10 @@ impl HeadlessServer {
             }
             AppEvent::PaneDied { pane_id, .. }
             | AppEvent::WorktreeRuntimeRestoreFailed { pane_id, .. } => {
+                #[cfg(unix)]
+                if self.app.live_transfers.moved_panes.contains(pane_id) {
+                    return false;
+                }
                 let focus_before = self.shell_focus_targets();
                 let focused_tabs_before = self.focused_shell_tabs();
                 let pane_id_val = *pane_id;

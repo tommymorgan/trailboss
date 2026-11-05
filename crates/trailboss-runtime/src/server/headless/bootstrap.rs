@@ -42,13 +42,36 @@ pub fn run_server() -> io::Result<()> {
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
     let server_stop = crate::server::shutdown::ServerStop::default();
+    #[cfg(unix)]
+    crate::server::tab_transfer::reserve_inherited_handles()?;
+    #[cfg(unix)]
+    let retained = crate::server::tab_transfer::retained_endpoint(&api::socket_path());
+    #[cfg(unix)]
+    let private_path = if retained {
+        Some(crate::server::tab_transfer::private_api_path("")?)
+    } else {
+        None
+    };
 
     // Start the JSON API socket server.
-    let _api_server = match api::start_server_with_stop_control(
-        api_tx.clone(),
-        event_hub.clone(),
-        server_stop.clone(),
-    ) {
+    #[cfg(unix)]
+    let started_api = match &private_path {
+        Some(path) => api::start_server_at_with_stop_control(
+            api_tx.clone(),
+            event_hub.clone(),
+            server_stop.clone(),
+            path,
+        ),
+        None => api::start_server_with_stop_control(
+            api_tx.clone(),
+            event_hub.clone(),
+            server_stop.clone(),
+        ),
+    };
+    #[cfg(not(unix))]
+    let started_api =
+        api::start_server_with_stop_control(api_tx.clone(), event_hub.clone(), server_stop.clone());
+    let _api_server = match started_api {
         Ok(server) => server,
         Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
             eprintln!("error: trailboss server is already running");
@@ -272,13 +295,19 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
                 "test handoff import failure after restored",
             ));
         }
-        wait_for_old_public_sockets_to_close(Duration::from_secs(5))?;
-
-        let api_server = api::start_server_with_stop_control(
-            api_tx.clone(),
-            event_hub.clone(),
-            server_stop.clone(),
-        )?;
+        let retained=crate::server::tab_transfer::retained_endpoint(&api::socket_path());
+        let api_server=if retained{
+            let deadline=Instant::now()+Duration::from_secs(5);
+            let client=client_socket_path();
+            while crate::ipc::connect_local_stream(&client).is_ok(){
+                if Instant::now()>=deadline{return Err(io::Error::new(io::ErrorKind::TimedOut,"old client endpoint did not close during handoff"))}
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            api::start_server_at_with_stop_control(api_tx.clone(),event_hub.clone(),server_stop.clone(),&crate::server::tab_transfer::private_api_path("")?)?
+        }else{
+            wait_for_old_public_sockets_to_close(Duration::from_secs(5))?;
+            api::start_server_with_stop_control(api_tx.clone(),event_hub.clone(),server_stop.clone())?
+        };
         // Report ready as soon as the public API socket is bound: a
         // pre-rename source core has a shorter ready timeout than this
         // build's construction (plugin + server assembly) takes, and rolls
@@ -296,11 +325,18 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         // the override rather than the configured one it replaced.
         server.api_window_title = received.manifest.api_window_title.take();
         crate::server::handoff::wait_committed(&mut received.stream)?;
+        if let Some(control)=server.transfer_control.as_mut(){control.commit_import();}
         server.app.assume_handoff_ownership();
+        let routes_refreshed=match server.refresh_live_transfer_routes(){
+            Ok(())=>true,
+            Err(error)=>{tracing::error!(%error,"Core owns imported processes but inherited route publication is unresolved");false}
+        };
         server.app.unpause_handoff_readers();
         server.pending_handoff_repaint_nudge = true;
-        if let Err(err) = crate::server::handoff::report_owned(&mut received.stream) {
-            warn!(err = %err, "failed to report handoff ownership; continuing as owner");
+        if routes_refreshed {
+            if let Err(err) = crate::server::handoff::report_owned(&mut received.stream) {
+                warn!(err = %err, "failed to report handoff ownership; continuing as owner");
+            }
         }
         info!("handoff import server started");
         print_ready_message(&api::socket_path(), &client_socket_path());

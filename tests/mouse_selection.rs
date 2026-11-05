@@ -58,6 +58,10 @@ fn mouse_drag_highlights_only_pane_text_and_copies_on_release() {
         observer.receive().unwrap();
     }
     let pane_id = observer.primary.take().unwrap().pane_id;
+    let shell_pid = core.request("pane.process_info", serde_json::json!({"pane_id":pane_id}))
+        ["process_info"]["shell_pid"]
+        .as_u64()
+        .expect("selection must start in a live shell");
     drop(observer);
     let mut transfers = BufReader::new(
         UnixStream::connect(
@@ -156,6 +160,13 @@ fn mouse_drag_highlights_only_pane_text_and_copies_on_release() {
         observer.primary.unwrap().pane_id,
         pane_id,
         "selection changed the focused pane"
+    );
+    assert_eq!(
+        core.request("pane.process_info", serde_json::json!({"pane_id":pane_id}))["process_info"]
+            ["shell_pid"]
+            .as_u64(),
+        Some(shell_pid),
+        "text selection must retain the original shell"
     );
     line.clear();
     let quiet = transfers

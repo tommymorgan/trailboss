@@ -242,14 +242,28 @@ impl App {
     }
 
     pub(super) fn handle_tab_transfer(&mut self, id: String, params: TabTransferParams) -> String {
+        if params.destination_session.is_some() {
+            return encode_error(
+                id,
+                "transfer_unavailable",
+                "cross-session coordination is unavailable",
+            );
+        }
+        let Some(workspace_id) = params.workspace_id.as_deref() else {
+            return encode_error(
+                id,
+                "invalid_params",
+                "same-session transfer requires workspace_id",
+            );
+        };
         let Some((source_ws_idx, source_tab_idx)) = self.parse_tab_id(&params.tab_id) else {
             return tab_not_found(id, &params.tab_id);
         };
-        let Some(destination_ws_idx) = self.parse_workspace_id(&params.workspace_id) else {
-            return workspace_not_found(id, &params.workspace_id);
+        let Some(destination_ws_idx) = self.parse_workspace_id(workspace_id) else {
+            return workspace_not_found(id, workspace_id);
         };
         let Some(destination) = self.state.workspaces.get(destination_ws_idx) else {
-            return workspace_not_found(id, &params.workspace_id);
+            return workspace_not_found(id, workspace_id);
         };
         let index = params.insert_index.unwrap_or(destination.tabs.len());
         if index > destination.tabs.len() {

@@ -253,6 +253,26 @@ impl App {
             return self.handle_api_worktree_remove_finished(*result);
         }
 
+        #[cfg(unix)]
+        if matches!(&ev, AppEvent::PaneDied { pane_id, .. } if self.live_transfers.moved_panes.contains(pane_id))
+        {
+            return Vec::new();
+        }
+        #[cfg(unix)]
+        if let AppEvent::PaneDied { pane_id, .. } = &ev {
+            let parked = self
+                .live_transfers
+                .parked_popups
+                .iter()
+                .find_map(|(tab, popup)| (popup.pane_id == *pane_id).then(|| tab.clone()));
+            if let Some(tab) = parked {
+                if let Some(popup) = self.live_transfers.parked_popups.remove(&tab) {
+                    self.state.terminals.remove(&popup.terminal_id);
+                    self.terminal_runtimes.remove(&popup.terminal_id);
+                }
+                return Vec::new();
+            }
+        }
         let mut worktree_restore_updates = Vec::new();
         if let AppEvent::PaneDied { pane_id, .. } = &ev {
             if self
@@ -1003,6 +1023,14 @@ impl App {
         &mut self,
         request: crate::api::schema::Request,
     ) -> String {
+        #[cfg(unix)]
+        if self.live_transfer_reserves_request(&request) {
+            return responses::encode_error(
+                request.id,
+                "transfer_in_progress",
+                "target topology is reserved by a live tab transfer",
+            );
+        }
         self.sync_pending_terminal_titles();
         use crate::api::schema::{
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
@@ -1183,6 +1211,13 @@ impl App {
             Method::TabRename(params) => return self.handle_tab_rename(request.id, params),
             Method::TabMove(params) => return self.handle_tab_move(request.id, params),
             Method::TabTransfer(params) => return self.handle_tab_transfer(request.id, params),
+            Method::TabTransferStatus(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "transfer_unavailable",
+                    "transfer status requires a running Core coordinator",
+                )
+            }
             Method::TabClose(target) => return self.handle_tab_close(request.id, target),
             Method::TabClosedList(_) => return self.handle_closed_tab_list(request.id),
             Method::TabClosedRestore(params) => {

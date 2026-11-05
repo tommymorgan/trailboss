@@ -196,6 +196,10 @@ pub(crate) struct ClientConnection {
     pub(crate) shell_uses_endpoint_keybindings: bool,
     /// Whether this native shell implements its own session attachment switch.
     pub(crate) shell_session_switch: bool,
+    /// Whether this shell implements live cross-session tab transfer.
+    pub(crate) shell_tab_transfer: bool,
+    #[cfg(unix)]
+    pub(crate) shell_tab_transfer_discovery_in_flight: bool,
     /// Channels for sending framed ServerMessage data to the client writer thread.
     pub(crate) writer: Option<ClientWriter>,
 }
@@ -261,6 +265,9 @@ impl ClientConnection {
             shell_deferred_navigation_response: None,
             shell_uses_endpoint_keybindings: false,
             shell_session_switch: false,
+            shell_tab_transfer: false,
+            #[cfg(unix)]
+            shell_tab_transfer_discovery_in_flight: false,
             writer,
         }
     }

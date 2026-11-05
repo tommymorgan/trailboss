@@ -22,7 +22,7 @@ use std::ops::RangeInclusive;
 use std::os::raw::c_char;
 use std::ptr;
 use std::slice;
-use std::sync::{Arc, Mutex, Once, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, Once, OnceLock};
 
 use crate::pane_graphics_files::OwnedExport;
 #[cfg(target_os = "linux")]
@@ -856,6 +856,75 @@ pub struct Terminal {
     kitty_png_forwarding: bool,
 }
 
+struct SnapshotDecoder<'a> {
+    raw: ffi::GhosttySnapshotDecoder,
+    _source: PhantomData<&'a [u8]>,
+}
+
+impl<'a> SnapshotDecoder<'a> {
+    fn new(bytes: &'a [u8]) -> Result<Self, Error> {
+        let mut raw = ptr::null_mut();
+        // SAFETY: bytes remain borrowed until the decoder is freed.
+        unsafe {
+            ffi::ghostty_snapshot_decoder_new_buf(
+                ptr::null(),
+                &mut raw,
+                bytes.as_ptr(),
+                bytes.len(),
+            )
+            .into_result()?;
+        }
+        Ok(Self {
+            raw,
+            _source: PhantomData,
+        })
+    }
+
+    fn default_continuation_limit() -> Result<usize, Error> {
+        static LIMIT: LazyLock<Result<usize, Error>> = LazyLock::new(|| {
+            let decoder = SnapshotDecoder::new(&[])?;
+            let mut limit = 0usize;
+            // Query the library's built-in maximum rather than duplicate its limit.
+            unsafe {
+                ffi::ghostty_snapshot_decoder_get(
+                    decoder.raw,
+                    ffi::GhosttySnapshotDecoderData_GHOSTTY_SNAPSHOT_DECODER_DATA_MAX_CONTINUATION_BYTES,
+                    (&mut limit as *mut usize).cast(),
+                )
+                .into_result()?;
+            }
+            Ok(limit)
+        });
+        *LIMIT
+    }
+}
+
+impl Drop for SnapshotDecoder<'_> {
+    fn drop(&mut self) {
+        unsafe { ffi::ghostty_snapshot_decoder_free(self.raw) }
+    }
+}
+
+unsafe extern "C" fn snapshot_write_trampoline(
+    userdata: *mut c_void,
+    data: *const u8,
+    len: usize,
+) -> bool {
+    // The synchronous writer owns this Vec exclusively for the encoding call.
+    // Fallible reservation prevents allocation failure or capacity overflow from
+    // panicking across the C ABI; appending cannot allocate after it succeeds.
+    let output = unsafe { &mut *userdata.cast::<Vec<u8>>() };
+    if output.try_reserve(len).is_err() {
+        return false;
+    }
+    let old_len = output.len();
+    unsafe {
+        ptr::copy_nonoverlapping(data, output.as_mut_ptr().add(old_len), len);
+        output.set_len(old_len + len);
+    }
+    true
+}
+
 impl Terminal {
     pub fn new(cols: u16, rows: u16, max_scrollback: usize) -> Result<Self, Error> {
         let mut raw = ptr::null_mut();
@@ -864,24 +933,7 @@ impl Terminal {
             ffi::ghostty_terminal_new(ptr::null(), &mut raw, cols, rows).into_result()?;
         }
 
-        let mut terminal = Self {
-            raw,
-            max_scrollback,
-            #[cfg(windows)]
-            tracked_row: ptr::null_mut(),
-            callback_state: Box::new(TerminalCallbackState {
-                size_report: ffi::GhosttySizeReportSize {
-                    rows,
-                    columns: cols,
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
-            kitty_fingerprints: Mutex::new(HashMap::new()),
-            kitty_empty_generation: Cell::new(None),
-            kitty_png_forwarding: false,
-        };
-        let userdata = (&mut *terminal.callback_state as *mut TerminalCallbackState).cast();
+        let terminal = Self::from_raw(raw, max_scrollback)?;
         let glyph_protocol = false;
         // libghostty enables image storage by default; Trailboss opts in explicitly.
         let kitty_storage_limit: u64 = 0;
@@ -893,8 +945,7 @@ impl Terminal {
             mode: MODE_GRAPHEME_CLUSTER,
             value: true,
         };
-        let clipboard_callback: ffi::GhosttyTerminalClipboardWriteFn =
-            Some(clipboard_write_trampoline);
+        let continuation_limit = SnapshotDecoder::default_continuation_limit()?;
         unsafe {
             ffi::ghostty_terminal_set(
                 terminal.raw,
@@ -920,6 +971,57 @@ impl Terminal {
                 (&grapheme_default as *const ffi::GhosttyTerminalModeConfig).cast(),
             )
             .into_result()?;
+            ffi::ghostty_terminal_set(
+                terminal.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES,
+                (&continuation_limit as *const usize).cast(),
+            )
+            .into_result()?;
+            ffi::ghostty_terminal_set(
+                terminal.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_GLYPH_PROTOCOL,
+                (&glyph_protocol as *const bool).cast(),
+            )
+            .into_result()?;
+        }
+        // Disabling storage advances its generation even though it is empty.
+        terminal
+            .kitty_empty_generation
+            .set(Some(terminal.kitty_graphics_generation()?));
+        Ok(terminal)
+    }
+
+    // Takes ownership immediately, so every subsequent failure frees the handle.
+    // Only host-side callbacks are installed here: decoded VT state is untouched.
+    fn from_raw(raw: ffi::GhosttyTerminal, max_scrollback: usize) -> Result<Self, Error> {
+        let mut terminal = Self {
+            raw,
+            max_scrollback,
+            #[cfg(windows)]
+            tracked_row: ptr::null_mut(),
+            callback_state: Box::new(TerminalCallbackState::default()),
+            kitty_fingerprints: Mutex::new(HashMap::new()),
+            kitty_empty_generation: Cell::new(None),
+            kitty_png_forwarding: false,
+        };
+        let rows = terminal.rows()?;
+        let columns = terminal.cols()?;
+        terminal.callback_state.size_report = ffi::GhosttySizeReportSize {
+            rows,
+            columns,
+            cell_width: terminal
+                .width_px()?
+                .checked_div(u32::from(columns))
+                .unwrap_or(0),
+            cell_height: terminal
+                .height_px()?
+                .checked_div(u32::from(rows))
+                .unwrap_or(0),
+        };
+        let userdata = (&mut *terminal.callback_state as *mut TerminalCallbackState).cast();
+        let clipboard_callback: ffi::GhosttyTerminalClipboardWriteFn =
+            Some(clipboard_write_trampoline);
+        unsafe {
             ffi::ghostty_terminal_set(
                 terminal.raw,
                 ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_USERDATA,
@@ -956,17 +1058,60 @@ impl Terminal {
                 (color_scheme_trampoline as *const ()).cast(),
             )
             .into_result()?;
-            ffi::ghostty_terminal_set(
-                terminal.raw,
-                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_GLYPH_PROTOCOL,
-                (&glyph_protocol as *const bool).cast(),
+        }
+        Ok(terminal)
+    }
+
+    /// Encode both screens, history, graphics and unfinished VT/UTF-8 input.
+    pub fn snapshot(&self) -> Result<Vec<u8>, Error> {
+        let mut bytes = Vec::new();
+        // SAFETY: the callback context is exclusive and live for this synchronous
+        // call, and shared Terminal access does not permit concurrent VT writes.
+        unsafe {
+            ffi::ghostty_snapshot_encode(
+                self.raw,
+                ffi::GhosttyWriter {
+                    write: Some(snapshot_write_trampoline),
+                    userdata: (&mut bytes as *mut Vec<u8>).cast(),
+                },
             )
             .into_result()?;
         }
-        // Disabling storage advances its generation even though it is empty.
-        terminal
-            .kitty_empty_generation
-            .set(Some(terminal.kitty_graphics_generation()?));
+        Ok(bytes)
+    }
+
+    /// Restore exactly one complete snapshot, retaining tracking for later moves.
+    ///
+    /// `max_scrollback` records the runtime's configured limit; the decoded
+    /// terminal's history and storage settings are preserved without truncation.
+    pub fn from_snapshot(bytes: &[u8], max_scrollback: usize) -> Result<Self, Error> {
+        let decoder = SnapshotDecoder::new(bytes)?;
+        let retain = true;
+        let mut raw = ptr::null_mut();
+        unsafe {
+            ffi::ghostty_snapshot_decoder_set(
+                decoder.raw,
+                ffi::GhosttySnapshotDecoderOption_GHOSTTY_SNAPSHOT_DECODER_OPT_RETAIN_CONTINUATION,
+                (&retain as *const bool).cast(),
+            )
+            .into_result()?;
+            // The one-shot API returns NULL and releases partial terminal state
+            // on every decoding error. The guard always releases the decoder.
+            ffi::ghostty_snapshot_decoder_decode(decoder.raw, &mut raw).into_result()?;
+        }
+        let terminal = Self::from_raw(raw, max_scrollback)?;
+        let mut consumed = 0usize;
+        unsafe {
+            ffi::ghostty_snapshot_decoder_get(
+                decoder.raw,
+                ffi::GhosttySnapshotDecoderData_GHOSTTY_SNAPSHOT_DECODER_DATA_SOURCE_OFFSET,
+                (&mut consumed as *mut usize).cast(),
+            )
+            .into_result()?;
+        }
+        if consumed != bytes.len() {
+            return Err(Error(ffi::GhosttyResult_GHOSTTY_INVALID_VALUE));
+        }
         Ok(terminal)
     }
 

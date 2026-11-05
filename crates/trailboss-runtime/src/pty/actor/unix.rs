@@ -84,6 +84,7 @@ enum PtyIoDataCommand {
 enum PtyIoControlCommand {
     BeginHandoff(std_mpsc::Sender<std::io::Result<()>>),
     DuplicateForHandoff(std_mpsc::Sender<std::io::Result<RawFd>>),
+    PtyIdentity(std_mpsc::Sender<std::io::Result<u64>>),
     ForegroundProcessGroup(std_mpsc::Sender<Option<u32>>),
     RollbackHandoff(std_mpsc::Sender<std::io::Result<()>>),
     ReleaseAfterCommit(std_mpsc::Sender<std::io::Result<()>>),
@@ -295,6 +296,20 @@ impl PtyIoActorHandle {
             std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "timed out waiting for PTY handoff duplicate",
+            )
+        })?
+    }
+
+    pub(crate) fn pty_identity(&self) -> std::io::Result<u64> {
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        self.control_tx
+            .send(PtyIoControlCommand::PtyIdentity(reply_tx))
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pty actor closed"))?;
+        self.wake_actor();
+        reply_rx.recv_timeout(Duration::from_secs(1)).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out inspecting PTY identity",
             )
         })?
     }
@@ -685,6 +700,9 @@ impl PtyIoActorRunner {
                     ))
                 };
                 let _ = reply.send(result);
+            }
+            PtyIoControlCommand::PtyIdentity(reply) => {
+                let _ = reply.send(fd::pty_identity(self.file.as_raw_fd()));
             }
             PtyIoControlCommand::ForegroundProcessGroup(reply) => {
                 let result =

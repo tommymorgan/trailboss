@@ -29,6 +29,7 @@ pub struct AgentResumePlan {
 
 /// A resume command reported by the agent itself, run in the restored pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(unix, derive(serde::Serialize, serde::Deserialize))]
 pub struct ReportedAgentResume {
     pub source: String,
     pub agent: String,
@@ -89,6 +90,7 @@ pub fn validate_resume_argv(argv: &[String]) -> Result<(), String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(unix, derive(serde::Serialize, serde::Deserialize))]
 pub struct PersistedAgentSession {
     pub source: String,
     pub agent: String,

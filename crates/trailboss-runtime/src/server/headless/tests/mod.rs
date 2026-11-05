@@ -104,6 +104,10 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         api_tx: None,
         api_server: None,
         #[cfg(unix)]
+        transfer_control: None,
+        #[cfg(unix)]
+        transfer_private_api: None,
+        #[cfg(unix)]
         client_listener: listener,
         client_socket_path: socket_path,
         client_socket_identity,
@@ -247,6 +251,8 @@ async fn headless_api_reads_latest_title_without_spinner_event_flooding() {
 fn headless_pane_list(server: &mut HeadlessServer) -> Vec<api::schema::PaneInfo> {
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        #[cfg(unix)]
+        route_admission: None,
         request: api::schema::Request {
             id: "list-titles".into(),
             method: api::schema::Method::PaneList(api::schema::PaneListParams::default()),
@@ -304,6 +310,8 @@ fn headless_api_request_drains_all_pending_internal_events_before_reading_state(
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     assert!(
         server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            #[cfg(unix)]
+            route_admission: None,
             request: api::schema::Request {
                 id: "headless_stop_after_events".into(),
                 method: api::schema::Method::ServerStop(api::schema::EmptyParams::default()),
@@ -726,6 +734,7 @@ async fn client_shell_attach_seeds_workspace() {
             surface_delta: false,
             surface_scroll: false,
             session_switch: false,
+            tab_transfer: false,
             client_id: 6,
             surface_cols: 80,
             surface_rows: 23,
@@ -770,6 +779,7 @@ async fn completion_guard_endpoint_pairs_runtime_completions_with_snapshots() {
         surface_delta: false,
         surface_scroll: false,
         session_switch: false,
+        tab_transfer: false,
         writer,
     });
     let (_, initial) = client_shell_projection(&control_rx);
@@ -820,6 +830,7 @@ async fn client_shell_endpoint_request_uses_the_selected_connection() {
             surface_delta: false,
             surface_scroll: false,
             session_switch: false,
+            tab_transfer: false,
             client_id,
             surface_cols: 80,
             surface_rows: 23,
@@ -940,6 +951,7 @@ async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots(
             surface_delta: false,
             surface_scroll: false,
             session_switch: false,
+            tab_transfer: false,
             client_id: 77,
             surface_cols: 80,
             surface_rows: 23,
@@ -1066,6 +1078,7 @@ async fn client_shell_receives_plugin_ui_rows_with_snapshot() {
             surface_delta: false,
             surface_scroll: false,
             session_switch: false,
+            tab_transfer: false,
             client_id: 77,
             surface_cols: 80,
             surface_rows: 23,
@@ -1196,6 +1209,7 @@ async fn client_shell_receives_dynamic_plugin_ui_rows() {
             surface_delta: false,
             surface_scroll: false,
             session_switch: false,
+            tab_transfer: false,
             client_id: 78,
             surface_cols: 80,
             surface_rows: 23,
@@ -1290,6 +1304,7 @@ async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
             surface_delta: false,
             surface_scroll: false,
             session_switch: false,
+            tab_transfer: false,
             client_id: 7,
             surface_cols: 80,
             surface_rows: 23,
@@ -1459,6 +1474,7 @@ fn connect_test_shell(
             surface_delta: false,
             surface_scroll: false,
             session_switch: false,
+            tab_transfer: false,
             client_id,
             surface_cols,
             surface_rows,
@@ -2065,6 +2081,7 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             surface_delta: false,
             surface_scroll: false,
             session_switch: false,
+            tab_transfer: false,
             client_id: 13,
             surface_cols: 80,
             surface_rows: 23,
@@ -2091,6 +2108,7 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             surface_delta: false,
             surface_scroll: false,
             session_switch: false,
+            tab_transfer: false,
             client_id: 14,
             surface_cols: 80,
             surface_rows: 23,
@@ -2360,6 +2378,8 @@ async fn client_local_navigation_does_not_emit_global_focus_transitions() {
     server.handle_client_shell_api_request(
         62,
         crate::api::ApiRequestMessage {
+            #[cfg(unix)]
+            route_admission: None,
             request: crate::api::schema::Request {
                 id: "focus-own-tab".into(),
                 method: crate::api::schema::Method::TabFocus(crate::api::schema::TabTarget {
@@ -2452,6 +2472,8 @@ async fn client_local_navigation_emits_pane_focused_only_when_that_client_moves(
         server.handle_client_shell_api_request(
             client_id,
             api::ApiRequestMessage {
+                #[cfg(unix)]
+                route_admission: None,
                 request: api::schema::Request {
                     id: "navigate".into(),
                     method,
@@ -2576,6 +2598,8 @@ async fn repeated_layout_action_reapplies_controller_geometry() {
     assert!(server.handle_client_shell_api_request(
         65,
         crate::api::ApiRequestMessage {
+            #[cfg(unix)]
+            route_admission: None,
             request: crate::api::schema::Request {
                 id: "resize-layout".into(),
                 method: crate::api::schema::Method::LayoutSetSplitRatio(
@@ -2625,6 +2649,8 @@ async fn public_close_reapplies_controller_geometry() {
     let (respond_to, _response_rx) = std::sync::mpsc::channel();
     assert!(
         server.handle_api_request_with_shutdown_check(crate::api::ApiRequestMessage {
+            #[cfg(unix)]
+            route_admission: None,
             request: crate::api::schema::Request {
                 id: "public-close-geometry".into(),
                 method: crate::api::schema::Method::PaneClose(crate::api::schema::PaneTarget {
@@ -2824,6 +2850,8 @@ async fn public_background_tab_create_preserves_client_locations() {
 
     let (respond_to, _response_rx) = std::sync::mpsc::channel();
     server.handle_api_request_with_shutdown_check(crate::api::ApiRequestMessage {
+        #[cfg(unix)]
+        route_admission: None,
         request: crate::api::schema::Request {
             id: "create-background-tab".into(),
             method: crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
@@ -2873,6 +2901,8 @@ async fn public_workspace_focus_preserves_each_clients_remembered_tabs() {
 
     let (respond_to, _response_rx) = std::sync::mpsc::channel();
     server.handle_api_request_with_shutdown_check(crate::api::ApiRequestMessage {
+        #[cfg(unix)]
+        route_admission: None,
         request: crate::api::schema::Request {
             id: "focus-second-workspace".into(),
             method: crate::api::schema::Method::WorkspaceFocus(
@@ -2955,6 +2985,8 @@ async fn public_agent_focus_replaces_a_diverged_client_shell_projection() {
         .unwrap();
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     server.handle_api_request_with_shutdown_check(crate::api::ApiRequestMessage {
+        #[cfg(unix)]
+        route_admission: None,
         request: crate::api::schema::Request {
             id: "focus-first-agent".into(),
             method: crate::api::schema::Method::AgentFocus(crate::api::schema::AgentTarget {
@@ -3012,6 +3044,7 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
             surface_delta: false,
             surface_scroll: false,
             session_switch: false,
+            tab_transfer: false,
             client_id: 9,
             surface_cols: 80,
             surface_rows: 23,
@@ -3029,6 +3062,8 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
 
     let (respond_to, _response_rx) = std::sync::mpsc::channel();
     server.handle_api_request_with_shutdown_check(crate::api::ApiRequestMessage {
+        #[cfg(unix)]
+        route_admission: None,
         request: crate::api::schema::Request {
             id: "test.client.shell.workspace.focus".into(),
             method: crate::api::schema::Method::WorkspaceFocus(
@@ -3260,6 +3295,7 @@ async fn client_shell_streams_and_targets_popup_terminal_content() {
             surface_delta: false,
             surface_scroll: false,
             session_switch: false,
+            tab_transfer: false,
             client_id: 12,
             surface_cols: 80,
             surface_rows: 23,
@@ -3651,6 +3687,8 @@ async fn worktree_discovery_does_not_block_client_typing() {
         let (entered, release) = crate::worktree::test_list_gate::block(&repo);
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            #[cfg(unix)]
+            route_admission: None,
             request: api::schema::Request {
                 id: "blocked-read".into(),
                 method,
@@ -5127,6 +5165,8 @@ fn windows_shutdown_probe_preserves_panes_and_agent_sessions() {
                 server.app.event_tx.try_send(death()).unwrap();
                 let (respond_to, response_rx) = std::sync::mpsc::channel();
                 server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                    #[cfg(unix)]
+                    route_admission: None,
                     request: api::schema::Request {
                         id: "shutdown-race".into(),
                         method: api::schema::Method::WorkspaceRename(
@@ -6537,6 +6577,7 @@ async fn client_shell_requests_host_pixels_for_an_unfocused_pixel_pane() {
             surface_delta: false,
             surface_scroll: false,
             session_switch: false,
+            tab_transfer: false,
             client_id: 7,
             surface_cols: 80,
             surface_rows: 23,
@@ -7608,6 +7649,8 @@ fn notification_show_api_forwards_one_semantic_client_notification() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        #[cfg(unix)]
+        route_admission: None,
         request: api::schema::Request {
             id: "notify".into(),
             method: api::schema::Method::NotificationShow(api::schema::NotificationShowParams {
@@ -7670,6 +7713,8 @@ fn notification_show_api_preserves_colon_in_forwarded_title() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        #[cfg(unix)]
+        route_admission: None,
         request: api::schema::Request {
             id: "notify".into(),
             method: api::schema::Method::NotificationShow(api::schema::NotificationShowParams {
@@ -7715,6 +7760,8 @@ fn notification_show_api_validates_empty_title_before_disabled_delivery() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        #[cfg(unix)]
+        route_admission: None,
         request: api::schema::Request {
             id: "notify".into(),
             method: api::schema::Method::NotificationShow(api::schema::NotificationShowParams {
@@ -7745,6 +7792,8 @@ fn notification_show_api_reports_no_foreground_client() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        #[cfg(unix)]
+        route_admission: None,
         request: api::schema::Request {
             id: "notify".into(),
             method: api::schema::Method::NotificationShow(api::schema::NotificationShowParams {
@@ -7793,6 +7842,8 @@ fn notification_show_api_includes_sound_in_semantic_event() {
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     assert!(
         server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            #[cfg(unix)]
+            route_admission: None,
             request: api::schema::Request {
                 id: "notify".into(),
                 method: api::schema::Method::NotificationShow(
@@ -7861,6 +7912,8 @@ fn completion_guard_server(writer: ClientWriter) -> (HeadlessServer, crate::layo
 fn completion_guard_api_report(server: &mut HeadlessServer, method: api::schema::Method) {
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        #[cfg(unix)]
+        route_admission: None,
         request: api::schema::Request {
             id: "completion-probe".into(),
             method,
@@ -7920,6 +7973,8 @@ fn api_report_agent_stores_valid_resume_argv_and_rejects_invalid() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        #[cfg(unix)]
+        route_admission: None,
         request: api::schema::Request {
             id: "invalid-resume".into(),
             method: report(vec!["/opt/prime/prime-agent", "--resume", "01a0"]),
@@ -7941,6 +7996,8 @@ fn api_report_agent_stores_valid_resume_argv_and_rejects_invalid() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        #[cfg(unix)]
+        route_admission: None,
         request: api::schema::Request {
             id: "not-owner".into(),
             method: api::schema::Method::PaneReportAgentSession(
@@ -8326,6 +8383,8 @@ fn stale_api_agent_report_does_not_forward_done_sound() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        #[cfg(unix)]
+        route_admission: None,
         request: api::schema::Request {
             id: "stale".into(),
             method: api::schema::Method::PaneReportAgent(api::schema::PaneReportAgentParams {

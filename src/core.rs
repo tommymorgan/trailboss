@@ -18,6 +18,7 @@ enum Interaction {
         tab_id: String,
     },
     NewSpace,
+    TransferSpace,
 }
 #[derive(Debug)]
 struct TabFocusRequest {
@@ -94,6 +95,9 @@ pub struct Core {
     pub detach_requested: bool,
     pub session_switch_requested: bool,
     pub session_switch_target: Option<String>,
+    pub move_to_session_requested: Option<String>,
+    pub move_to_session_destination: Option<usize>,
+    pub move_to_session_label: Option<String>,
     pub workspace_id: Option<String>,
     pub focused_tab_id: Option<String>,
     pub has_pane: bool,
@@ -852,6 +856,14 @@ impl Core {
             }
         })
     }
+    pub fn transfer_space_input(&self) -> bool {
+        self.interaction == Interaction::TransferSpace
+    }
+    pub fn begin_transfer_space_input(&mut self) {
+        self.interaction = Interaction::TransferSpace;
+        self.require_name = true;
+        self.input_text.clear();
+    }
     pub fn editing(&self) -> bool {
         self.argument_editing || self.interaction != Interaction::None
     }
@@ -914,6 +926,10 @@ impl Core {
                 });
         }
         match action {
+            CoreAction::MoveToSession => {
+                self.move_to_session_requested = context.tab_id.clone();
+                Effect::Consumed
+            }
             CoreAction::SwitchSession => {
                 self.session_switch_requested = true;
                 Effect::Consumed
@@ -1038,6 +1054,10 @@ impl Core {
                         method: "workspace.create",
                         params: json!({"label":self.input_text,"focus":true}),
                     },
+                    Interaction::TransferSpace => {
+                        self.move_to_session_label = Some(self.input_text.trim().to_owned());
+                        Effect::Consumed
+                    }
                     Interaction::None => Effect::Consumed,
                 }
             }

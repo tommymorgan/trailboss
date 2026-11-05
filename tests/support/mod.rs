@@ -145,17 +145,28 @@ impl Core {
             owns_home,
         };
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !session_directory(&core.home, &core.name)
-            .join("trailboss-client.sock")
-            .exists()
-        {
+        let native_socket = session_directory(&core.home, &core.name).join("trailboss-client.sock");
+        let ready: Request = serde_json::from_value(json!({
+            "id":"owned-core-startup", "method":"session.snapshot", "params":{}
+        }))
+        .unwrap();
+        loop {
             assert!(
                 Instant::now() < deadline && core.child.try_wait().unwrap().is_none(),
                 "isolated core startup failed"
             );
+            if native_socket.exists()
+                && core
+                    .api
+                    .request_value_with_timeout(&ready, Duration::from_millis(250))
+                    .is_ok_and(|reply| {
+                        reply.get("error").is_none() && reply.get("result").is_some()
+                    })
+            {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
-        core.request("session.snapshot", json!({}));
         core
     }
     pub fn request(&self, method: &str, params: Value) -> Value {
