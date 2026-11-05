@@ -2,7 +2,7 @@
 // managed by trailboss; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // TRAILBOSS_INTEGRATION_ID=omp
-// TRAILBOSS_INTEGRATION_VERSION=17
+// TRAILBOSS_INTEGRATION_VERSION=18
 // @ts-nocheck
 
 import net, { type Server, type Socket } from "node:net";
@@ -330,17 +330,126 @@ type RestartContext = {
   shutdown?: () => void;
 };
 
+/** An explicit grant is tied to one live process and conversation, never a tab name. */
+export function readRestrictedAppGrant(ctx, directory = `/tmp/trailboss-omp-control-${process.geteuid?.()}`) {
+  if (process.platform !== "linux" || !process.geteuid || ctx?.hasUI !== true) return undefined;
+  let fd;
+  try {
+    const uid = process.geteuid(), parent = fs.lstatSync(directory);
+    if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== uid ||
+        (parent.mode & 0o777) !== 0o700) return undefined;
+    const marker = path.join(directory, `${process.pid}.restricted-app.json`);
+    fd = fs.openSync(marker, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.uid !== uid || (stat.mode & 0o777) !== 0o600 ||
+        stat.nlink !== 1 || stat.size <= 0 || stat.size > 4096) return undefined;
+    const buffer = Buffer.alloc(4097), length = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    const current = fs.lstatSync(marker);
+    if (length !== stat.size || current.dev !== stat.dev || current.ino !== stat.ino) return undefined;
+    const grant = JSON.parse(buffer.subarray(0, length).toString("utf8"));
+    const proc = fs.readFileSync("/proc/self/stat", "utf8");
+    const start = proc.slice(proc.lastIndexOf(")") + 2).split(/\s+/)[19];
+    if (grant?.version !== 1 || grant.pid !== process.pid || grant.proc_start_ticks !== start ||
+        typeof grant.terminal_id !== "string" || grant.terminal_id.length === 0 ||
+        Buffer.byteLength(grant.terminal_id, "utf8") > 256 || /[\u0000-\u001f\u007f]/.test(grant.terminal_id) ||
+        grant.conversation_id !== ctx.sessionManager?.getSessionId?.() ||
+        typeof grant.session_path !== "string" || !path.isAbsolute(grant.session_path) ||
+        grant.session_path !== ctx.sessionManager?.getSessionFile?.()) return undefined;
+    return grant;
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 const CONVERSATION_POLICIES = {
   brief: "[Voice format for this request only: answer with a short actual reply suitable for ten seconds; give detail only if requested. Do not apply this format to unrelated desktop requests.]\n\n",
   expanded: "[Voice format for this request only: more detail is explicitly requested. Do not apply this format to unrelated desktop requests.]\n\n"
 };
 
 /** Projects native entries only. Input receipts never identify assistant replies. */
-export function createConversationAdapter(getContext) {
+export function createConversationAdapter(getContext, restrictedOptions) {
   const reporterEpoch = randomUUID();
   const receipts = new Map();
   let cachedContext, branch = [], positions = new Map(), tip = null;
   let reads = Promise.resolve();
+  let restrictedContext, restrictedEpoch = randomUUID(), restrictedTip, restrictedReset = null;
+  let resetCache = new Map(), outstanding = null;
+  let metadataTimer, metadataClosed = false;
+  const metadataWaiters = new Set();
+  function pulseMetadata() {
+    for (const wake of metadataWaiters) wake();
+  }
+  function waitForMetadataPulse(timeout) {
+    return new Promise(resolve => {
+      const wake = () => {
+        if (!metadataWaiters.delete(wake)) return;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(wake, timeout);
+      metadataWaiters.add(wake);
+    });
+  }
+  async function readyMetadata() {
+    const ctx = getContext(), grant = restrictedOptions?.readGrant?.(ctx);
+    if (!grant || metadataClosed || restrictedContext !== grant.conversation_id ||
+        ctx?.sessionManager?.getSessionId?.() !== grant.conversation_id) return null;
+    const identity = JSON.stringify([grant.terminal_id, grant.conversation_id, grant.session_path]);
+    const epoch = restrictedEpoch, deadline = performance.now() + 750;
+    while (!metadataClosed && performance.now() < deadline) {
+      // Only the independent timer/lifecycle observer refreshes metadata.
+      await waitForMetadataPulse(Math.max(1, deadline - performance.now()));
+      const current = getContext(), next = restrictedOptions.readGrant(current);
+      if (metadataClosed || !next || restrictedEpoch !== epoch ||
+          current?.sessionManager?.getSessionId?.() !== grant.conversation_id ||
+          current?.sessionManager?.getSessionFile?.() !== grant.session_path ||
+          JSON.stringify([next.terminal_id, next.conversation_id, next.session_path]) !== identity) return null;
+      const live = native(true);
+      if (live) return live;
+    }
+    return null;
+  }
+
+  function refreshRestricted(ctx) {
+    const manager = ctx?.sessionManager, id = manager?.getSessionId?.();
+    if (!validId(id) || typeof manager.getLeafId !== "function" || typeof manager.getEntry !== "function") return false;
+    if (restrictedContext !== id) {
+      restrictedContext = id; restrictedEpoch = randomUUID(); restrictedTip = undefined;
+      restrictedReset = null; resetCache = new Map(); outstanding = null;
+    }
+    const leaf = manager.getLeafId();
+    if (!nullableId(leaf)) return false;
+    if (leaf === restrictedTip) return true;
+    const suffix = [], seen = new Set();
+    let cursor = leaf, boundary = null;
+    while (cursor !== null && !resetCache.has(cursor)) {
+      if (!validId(cursor) || seen.has(cursor)) return false;
+      seen.add(cursor);
+      const entry = manager.getEntry(cursor);
+      if (!entry || !nullableId(entry.parentId)) return false;
+      suffix.push(entry.id);
+      if (entry.type === "reset_boundary") { boundary = entry.id; break; }
+      cursor = entry.parentId;
+    }
+    if (cursor !== null && resetCache.has(cursor)) boundary = resetCache.get(cursor);
+    if ((restrictedTip !== undefined && cursor !== restrictedTip) || boundary !== restrictedReset) {
+      restrictedEpoch = randomUUID(); outstanding = null;
+    }
+    for (const entryId of suffix) resetCache.set(entryId, boundary);
+    restrictedTip = leaf; restrictedReset = boundary;
+    return true;
+  }
+
+  function capabilities(live) {
+    if (!live.grant) return ["guarded_submit_v1", "input_status_v1", "guarded_abort_v1", "reply_style_v1"];
+    const caps = ["restricted_app_bridge_v1", "single_outstanding_v1", "input_status_v1", "reply_style_v1"];
+    if (!outstanding && live.ctx.isIdle() === true && live.ctx.hasPendingMessages() === false &&
+        typeof restrictedOptions.sendUserMessage === "function") caps.push("restricted_submit_v1");
+    // There is no public input_id-to-work-fence ownership correlation for app cancellation.
+    return caps;
+  }
   const bytes = value => Buffer.byteLength(JSON.stringify(value), "utf8") + 1;
   const validId = id => typeof id === "string" && id.length > 0 &&
     Buffer.byteLength(id, "utf8") <= 256 && !/[\u0000-\u001f\u007f]/.test(id);
@@ -358,8 +467,23 @@ export function createConversationAdapter(getContext) {
       ...(validId(request.params?.input_id) ? { input_id: request.params.input_id } : {})
     } };
   }
-  function native() {
+  function native(metadataOnly = false) {
+    if (metadataClosed) return null;
     const ctx = getContext(), control = ctx?.conversationControl, manager = ctx?.sessionManager;
+    const grant = restrictedOptions?.readGrant?.(ctx);
+    if (grant) {
+      if (typeof ctx?.isIdle !== "function" || typeof ctx.hasPendingMessages !== "function" ||
+          typeof manager?.getSessionId !== "function" || typeof manager.getLeafId !== "function") return null;
+      // A metadata read may verify the cached tip, but must never reconstruct history.
+      if (metadataOnly ? restrictedContext !== manager.getSessionId() || restrictedTip !== manager.getLeafId() :
+          !refreshRestricted(ctx)) return null;
+      const idle = ctx.isIdle(), pending = ctx.hasPendingMessages();
+      return { ctx, manager, grant, snapshot: {
+        conversation_id: restrictedContext, reset_entry_id: restrictedReset, context_epoch: restrictedEpoch,
+        work: { state: idle === false ? "working" :
+          idle === true && pending === false && !outstanding ? "not_working" : "unknown", fence: null }
+      } };
+    }
     if (control?.version !== 1 || typeof control.snapshot !== "function" ||
         typeof control.submit !== "function" || typeof control.abort !== "function" ||
         typeof manager?.getLeafId !== "function" || typeof manager?.getEntry !== "function") return null;
@@ -421,14 +545,21 @@ export function createConversationAdapter(getContext) {
   }
   async function read(request, live) {
     const p = request.params, budget = p.max_bytes ?? 65536, snapshot = live.snapshot;
-    if (!Number.isSafeInteger(budget) || budget < 4096 || budget > 65536 ||
+    if (!Number.isSafeInteger(budget) || (budget !== 0 && (budget < 4096 || budget > 65536)) ||
         p.terminal_id !== request.terminal_id || (p.cursor != null && p.expected_context == null)) return error(request, "invalid_params");
     const binding = { terminal_id: request.terminal_id, conversation_id: snapshot.conversation_id, reset_entry_id: snapshot.reset_entry_id };
     if (p.expected_context != null && !sameContext(p.expected_context, binding)) return error(request, "binding_mismatch");
+    // Zero is a metadata request, not a history page with a zero-size budget.
+    if (budget === 0) return { status: "conversation", reason: "", result: {
+      contract_version: 1, binding, reporter_epoch: reporterEpoch, context_epoch: snapshot.context_epoch,
+      work: snapshot.work, capabilities: capabilities(live),
+      mode: "unchanged", reset_reason: null, snapshot_tip_id: null, records: [],
+      next_cursor: null, baseline_cursor: null, has_more: false
+    } };
     const capturedTip = live.manager.getLeafId();
     let cursor = p.cursor == null ? null : decode(p.cursor);
     const result = { contract_version: 1, binding, reporter_epoch: reporterEpoch, context_epoch: snapshot.context_epoch,
-      work: snapshot.work, capabilities: ["guarded_submit_v1", "input_status_v1", "guarded_abort_v1", "reply_style_v1"],
+      work: snapshot.work, capabilities: capabilities(live),
       mode: "delta", reset_reason: null, snapshot_tip_id: capturedTip, records: [],
       next_cursor: null, baseline_cursor: null, has_more: false };
     const fits = value => Math.max(bytes({ status: "conversation", reason: "", result: value }),
@@ -519,19 +650,23 @@ export function createConversationAdapter(getContext) {
         reason: p.reporter_epoch === reporterEpoch ? "receipt_unavailable" : "reporter_changed" } };
     }
     let live;
-    try { live = native(); } catch { return error(request, "structured_unavailable"); }
+    try { live = native(request.operation === "conversation_capabilities" ||
+      (request.operation === "conversation_read" && p.max_bytes === 0)); } catch { return error(request, "structured_unavailable"); }
+    if (!live && request.operation === "conversation_read" && p.max_bytes === 0) live = await readyMetadata();
     if (!live) return error(request, "structured_unavailable");
+    if (live.grant && live.grant.terminal_id !== request.terminal_id) return error(request, "binding_mismatch");
     const binding = { terminal_id: request.terminal_id, conversation_id: live.snapshot.conversation_id, reset_entry_id: live.snapshot.reset_entry_id };
     if (request.operation === "conversation_read") return read(request, live);
     if (request.operation === "conversation_capabilities") return { status: "conversation", reason: "", result: {
       contract_version: 1, binding, reporter_epoch: reporterEpoch, context_epoch: live.snapshot.context_epoch,
-      capabilities: ["guarded_submit_v1", "input_status_v1", "guarded_abort_v1", "reply_style_v1"]
+      capabilities: capabilities(live)
     } };
     if (!sameBinding(p.binding, binding)) return error(request, "binding_mismatch");
     if (p.reporter_epoch !== reporterEpoch) return error(request, "reporter_changed");
     if (!validId(p.context_epoch) || p.context_epoch !== live.snapshot.context_epoch) return error(request, "context_changed");
     const expected_context = { conversation_id: binding.conversation_id, reset_entry_id: binding.reset_entry_id };
     if (request.operation === "conversation_abort") {
+      if (live.grant) return error(request, "ownership_unknown");
       if (!validId(p.work_fence)) return error(request, "invalid_params");
       try {
         const outcome = await live.control.abort({ expected_context, context_epoch: p.context_epoch, work_fence: p.work_fence });
@@ -543,21 +678,47 @@ export function createConversationAdapter(getContext) {
     if (request.operation !== "conversation_submit") return error(request, "structured_unavailable");
     if (!validId(p.input_id) || typeof p.text !== "string" || !p.text.trim() ||
         !Object.hasOwn(CONVERSATION_POLICIES, p.reply_style)) return error(request, "invalid_params");
-    const text = CONVERSATION_POLICIES[p.reply_style] + p.text;
+    const policy = live.grant ? {
+      brief: "[Reply format for this request only: be concise; preserve the app's requested result schema.]\n\n",
+      expanded: "[Reply format for this request only: provide the detail required by the app's result schema.]\n\n"
+    } : CONVERSATION_POLICIES;
+    const text = policy[p.reply_style] + p.text;
     if (Buffer.byteLength(text, "utf8") > 128 * 1024 || bytes({ ...request, params: { ...p, text } }) > 256 * 1024) return error(request, "request_too_large");
     const digest = createHash("sha256").update(JSON.stringify([p.text, p.reply_style])).digest("hex"), previous = receipts.get(key);
     if (previous) return previous.digest === digest ? previous.promise : error(request, "idempotency_conflict");
+    if (live.grant) {
+      if (outstanding) return error(request, "instruction_outstanding");
+      if (live.ctx.isIdle() !== true || live.ctx.hasPendingMessages() !== false ||
+          typeof restrictedOptions.sendUserMessage !== "function") return error(request, "agent_busy");
+    }
     if (receipts.size >= 256) {
       const oldest = [...receipts].find(([, slot]) => slot.result.status !== "dispatching");
       if (!oldest) return error(request, "capacity_exhausted");
       receipts.delete(oldest[0]);
     }
-    const slot = { digest, result: { input_id: p.input_id, binding, reporter_epoch: reporterEpoch, context_epoch: p.context_epoch, status: "dispatching" }, promise: null };
+    const slot = { digest, settingUp: true, started: false, completed: false,
+      result: { input_id: p.input_id, binding, reporter_epoch: reporterEpoch, context_epoch: p.context_epoch, status: "dispatching" }, promise: null };
     // Reserve before native invocation/await; concurrent duplicates join the reservation.
     receipts.set(key, slot);
+    if (live.grant) outstanding = slot;
     slot.promise = Promise.resolve().then(async () => {
       try {
-        const outcome = await live.control.submit({ expected_context, context_epoch: p.context_epoch, text });
+        let outcome;
+        if (live.grant) {
+          let fresh;
+          try { fresh = native(); } catch {}
+          const reason = !fresh?.grant ? "structured_unavailable" :
+            fresh.grant.terminal_id !== request.terminal_id || !sameContext(fresh.snapshot, binding) ? "binding_mismatch" :
+            fresh.snapshot.context_epoch !== p.context_epoch ? "context_changed" :
+            outstanding !== slot ? "instruction_outstanding" :
+            fresh.ctx.isIdle() !== true || fresh.ctx.hasPendingMessages() !== false ? "agent_busy" : null;
+          if (reason) outcome = { status: "rejected", reason, invocation: "not_started" };
+          else {
+            // No await between the actual idle/queue admission check and public send.
+            await restrictedOptions.sendUserMessage(text);
+            outcome = { status: "accepted" };
+          }
+        } else outcome = await live.control.submit({ expected_context, context_epoch: p.context_epoch, text });
         if (outcome?.status === "accepted") {
           slot.result = { ...slot.result, status: "accepted_by_reporter", receipt: randomUUID(), reply_style: p.reply_style };
           return { status: "conversation", reason: "", result: slot.result };
@@ -568,22 +729,70 @@ export function createConversationAdapter(getContext) {
       } catch {
         slot.result = { ...slot.result, status: "unknown", reason: "submission_failed" };
         return error(request, "submission_failed", "unknown");
+      } finally {
+        slot.settingUp = false;
+        if (outstanding === slot && (slot.completed || slot.result.status === "rejected_before_dispatch")) outstanding = null;
       }
     });
     return slot.promise;
   }
-  return request => {
+  const adapter = request => {
     const run = () => dispatch(request).catch(cause => error(request,
       request.operation === "conversation_read" && ["invalid_params", "history_unavailable", "branch_changed"].includes(cause?.message) ? cause.message : "structured_unavailable",
       request.operation === "conversation_read" ? "not_started" : "unknown"));
     if (request.operation !== "conversation_read") return run();
     const result = reads.then(run, run); reads = result.then(() => {}, () => {}); return result;
   };
+  adapter.observe = (name, event, ctx) => {
+    if (metadataClosed || !restrictedOptions || ctx?.hasUI !== true) return;
+    if (!metadataTimer) {
+      // Public hooks can precede journal appends, including during busy tools.
+      // Refresh opted-in processes independently of metadata read requests.
+      metadataTimer = setInterval(() => {
+        try {
+          const current = getContext();
+          if (current?.hasUI === true && restrictedOptions.readGrant(current)) refreshRestricted(current);
+        } catch {}
+        pulseMetadata();
+      }, 250);
+      metadataTimer.unref?.();
+    }
+    // Only a started app turn holds the conversation. A send that never starts a turn (no model,
+    // usage preflight, cost cap, Esc during setup) must not refuse /new, /resume, /fork or /tree;
+    // the transition below then releases the unstarted reservation.
+    if (name.startsWith("session_before_") && outstanding?.started && restrictedOptions.readGrant(ctx)) return { cancel: true };
+    if (["session_switch", "session_branch", "session_tree"].includes(name)) {
+      restrictedEpoch = randomUUID(); restrictedTip = undefined; outstanding = null;
+    }
+    try { if (!refreshRestricted(ctx)) return; } catch { return; }
+    finally { pulseMetadata(); }
+    if (name === "agent_start" && outstanding) outstanding.started = true;
+    if (name === "agent_end" && event?.willContinue !== true) {
+      const slot = outstanding, epoch = restrictedEpoch;
+      const settle = () => {
+        if (!slot || outstanding !== slot || restrictedEpoch !== epoch || !slot.started ||
+            ctx.isIdle() !== true || ctx.hasPendingMessages() !== false) return;
+        if (slot.settingUp) slot.completed = true;
+        else outstanding = null;
+      };
+      settle();
+      if (outstanding === slot) setImmediate(settle);
+    }
+  };
+  adapter.close = () => {
+    metadataClosed = true;
+    clearInterval(metadataTimer);
+    metadataTimer = undefined;
+    pulseMetadata();
+  };
+  return adapter;
 }
 
 
 export default function (pi) {
-  const conversation = createConversationAdapter(() => currentContext);
+  const conversation = createConversationAdapter(() => currentContext, {
+    readGrant: readRestrictedAppGrant, sendUserMessage: text => pi.sendUserMessage(text)
+  });
   if (!enabled()) {
     return;
   }
@@ -615,6 +824,16 @@ export default function (pi) {
     updateSessionRef(ctx);
   }
 
+  for (const name of ["input", "agent_start", "agent_end", "message_start", "message_end", "tool_execution_end",
+      "session_start", "session_switch", "session_branch", "session_tree", "session_compact",
+      "session_before_switch", "session_before_branch", "session_before_tree"]) {
+    pi.on(name, (event, ctx) => {
+      if (ctx?.hasUI !== true) return;
+      captureContext(ctx);
+      return conversation.observe(name, event, ctx);
+    });
+  }
+
   function removeOwnedSocket() {
     if (!ownedSocket) return;
     try {
@@ -630,6 +849,7 @@ export default function (pi) {
 
   function closeControl() {
     controlClosed = true;
+    conversation.close();
     controlServer?.close(() => {});
     removeOwnedSocket();
     for (const client of controlClients) {

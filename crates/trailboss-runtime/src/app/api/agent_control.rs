@@ -490,13 +490,23 @@ fn conversation_roundtrip(
         } else {
             &["guarded_abort_v1"]
         };
-        if capability["contract_version"] != 1
-            || !capability["capabilities"].as_array().is_some_and(|items| {
-                needed
+        let supports = |required: &[&str]| {
+            capability["capabilities"].as_array().is_some_and(|items| {
+                required
                     .iter()
                     .all(|needed| items.iter().any(|item| item.as_str() == Some(*needed)))
             })
-        {
+        };
+        let supported = supports(needed)
+            || (operation == "conversation_submit"
+                && supports(&[
+                    "restricted_app_bridge_v1",
+                    "single_outstanding_v1",
+                    "restricted_submit_v1",
+                    "input_status_v1",
+                    "reply_style_v1",
+                ]));
+        if capability["contract_version"] != 1 || !supported {
             return fail("structured_unavailable", "not_started");
         }
         if capability["binding"] != request["params"]["binding"] {
@@ -508,8 +518,8 @@ fn conversation_roundtrip(
         if capability["context_epoch"] != request["params"]["context_epoch"] {
             return fail("context_changed", "not_started");
         }
-        // Reporter/native admission rechecks these facts atomically; this probe is
-        // compatibility admission, not a substitute for the native guard/fence.
+        // The reporter rechecks native guards or opt-in idle/queue admission at
+        // invocation. Restricted submit never satisfies native abort guarantees.
     }
     match control_roundtrip(&target, request, CHAT_FRAME_LIMIT, CONTROL_TIMEOUT) {
         Ok(reply) => {
