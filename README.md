@@ -53,6 +53,105 @@ overrides compatible with running agents. New session files use the
 `trailboss` namespace; changing product labels does not migrate an existing
 session or its socket. See [runtime provenance](docs/runtime-provenance.md#trailboss-naming-cutover).
 
+## Manual release compatibility check
+
+From this checkout, run the standard-library-only developer command:
+
+```sh
+python3 tests/support/release_compatibility.py \
+  --baseline "$BASELINE" --candidate "$CANDIDATE" \
+  --candidate-revision "$REVISION" --candidate-source-root . \
+  --output-dir "$OUTPUT"
+```
+
+Set `BASELINE` to the untouched retained installation payload, `CANDIDATE` to
+the built executable, `REVISION` to its source revision, and `OUTPUT` to a new
+evidence directory. This is a manual local check: no CI, publisher, version
+decision file, release configuration or network release service is required.
+It never changes versions, creates tags or publishes. Runtime probes create
+and stop only their own isolated Core, native client and PTYs.
+
+The initial baseline is the deployed **untagged** Trailboss build
+`de20c4694668d6305e6ff650c47cfa3614abd5d0`, binary SHA-256
+`718444cbe83522f436c1872fbbf4efa055dae67533aeaa5a7d688618c4f83502`.
+Its product source version is `0.1.0`; the inherited runtime reports `0.9.3`.
+Neither private protocol `22`, endpoint generation `1`, nor named codecs is a
+product SemVer version. `tests/fixtures/release-de20c469/inventory.json` pins
+the original schema, independent consumer, ordered wire/widget declarations,
+product source and deployment manifest. Missing, changed or invalid required
+evidence fails closed with artifact/metadata context; numeric protocol and
+endpoint identities are checked against the pinned schema and endpoint definition.
+Do not regenerate this baseline from a candidate or substitute an
+upstream Herdr release. Producer bytes are identified by the original deployment
+manifest's digests; inherited producers' individual source revisions are not
+established by the Core's source revision.
+
+The command prints JSON and saves `report.json`, API receipts, native terminal
+output and independent consumer evidence under `OUTPUT`. Exit **0** means the
+checked scope passed, including any compatible additions; **1** means a detected
+contract difference, failed probe or missing required evidence. Findings separate
+actual binary-schema/runtime evidence from candidate source-contract risks.
+The supplied revision and source files do not attest that the executable was
+built from them: binary hashes and source/binary uncertainty remain explicit.
+Ordered declaration scanning is a narrow source check, not complete ABI proof.
+API-schema differences outside the explicit method-addition/removal and newly
+required-field rules remain unclassified rather than guessed compatible. Such
+differences withhold patch/minor guidance even when a known addition is present;
+optional response fields are not automatically safe for strict older readers.
+Graphics, popups and optional delta/reuse/scroll paths remain unverified unless
+their own retained consumers have actually been exercised.
+
+Version guidance is provisional and limited to the checked contracts. Compatible
+public additions suggest minor; incompatible stable public contracts imply major;
+no detected change may permit patch for compatible fixes. For current `0.x`
+products, Tommy must choose the pre-1.0 policy. `--stable-contract-reference 1.4.0`
+adds an explicitly hypothetical stable-version reference; it does not relabel the
+retained build or choose a release. A package/private-protocol bump cannot repair
+an incompatible generation-1 payload under its original codec name.
+
+### Reproducing the real candidate fixtures
+
+The permanent tests use actual compiled Cores, not canned servers. With the
+normal repository Rust/Zig toolchain available, prepare two **owned unpublished
+jj workspaces** from the pinned baseline:
+
+```sh
+python3 tests/support/release_fixture_source.py action-break "$FIXTURES/action"
+python3 tests/support/release_fixture_source.py codec-alias "$FIXTURES/codec"
+cargo build --locked -p trailboss --bin trailboss \
+  --manifest-path "$FIXTURES/action/source/Cargo.toml" \
+  --target-dir "$FIXTURES/action/target"
+cargo build --locked -p trailboss --bin trailboss \
+  --manifest-path "$FIXTURES/codec/source/Cargo.toml" \
+  --target-dir "$FIXTURES/codec/target"
+```
+
+Use a new `FIXTURES` directory and the existing toolchain's `ZIG` setting. The
+preparer writes `source-receipt.json` with the exact unpublished revision and
+changed-source hashes; it does not build, install, publish or touch live sessions.
+The action fixture removes the real tab-focus transition while preserving its
+schema. The codec fixture genuinely negotiates `shell.surface.equivalent.v1`
+only when offered and retains the released Surface encoding byte-for-byte; this
+is a codec-alias fixture, not a claim of unrelated new functionality.
+
+Run `python3 tests/support/release_compatibility_test.py` with these explicit
+environment inputs:
+
+- `TRAILBOSS_COMPAT_BASELINE`, `TRAILBOSS_COMPAT_CANDIDATE` and
+  `TRAILBOSS_COMPAT_REVISION`: the retained payload and healthy built candidate.
+- `TRAILBOSS_COMPAT_BEHAVIOR_CANDIDATE`: `action/target/debug/trailboss`, and
+  `TRAILBOSS_COMPAT_BEHAVIOR_REVISION`: that fixture's recorded revision.
+- `TRAILBOSS_COMPAT_CAPABLE_CANDIDATE`: `codec/target/debug/trailboss`,
+  `TRAILBOSS_COMPAT_CAPABLE_REVISION`: its recorded revision, and
+  `TRAILBOSS_COMPAT_CAPABLE_SOURCE`: `codec/source`.
+
+Paths above are relative to `FIXTURES`; supply absolute paths in the environment.
+The capable consumer offers the actual alias and verifies the Core's Welcome
+and complete real Surface, while a separate V1 connection and original native
+client retain the old path. The optional manual flag
+`--probe-surface-codec shell.surface.equivalent.v1` runs this paired probe against
+the codec fixture. No decoder fallback is claimed for arbitrary new codecs.
+
 ## Sidebar tab selection
 
 Switching tabs scrolls the plugin sidebar only enough to reveal the selected

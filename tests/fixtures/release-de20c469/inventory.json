@@ -1,0 +1,42 @@
+{
+  "source_revision": "de20c4694668d6305e6ff650c47cfa3614abd5d0",
+  "product": "trailboss",
+  "product_version": "0.1.0",
+  "runtime_version": "0.9.3",
+  "protocol_version": 22,
+  "endpoint_generation": 1,
+  "binary_sha256": "718444cbe83522f436c1872fbbf4efa055dae67533aeaa5a7d688618c4f83502",
+  "deployment_manifest_sha256": "87220440f3a737e4e87c329a8808575ee993afd6ca326db35426962620444b97",
+  "artifacts": {
+    "neutral_consumer.py": {
+      "source_path": "tests/support/neutral_consumer.py",
+      "source_revision": "de20c4694668d6305e6ff650c47cfa3614abd5d0",
+      "sha256": "33e67b6c7a62d983db8fb99dba96ea2bcdac7ebf651a15dbf2c5690f434571ea"
+    },
+    "api.schema.json": {
+      "source_path": "crates/trailboss-runtime/docs/next/api/trailboss-api.schema.json",
+      "source_revision": "de20c4694668d6305e6ff650c47cfa3614abd5d0",
+      "sha256": "079be6f93f5f3c7265a562809cfb153e9a3660c0504c5a1ef6d0926d67b185f1"
+    },
+    "wire.rs": {
+      "source_path": "crates/trailboss-runtime/src/protocol/wire.rs",
+      "source_revision": "de20c4694668d6305e6ff650c47cfa3614abd5d0",
+      "sha256": "6557b2dd18383559f15b5bd35e2a4839ba1398fe852c169e63195263707867ab"
+    },
+    "widgets.rs": {
+      "source_path": "crates/trailboss-runtime/src/protocol/widgets.rs",
+      "source_revision": "de20c4694668d6305e6ff650c47cfa3614abd5d0",
+      "sha256": "99d1f39b391ab050348d7b80873ed33ac8bc6741a768c6b1fa5e4ac927e171d9"
+    },
+    "endpoint.rs": {
+      "source_path": "crates/trailboss-runtime/src/protocol/endpoint.rs",
+      "source_revision": "de20c4694668d6305e6ff650c47cfa3614abd5d0",
+      "sha256": "f81d3a47ef1122fd84fd4dc448146edf8a1bb638370b7d26b76e21b73bcc60c2"
+    },
+    "Cargo.toml": {
+      "source_path": "Cargo.toml",
+      "source_revision": "de20c4694668d6305e6ff650c47cfa3614abd5d0",
+      "sha256": "ec2a7da13805b95b8549da1ff7ff1c0164c6abc99ce7e3cf2dcc1466aaf17e6f"
+    }
+  }
+}
