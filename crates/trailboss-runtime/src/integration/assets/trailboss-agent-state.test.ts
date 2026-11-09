@@ -754,6 +754,29 @@ test("Pi parent turn outranks background waiting", async () => {
   ]);
 });
 
+test("Pi blocked state outranks background waiting", async () => {
+  const requests = await startRecordingServer("pi-background-blocked");
+  const { eventHandlers, handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/trailboss-agent-state.ts");
+  install(pi);
+
+  const context = piContext(() => true);
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  eventHandlers.get("herdr:busy")?.({ active: true, label: "⏳ 1 subagent (worker)" }, context);
+  await waitFor(() => requestStates(requests).at(-1) === "waiting");
+
+  eventHandlers.get("herdr:blocked")?.({ active: true, label: "approval" }, context);
+  await waitFor(() => requestStates(requests).at(-1) === "blocked");
+
+  eventHandlers.get("herdr:blocked")?.({ active: false }, context);
+  await waitFor(() => requestStates(requests).at(-1) === "waiting");
+  expect(requestStateMessages(requests).slice(-3)).toEqual([
+    ["waiting", "awaiting background work"],
+    ["blocked", "approval"],
+    ["waiting", "awaiting background work"],
+  ]);
+});
+
 test("Pi reports the session replacement source", async () => {
   const requests = await startRecordingServer("pi-session-source");
   const { handlers, pi } = createExtensionHarness();

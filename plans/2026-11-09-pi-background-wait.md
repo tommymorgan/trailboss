@@ -44,11 +44,11 @@ Scenario: PiOwnTurnOutranksBackgroundWait
   When the parent turn settles while the background runs remain
   Then Trailboss receives state "waiting" with message "awaiting background work"
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/pi-agent-status.feature::PiBlockedOutranksBackgroundWait
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: PiBlockedOutranksBackgroundWait
   Given a Pi TUI root session is waiting on background runs
   When herdr:blocked is raised with label "approval"

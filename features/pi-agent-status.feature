@@ -14,3 +14,10 @@ Feature: Pi agent status reporting
     Then Trailboss receives state "working"
     When the parent turn settles while the background runs remain
     Then Trailboss receives state "waiting" with message "awaiting background work"
+
+  Scenario: PiBlockedOutranksBackgroundWait
+    Given a Pi TUI root session is waiting on background runs
+    When herdr:blocked is raised with label "approval"
+    Then Trailboss receives state "blocked" with message "approval"
+    When herdr:blocked is cleared while the background runs remain
+    Then Trailboss receives state "waiting" with message "awaiting background work"
