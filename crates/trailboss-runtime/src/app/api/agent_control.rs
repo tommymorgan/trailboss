@@ -312,7 +312,7 @@ fn chat_submit_roundtrip(
         prepare_control_target(check.shell_pid, &check.session_path).map_err(control_error)?;
     let request = serde_json::json!({
         "operation": "chat_submit",
-        "pid": target.omp.pid,
+        "pid": target.agent.pid,
         "pane_id": target.pane_identity,
         "session_path": check.session_path,
         "text": params.text,
@@ -329,7 +329,7 @@ fn shutdown_roundtrip(check: &ControlCheck) -> Result<AgentShutdownResult, (Stri
         prepare_control_target(check.shell_pid, &check.session_path).map_err(control_error)?;
     let request = serde_json::json!({
         "operation": "shutdown",
-        "pid": target.omp.pid,
+        "pid": target.agent.pid,
         "pane_id": target.pane_identity,
         "session_path": check.session_path,
     });
@@ -341,7 +341,7 @@ fn shutdown_roundtrip(check: &ControlCheck) -> Result<AgentShutdownResult, (Stri
             // exited before reporting success.
             let deadline = std::time::Instant::now() + EXIT_WAIT;
             while std::time::Instant::now() < deadline {
-                if std::path::Path::new(&format!("/proc/{}", target.omp.pid))
+                if std::path::Path::new(&format!("/proc/{}", target.agent.pid))
                     .try_exists()
                     .is_ok_and(|exists| !exists)
                 {
@@ -383,7 +383,7 @@ fn turn_abort_roundtrip(check: &ControlCheck) -> Result<AgentTurnAbortResult, (S
         prepare_control_target(check.shell_pid, &check.session_path).map_err(control_error)?;
     let request = serde_json::json!({
         "operation": "abort",
-        "pid": target.omp.pid,
+        "pid": target.agent.pid,
         "pane_id": target.pane_identity,
         "session_path": check.session_path,
     });
@@ -463,7 +463,7 @@ fn conversation_roundtrip(
         Err(_) => return fail("structured_unavailable", "not_started"),
     };
     let request = serde_json::json!({
-        "operation": operation, "pid": target.omp.pid, "pane_id": target.pane_identity,
+        "operation": operation, "pid": target.agent.pid, "pane_id": target.pane_identity,
         "session_path": check.session_path, "terminal_id": check.target, "request_id": id, "params": params
     });
     if serde_json::to_vec(&request).map_or(true, |frame| frame.len() + 1 > CHAT_FRAME_LIMIT) {
@@ -471,7 +471,7 @@ fn conversation_roundtrip(
     }
     if matches!(operation, "conversation_submit" | "conversation_abort") {
         let probe = serde_json::json!({
-            "operation": "conversation_capabilities", "pid": target.omp.pid,
+            "operation": "conversation_capabilities", "pid": target.agent.pid,
             "pane_id": target.pane_identity, "session_path": check.session_path,
             "terminal_id": check.target, "request_id": id,
             "params": {"binding": request["params"]["binding"], "reporter_epoch": request["params"]["reporter_epoch"]}

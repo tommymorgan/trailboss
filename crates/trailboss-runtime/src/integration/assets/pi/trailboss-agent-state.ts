@@ -2,9 +2,11 @@
 // managed by trailboss; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // TRAILBOSS_INTEGRATION_ID=pi
-// TRAILBOSS_INTEGRATION_VERSION=10
+// TRAILBOSS_INTEGRATION_VERSION=11
 // @ts-nocheck
 
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 
@@ -188,6 +190,258 @@ export default function (pi) {
   let lastState: AgentState | undefined;
   let lastMessage: string | undefined;
   let rootSession = false;
+  let currentContext: any;
+  let controlServer: net.Server | undefined;
+  let ownedSocket: { path: string; dev: number; ino: number } | undefined;
+  let restartAccepted = false;
+  let controlClosed = false;
+  const controlClients = new Set<net.Socket>();
+  const acceptedClients = new Set<net.Socket>();
+  const CONTROL_FRAME_LIMIT = 8192;
+  // Well under Core's 3s control step, which also covers the final recheck.
+  const SUBAGENT_STATUS_DEADLINE_MS = 1000;
+
+  function removeOwnedSocket() {
+    if (!ownedSocket) return;
+    try {
+      const stat = fs.lstatSync(ownedSocket.path);
+      if (stat.isSocket() && stat.dev === ownedSocket.dev && stat.ino === ownedSocket.ino) {
+        fs.unlinkSync(ownedSocket.path);
+      }
+    } catch {
+      // A missing or replaced endpoint is no longer ours to remove.
+    }
+    ownedSocket = undefined;
+  }
+
+  function closeControl() {
+    controlClosed = true;
+    controlServer?.close(() => {});
+    removeOwnedSocket();
+    for (const client of controlClients) {
+      // Graceful shutdown can emit session_shutdown before the reply is flushed.
+      if (!acceptedClients.has(client)) client.destroy();
+    }
+    currentContext = undefined;
+  }
+
+  // Identity admission shared by launch-info and restart-if-idle.
+  function baseSkipReason(request: unknown, operation: string): string | undefined {
+    if (!request || typeof request !== "object" || Array.isArray(request)) return "invalid-request";
+    if (request.operation !== operation || !Number.isSafeInteger(request.pid) ||
+        typeof request.pane_id !== "string" || typeof request.session_path !== "string" ||
+        !path.posix.isAbsolute(request.session_path)) return "invalid-request";
+    if (request.pid !== process.pid) return "pid-mismatch";
+    if (request.pane_id !== paneId) return "pane-mismatch";
+    if (controlClosed || !rootSession || !currentContext) return "interactive-context-unavailable";
+    // Re-read the live manager: cached report identity is not admission authority.
+    updateSessionRef(currentContext);
+    if (!currentAgentSessionPath || request.session_path !== currentAgentSessionPath) {
+      return "session-mismatch";
+    }
+    return undefined;
+  }
+
+  function restartSkipReason(request: unknown): string | undefined {
+    const base = baseSkipReason(request, "restart-if-idle");
+    if (base) return base;
+    if (restartAccepted) return "restart-already-accepted";
+    if (desiredState().state !== "idle") return "reporter-not-idle";
+    const ctx = currentContext;
+    if (typeof ctx.isIdle !== "function" || typeof ctx.hasPendingMessages !== "function" ||
+        typeof ctx.ui?.getEditorText !== "function" || typeof ctx.shutdown !== "function" ||
+        typeof pi.getAllTools !== "function") {
+      return "runtime-capability-unavailable";
+    }
+    try {
+      if (ctx.isIdle() !== true) return "runtime-not-idle";
+      if (ctx.hasPendingMessages() !== false) return "pending-messages";
+      if (ctx.ui.getEditorText() !== "") return "editor-not-empty";
+    } catch {
+      return "runtime-state-unavailable";
+    }
+    return undefined;
+  }
+
+  // pi-subagents async runs are detached from the foreground job, so only its
+  // in-process status RPC can tell whether a restart would stop them.
+  function subagentToolLoaded(): boolean {
+    return pi.getAllTools().some((tool) => tool?.name === "subagent");
+  }
+
+  function backgroundRunsSkipReason(): Promise<string | undefined> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let unsubscribe: (() => void) | undefined;
+      const finish = (reason: string | undefined) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          unsubscribe?.();
+        } catch {
+          // The reply listener is single-use either way.
+        }
+        resolve(reason);
+      };
+      const timer = setTimeout(() => finish("async-state-unavailable"), SUBAGENT_STATUS_DEADLINE_MS);
+      timer.unref?.();
+      try {
+        const requestId = randomUUID();
+        unsubscribe = pi.events.on(`subagents:rpc:v1:reply:${requestId}`, (reply) => {
+          const totalActive = reply?.success === true ? reply.data?.fleet?.totalActive : undefined;
+          if (!Number.isSafeInteger(totalActive) || totalActive < 0) {
+            finish("async-state-unavailable");
+          } else {
+            finish(totalActive > 0 ? "async-jobs-running" : undefined);
+          }
+        });
+        pi.events.emit("subagents:rpc:v1:request", {
+          version: 1,
+          requestId,
+          method: "status",
+          params: {},
+        });
+      } catch {
+        finish("async-state-unavailable");
+      }
+    });
+  }
+
+  function handleControlRequest(request: unknown): Record<string, unknown> | "restart" {
+    if (request?.operation === "launch-info") {
+      const reason = baseSkipReason(request, "launch-info");
+      if (reason) return { status: "skipped", reason };
+      return {
+        status: "accepted",
+        reason: "",
+        result: { argv: [...process.argv], exec_path: process.execPath },
+      };
+    }
+    const reason = restartSkipReason(request);
+    return reason ? { status: "skipped", reason } : "restart";
+  }
+
+  function startControl() {
+    if (controlServer || controlClosed || process.platform !== "linux" || !process.geteuid) return;
+    const uid = process.geteuid();
+    const directory = `/tmp/trailboss-pi-control-${uid}`;
+    const endpoint = `${directory}/${process.pid}.sock`;
+    try {
+      try {
+        fs.mkdirSync(directory, { mode: 0o700 });
+      } catch (error) {
+        if (error?.code !== "EEXIST") return;
+      }
+      const directoryStat = fs.lstatSync(directory);
+      if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink() ||
+          directoryStat.uid !== uid || (directoryStat.mode & 0o777) !== 0o700) return;
+      // Never unlink an existing endpoint, even if it appears stale.
+      try {
+        fs.lstatSync(endpoint);
+        return;
+      } catch (error) {
+        if (error?.code !== "ENOENT") return;
+      }
+      controlServer = net.createServer((client) => {
+        controlClients.add(client);
+        client.unref();
+        const deadline = setTimeout(() => client.destroy(), 2000);
+        deadline.unref();
+        client.on("error", () => client.destroy());
+        client.on("close", () => {
+          clearTimeout(deadline);
+          controlClients.delete(client);
+          acceptedClients.delete(client);
+        });
+        let input = Buffer.alloc(0);
+        let replied = false;
+        const reply = (body: Record<string, unknown>) => {
+          if (!client.destroyed) client.end(`${JSON.stringify(body)}\n`);
+        };
+        client.on("data", (chunk) => {
+          if (replied) return;
+          if (input.length + chunk.length > CONTROL_FRAME_LIMIT) {
+            replied = true;
+            reply({ status: "skipped", reason: "request-too-large" });
+            return;
+          }
+          input = Buffer.concat([input, chunk]);
+          const newline = input.indexOf(10);
+          if (newline < 0) return;
+          replied = true;
+          if (newline !== input.length - 1) {
+            reply({ status: "skipped", reason: "invalid-frame" });
+            return;
+          }
+          let request: unknown;
+          try {
+            request = JSON.parse(input.subarray(0, newline).toString("utf8"));
+          } catch {
+            reply({ status: "skipped", reason: "invalid-request" });
+            return;
+          }
+          const outcome = handleControlRequest(request);
+          if (outcome !== "restart") {
+            reply(outcome);
+            return;
+          }
+          const acceptRestart = () => {
+            // Every synchronous gate runs again here, with no await before shutdown.
+            const reason = restartSkipReason(request);
+            if (reason) {
+              reply({ status: "skipped", reason });
+              return;
+            }
+            restartAccepted = true;
+            acceptedClients.add(client);
+            const ctx = currentContext;
+            reply({ status: "accepted", reason: "shutdown-requested" });
+            ctx.shutdown();
+          };
+          let backgroundGate: boolean;
+          try {
+            backgroundGate = subagentToolLoaded();
+          } catch {
+            reply({ status: "skipped", reason: "runtime-state-unavailable" });
+            return;
+          }
+          if (!backgroundGate) {
+            acceptRestart();
+            return;
+          }
+          void backgroundRunsSkipReason().then((reason) => {
+            if (reason) reply({ status: "skipped", reason });
+            else acceptRestart();
+          });
+        });
+      });
+      controlServer.on("error", () => {
+        removeOwnedSocket();
+      });
+      controlServer.unref();
+      controlServer.listen(endpoint, () => {
+        try {
+          const stat = fs.lstatSync(endpoint);
+          if (!stat.isSocket() || stat.uid !== uid) {
+            controlServer?.close();
+            return;
+          }
+          ownedSocket = { path: endpoint, dev: stat.dev, ino: stat.ino };
+          fs.chmodSync(endpoint, 0o600);
+          if (controlClosed) {
+            controlServer?.close();
+            removeOwnedSocket();
+          }
+        } catch {
+          controlServer?.close();
+          removeOwnedSocket();
+        }
+      });
+    } catch {
+      closeControl();
+    }
+  }
 
   function desiredState() {
     if (blockedCount > 0) {
@@ -255,7 +509,9 @@ export default function (pi) {
       return;
     }
     rootSession = true;
+    currentContext = ctx;
     updateSessionRef(ctx);
+    startControl();
     await reportSession(event?.reason);
     // A reload can replace this extension mid-run without emitting another agent_start.
     agentActive = ctx?.isIdle?.() === false;
@@ -266,6 +522,7 @@ export default function (pi) {
     if (!rootSession) {
       return;
     }
+    currentContext = ctx;
     updateSessionRef(ctx);
     void reportSession();
     agentActive = true;
@@ -277,7 +534,12 @@ export default function (pi) {
       return;
     }
 
+    currentContext = ctx;
     agentActive = false;
     publishState();
+  });
+
+  pi.on("session_shutdown", () => {
+    closeControl();
   });
 }

@@ -86,3 +86,23 @@ fn inherited_upstream_channel_command_is_unavailable() {
     );
     assert!(output.stdout.is_empty());
 }
+
+// PRI-11 Restart idle agents still has no force option.
+#[test]
+fn restart_idle_rejects_force_with_its_usage_before_contacting_core() {
+    let output = Command::new(env!("CARGO_BIN_EXE_trailboss"))
+        .args(["agent", "restart-idle", "--force"])
+        .env("HERDR_SOCKET_PATH", "/nonexistent/trailboss-help-test.sock")
+        .env(
+            "TRAILBOSS_CONFIG_PATH",
+            "/nonexistent/trailboss-help-test.toml",
+        )
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "usage: trailboss agent restart-idle [--json]\n"
+    );
+}

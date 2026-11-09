@@ -310,7 +310,7 @@ fn agent_command() -> Command {
         .subcommand(Command::new("list").about("List agents"))
         .subcommand(
             Command::new("restart-idle")
-                .about("Cooperatively restart unfocused idle OMP agents in the current session")
+                .about("Cooperatively restart unfocused idle OMP and Pi agents in the current session")
                 .arg(flag("json"))
                 .after_help("Preserves each exact saved conversation and original shell. Unsafe or unsupported agents are skipped; no force option. Select another Trailboss session with the existing global --session option."),
         )

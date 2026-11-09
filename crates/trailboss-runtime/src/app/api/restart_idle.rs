@@ -1,4 +1,4 @@
-//! Cooperative OMP restart. Only the owning Core may write the recovered shell.
+//! Cooperative OMP and Pi restart. Only the owning Core may write the recovered shell.
 use std::time::Duration;
 
 use crate::api::schema::{
@@ -39,6 +39,46 @@ struct ResumeShell {
 struct Candidate {
     check: RestartIdleCheck,
     input_barrier: std::sync::mpsc::Receiver<std::io::Result<()>>,
+}
+
+/// Agents restart-idle can resume: each reports its session as
+/// `herdr:<name>` and runs a reporter control socket under its own directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RestartAgentKind {
+    Omp,
+    Pi,
+}
+
+impl RestartAgentKind {
+    fn of(agent: &AgentInfo) -> Option<Self> {
+        match agent.agent.as_deref() {
+            Some("omp") => Some(Self::Omp),
+            Some("pi") => Some(Self::Pi),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Omp => "omp",
+            Self::Pi => "pi",
+        }
+    }
+
+    fn report_source(self) -> &'static str {
+        match self {
+            Self::Omp => "herdr:omp",
+            Self::Pi => "herdr:pi",
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn detected(self) -> crate::detect::Agent {
+        match self {
+            Self::Omp => crate::detect::Agent::Omp,
+            Self::Pi => crate::detect::Agent::Pi,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,7 +223,8 @@ impl App {
                 .hook_authority
                 .as_ref()
                 .ok_or("new_reporter_not_ready")?;
-            if hook.source != "herdr:omp"
+            let kind = RestartAgentKind::of(&check.agent).ok_or("agent_identity_changed")?;
+            if hook.source != kind.report_source()
                 || hook.reported_at < since
                 || hook
                     .session_ref
@@ -238,7 +279,7 @@ impl App {
 }
 
 fn initial_skip_reason(agent: &AgentInfo) -> Result<(), &'static str> {
-    if agent.agent.as_deref() != Some("omp") {
+    if RestartAgentKind::of(agent).is_none() {
         return Err("not_omp");
     }
     if agent.focused {
@@ -255,9 +296,10 @@ fn initial_skip_reason(agent: &AgentInfo) -> Result<(), &'static str> {
 }
 
 pub(super) fn exact_session_path(agent: &AgentInfo) -> Option<String> {
+    let kind = RestartAgentKind::of(agent)?;
     let session = agent.agent_session.as_ref()?;
-    (session.source == "herdr:omp"
-        && session.agent == "omp"
+    (session.source == kind.report_source()
+        && session.agent == kind.name()
         && session.kind == crate::agent_resume::AgentSessionRefKind::Path
         && std::path::Path::new(&session.value).is_absolute())
     .then(|| session.value.clone())
@@ -349,7 +391,7 @@ fn restart_one(
     }
     let deadline = std::time::Instant::now() + EXIT_TIMEOUT;
     loop {
-        if recovered_shell(&prepared.shell, &prepared.omp).is_ok() {
+        if recovered_shell(&prepared.shell, &prepared.agent).is_ok() {
             break;
         }
         if process_identity(prepared.shell.pid).as_ref() != Some(&prepared.shell) {
@@ -372,7 +414,7 @@ fn restart_one(
     let mut resume_check = check.clone();
     resume_check.resume = Some(ResumeShell {
         shell: prepared.shell.clone(),
-        old_agent: prepared.omp.clone(),
+        old_agent: prepared.agent.clone(),
         cwd: prepared.cwd.clone(),
         session_file: prepared.session_file,
         command: prepared.command.clone(),
@@ -384,7 +426,7 @@ fn restart_one(
     let deadline = std::time::Instant::now() + START_TIMEOUT;
     loop {
         if let Ok(new) = prepare(&check) {
-            if new.omp != prepared.omp && new.pane_identity == prepared.pane_identity {
+            if new.agent != prepared.agent && new.pane_identity == prepared.pane_identity {
                 let mut verify = check.clone();
                 verify.input_epoch = verify.input_epoch.wrapping_add(1);
                 verify.verify_since = Some(resumed_at);
@@ -416,8 +458,9 @@ pub(super) struct ControlReply {
 /// resume specifics on top of this shared target.
 #[cfg(target_os = "linux")]
 pub(super) struct ControlTarget {
+    pub(super) kind: RestartAgentKind,
     pub(super) shell: ProcessIdentity,
-    pub(super) omp: ProcessIdentity,
+    pub(super) agent: ProcessIdentity,
     pub(super) pane_identity: String,
 }
 
@@ -425,8 +468,9 @@ pub(super) struct ControlTarget {
 impl From<&Prepared> for ControlTarget {
     fn from(prepared: &Prepared) -> Self {
         ControlTarget {
+            kind: prepared.kind,
             shell: prepared.shell.clone(),
-            omp: prepared.omp.clone(),
+            agent: prepared.agent.clone(),
             pane_identity: prepared.pane_identity.clone(),
         }
     }
@@ -458,16 +502,18 @@ pub(super) fn prepare_control_target(
     let pane_identity =
         process_environment_value(pid, "HERDR_PANE_ID").ok_or("pane_environment_unavailable")?;
     Ok(ControlTarget {
+        kind: RestartAgentKind::Omp,
         shell,
-        omp,
+        agent: omp,
         pane_identity,
     })
 }
 
 #[cfg(target_os = "linux")]
 struct Prepared {
+    kind: RestartAgentKind,
     shell: ProcessIdentity,
-    omp: ProcessIdentity,
+    agent: ProcessIdentity,
     pane_identity: String,
     cwd: std::path::PathBuf,
     session_file: (u64, u64),
@@ -476,27 +522,82 @@ struct Prepared {
 
 #[cfg(target_os = "linux")]
 fn prepare(check: &RestartIdleCheck) -> Result<Prepared, String> {
+    let kind = RestartAgentKind::of(&check.agent).ok_or("not_omp")?;
     let shell = process_identity(check.shell_pid).ok_or("shell_identity_unavailable")?;
     let shell_executable = std::fs::read_link(format!("/proc/{}/exe", shell.pid))
         .map_err(|_| "shell_executable_unavailable")?;
+    let shell_name = shell_executable.file_name().and_then(|name| name.to_str());
     if !matches!(
-        shell_executable.file_name().and_then(|name| name.to_str()),
+        shell_name,
         Some("bash" | "zsh" | "fish" | "sh" | "dash" | "ksh" | "mksh" | "ash")
     ) {
         return Err("unsupported_shell_syntax".into());
     }
+    let fish = shell_name == Some("fish");
     let job = crate::detect::foreground_job(shell.pid).ok_or("foreground_unavailable")?;
-    let (agent, _, pid) =
-        crate::detect::identify_agent_process_in_job(&job).ok_or("foreground_not_omp")?;
-    if agent != crate::detect::Agent::Omp || pid == shell.pid || pid != job.process_group_id {
-        return Err("foreground_not_root_omp".into());
+    let (agent, _, pid) = crate::detect::identify_agent_process_in_job(&job)
+        .ok_or_else(|| format!("foreground_not_{}", kind.name()))?;
+    if agent != kind.detected() || pid == shell.pid || pid != job.process_group_id {
+        return Err(format!("foreground_not_root_{}", kind.name()));
     }
-    let omp = process_identity(pid).ok_or("agent_identity_unavailable")?;
+    let agent = process_identity(pid).ok_or("agent_identity_unavailable")?;
     for process in &job.processes {
-        if process.pid != pid && !is_zombie(process.pid) && !is_resident_worker(process.pid, pid) {
+        if process.pid != pid
+            && !is_zombie(process.pid)
+            && !(kind == RestartAgentKind::Omp && is_resident_worker(process.pid, pid))
+        {
             return Err("other_live_foreground_work".into());
         }
     }
+    // Pi overwrites /proc/<pid>/cmdline through process.title, so its launch
+    // arguments come from its own reporter over the PID-verified socket.
+    let omp_argv = match kind {
+        RestartAgentKind::Omp => Some(omp_original_argv(pid)?),
+        RestartAgentKind::Pi => None,
+    };
+    let pane_identity =
+        process_environment_value(pid, "HERDR_PANE_ID").ok_or("pane_environment_unavailable")?;
+    let cwd = shell_cwd(shell.pid).ok_or("shell_cwd_unavailable")?;
+    let session_file =
+        session_file_identity(&check.session_path).ok_or("saved_session_file_unavailable")?;
+    if !compatible_launch_environment(pid, shell.pid)? {
+        return Err("unsupported_environment_override".into());
+    }
+    let argv = match omp_argv {
+        Some(argv) => exact_resume_argv(&argv, &check.session_path)?,
+        None => {
+            let target = ControlTarget {
+                kind,
+                shell: shell.clone(),
+                agent: agent.clone(),
+                pane_identity: pane_identity.clone(),
+            };
+            pi_resume_argv(
+                &pi_original_argv(&target, &check.session_path)?,
+                &check.session_path,
+            )?
+        }
+    };
+    let command = format!(
+        "{}\r",
+        argv.iter()
+            .map(|arg| shell_quote(arg, fish))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    Ok(Prepared {
+        kind,
+        shell,
+        agent,
+        pane_identity,
+        cwd,
+        session_file,
+        command,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn omp_original_argv(pid: u32) -> Result<Vec<String>, String> {
     let mut argv = process_argv(pid).ok_or("original_argv_unavailable")?;
     if argv
         .first()
@@ -515,30 +616,49 @@ fn prepare(check: &RestartIdleCheck) -> Result<Prepared, String> {
         .to_str()
         .ok_or("original_executable_not_utf8")?
         .to_owned();
-    let pane_identity =
-        process_environment_value(pid, "HERDR_PANE_ID").ok_or("pane_environment_unavailable")?;
-    let cwd = shell_cwd(shell.pid).ok_or("shell_cwd_unavailable")?;
-    let session_file =
-        session_file_identity(&check.session_path).ok_or("saved_session_file_unavailable")?;
-    if !compatible_launch_environment(pid, shell.pid)? {
-        return Err("unsupported_environment_override".into());
+    Ok(argv)
+}
+
+/// Launch facts the Pi reporter returns from its own `process.argv` and
+/// `process.execPath` (`launch-info` control operation).
+#[cfg(target_os = "linux")]
+#[derive(serde::Deserialize)]
+struct PiLaunchInfo {
+    argv: Vec<String>,
+    exec_path: String,
+}
+
+/// Reads the live Pi's launch through its reporter and accepts it only when
+/// it is `<node> <existing cli script> ...` run by the PID-verified process.
+#[cfg(target_os = "linux")]
+fn pi_original_argv(target: &ControlTarget, session_path: &str) -> Result<Vec<String>, String> {
+    let reply = control_roundtrip(
+        target,
+        serde_json::json!({ "operation": "launch-info", "pid": target.agent.pid, "pane_id": target.pane_identity, "session_path": session_path }),
+        FRAME_LIMIT,
+        STEP_TIMEOUT,
+    )?;
+    match reply.status.as_str() {
+        "skipped" => return Err(reply.reason),
+        "accepted" => {}
+        _ => return Err("invalid_control_response".into()),
     }
-    let argv = exact_resume_argv(&argv, &check.session_path)?;
-    let command = format!(
-        "{}\r",
-        argv.iter()
-            .map(|arg| shell_quote(arg))
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
-    Ok(Prepared {
-        shell,
-        omp,
-        pane_identity,
-        cwd,
-        session_file,
-        command,
-    })
+    let launch: PiLaunchInfo = reply
+        .result
+        .and_then(|result| serde_json::from_value(result).ok())
+        .ok_or("invalid_launch_info")?;
+    let executable = std::fs::read_link(format!("/proc/{}/exe", target.agent.pid))
+        .map_err(|_| "original_executable_unavailable")?;
+    if executable.as_os_str() != launch.exec_path.as_str()
+        || launch.argv.first() != Some(&launch.exec_path)
+        || !launch
+            .argv
+            .get(1)
+            .is_some_and(|script| std::fs::metadata(script).is_ok_and(|meta| meta.is_file()))
+    {
+        return Err("unsupported_original_launcher".into());
+    }
+    Ok(launch.argv)
 }
 
 fn exact_resume_argv(argv: &[String], session_path: &str) -> Result<Vec<String>, String> {
@@ -626,7 +746,88 @@ fn exact_resume_argv(argv: &[String], session_path: &str) -> Result<Vec<String>,
     Ok(output)
 }
 
-fn shell_quote(arg: &str) -> String {
+/// Rebuilds `<node> <pi cli> <allowed flags> --session <exact path>`. Pi has
+/// no `--flag=value` form for its own options, so any `=` spelling is refused.
+fn pi_resume_argv(argv: &[String], session_path: &str) -> Result<Vec<String>, String> {
+    if argv.len() < 2
+        || argv[0].is_empty()
+        || argv[1].is_empty()
+        || !std::path::Path::new(session_path).is_absolute()
+        || session_path.chars().any(char::is_control)
+        || argv.iter().any(|arg| arg.chars().any(char::is_control))
+    {
+        return Err("unsafe_original_argv".into());
+    }
+    let mut output = argv[..2].to_vec();
+    let mut args = argv[2..].iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            // Earlier selectors are replaced by the exact saved session path.
+            "--session" | "--session-id" | "--fork" => {
+                args.next()
+                    .filter(|value| !value.is_empty() && !value.starts_with('-'))
+                    .ok_or("unsafe_original_resume_argument")?;
+            }
+            "--continue" | "-c" | "--resume" | "-r" => {}
+            "--provider"
+            | "--model"
+            | "--models"
+            | "--thinking"
+            | "--system-prompt"
+            | "--append-system-prompt"
+            | "--tools"
+            | "-t"
+            | "--exclude-tools"
+            | "-xt"
+            | "--extension"
+            | "-e"
+            | "--skill"
+            | "--prompt-template"
+            | "--theme"
+            | "--use-theme"
+            | "--session-dir"
+            | "--tui-mode"
+            | "--name"
+            | "-n" => {
+                let value = args
+                    .next()
+                    .filter(|value| !value.starts_with('-'))
+                    .ok_or("unsafe_original_option_value")?;
+                output.extend([arg.clone(), value.clone()]);
+            }
+            "--no-tools"
+            | "-nt"
+            | "--no-builtin-tools"
+            | "-nbt"
+            | "--no-extensions"
+            | "-ne"
+            | "--no-skills"
+            | "-ns"
+            | "--no-prompt-templates"
+            | "-np"
+            | "--no-themes"
+            | "--no-mcp"
+            | "--no-context-files"
+            | "-nc"
+            | "--approve"
+            | "-a"
+            | "--no-approve"
+            | "-na"
+            | "--offline"
+            | "--verbose" => output.push(arg.clone()),
+            // In particular, never replay initial messages, @files, -p, --mode,
+            // --export, --no-session, --api-key or extension-registered flags.
+            _ => return Err("unsupported_original_launch_argument".into()),
+        }
+    }
+    output.extend(["--session".into(), session_path.into()]);
+    Ok(output)
+}
+
+fn shell_quote(arg: &str, fish: bool) -> String {
+    if fish {
+        return format!("'{}'", arg.replace('\\', "\\\\").replace('\'', "\\'"));
+    }
     format!("'{}'", arg.replace('\'', "'\\''"))
 }
 
@@ -764,7 +965,7 @@ fn recovered_shell(_: &ProcessIdentity, _: &ProcessIdentity) -> Result<(), Strin
 fn request_shutdown(prepared: &Prepared, session_path: &str) -> Result<ControlReply, String> {
     control_request(
         prepared,
-        serde_json::json!({ "operation": "restart-if-idle", "pid": prepared.omp.pid, "pane_id": prepared.pane_identity, "session_path": session_path }),
+        serde_json::json!({ "operation": "restart-if-idle", "pid": prepared.agent.pid, "pane_id": prepared.pane_identity, "session_path": session_path }),
     )
 }
 
@@ -792,17 +993,20 @@ pub(super) fn control_roundtrip(
 ) -> Result<ControlReply, String> {
     use std::io::Write;
     let uid = unsafe { libc::geteuid() };
-    if process_identity(target.omp.pid).as_ref() != Some(&target.omp)
+    if process_identity(target.agent.pid).as_ref() != Some(&target.agent)
         || process_identity(target.shell.pid).as_ref() != Some(&target.shell)
     {
         return Err("process_identity_changed".into());
     }
-    let directory = std::path::PathBuf::from(format!("/tmp/trailboss-omp-control-{uid}"));
-    let path = checked_control_socket(&directory, target.omp.pid, uid)?;
+    let directory = std::path::PathBuf::from(format!(
+        "/tmp/trailboss-{}-control-{uid}",
+        target.kind.name()
+    ));
+    let path = checked_control_socket(&directory, target.agent.pid, uid)?;
     // Unix local connect is bounded by nonblocking connect + poll below.
     let mut stream =
         connect_control(&path).map_err(|err| format!("control_connect_failed: {err}"))?;
-    verify_peer(&stream, target.omp.pid)?;
+    verify_peer(&stream, target.agent.pid)?;
     stream.set_nonblocking(true).map_err(|e| e.to_string())?;
     let deadline = std::time::Instant::now() + timeout;
     let mut frame = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
@@ -1036,6 +1240,223 @@ mod tests {
         })).unwrap()
     }
 
+    fn pi_agent(session_path: &str) -> AgentInfo {
+        serde_json::from_value(serde_json::json!({
+            "terminal_id": "term-pi", "agent": "pi", "agent_status": "idle",
+            "workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p2",
+            "focused": false, "revision": 0,
+            "agent_session": { "source": "herdr:pi", "agent": "pi", "kind": "path", "value": session_path }
+        })).unwrap()
+    }
+
+    const PI_NODE: &str = "/usr/bin/node";
+    const PI_CLI: &str = "/usr/lib/pi/cli.js";
+
+    /// Reporter `launch-info` argv for `pi <launch>`.
+    fn pi_launch(launch: &[&str]) -> Vec<String> {
+        let mut args = argv(&[PI_NODE, PI_CLI]);
+        args.extend(argv(launch));
+        args
+    }
+
+    // PRI-01 Idle Pi restarts into its exact session in the same shell.
+    #[test]
+    fn idle_pi_is_a_candidate_and_resumes_its_exact_session_with_launch_flags() {
+        let path = "/tmp/pri/sessions/a.jsonl";
+        let info = pi_agent(path);
+        assert_eq!(initial_skip_reason(&info), Ok(()));
+        assert_eq!(exact_session_path(&info).as_deref(), Some(path));
+        assert_eq!(
+            pi_resume_argv(
+                &pi_launch(&[
+                    "--model",
+                    "anthropic/claude-sonnet-4-5",
+                    "--thinking",
+                    "high"
+                ]),
+                path
+            )
+            .unwrap(),
+            pi_launch(&[
+                "--model",
+                "anthropic/claude-sonnet-4-5",
+                "--thinking",
+                "high",
+                "--session",
+                path
+            ])
+        );
+    }
+
+    // PRI-04 Pi with background work is skipped: herdr:busy publishes Waiting.
+    #[test]
+    fn pi_waiting_on_background_runs_is_skipped_as_not_idle() {
+        let mut info = pi_agent("/tmp/pri/sessions/e.jsonl");
+        info.agent_status = AgentStatus::Waiting;
+        assert_eq!(initial_skip_reason(&info), Err("not_idle"));
+    }
+
+    // PRI-05 Pi without pi-subagents restarts without a background-work query.
+    #[test]
+    fn pi_with_only_explicit_extensions_restarts_with_them() {
+        let reporter = "/home/user/.pi/agent/extensions/trailboss-agent-state.ts";
+        let path = "/tmp/pri/sessions/f.jsonl";
+        assert_eq!(
+            pi_resume_argv(&pi_launch(&["--no-extensions", "-e", reporter]), path),
+            Ok(pi_launch(&[
+                "--no-extensions",
+                "-e",
+                reporter,
+                "--session",
+                path
+            ]))
+        );
+    }
+
+    // PRI-06 Busy, drafted, blocked or focused Pi agents are skipped (Core rows;
+    // queued follow-ups and drafts are reporter rows in the asset tests).
+    #[test]
+    fn working_blocked_or_focused_pi_agents_are_skipped() {
+        let idle = pi_agent("/tmp/pri/sessions/g.jsonl");
+        let mut working = idle.clone();
+        working.agent_status = AgentStatus::Working;
+        let mut blocked = idle.clone();
+        blocked.agent_status = AgentStatus::Blocked;
+        let mut focused = idle.clone();
+        focused.focused = true;
+        for (state, info, reason) in [
+            ("Working on a turn", working, "not_idle"),
+            ("reports Blocked", blocked, "not_idle"),
+            ("Idle in the focused pane", focused, "focused"),
+        ] {
+            assert_eq!(initial_skip_reason(&info), Err(reason), "{state}");
+        }
+    }
+
+    // PRI-02 An earlier session selector is replaced by the exact session path.
+    #[test]
+    fn earlier_pi_session_selectors_are_replaced_by_the_exact_session_path() {
+        let path = "/tmp/pri/sessions/b.jsonl";
+        for selector in [
+            &["--session", "/tmp/pri/sessions/b.jsonl"][..],
+            &["--continue"],
+            &["--resume"],
+            &["--session-id", "b0b0"],
+            &["--fork", "/tmp/pri/sessions/old.jsonl"],
+        ] {
+            assert_eq!(
+                pi_resume_argv(&pi_launch(selector), path).as_deref(),
+                Ok(&pi_launch(&["--session", path])[..]),
+                "{selector:?}"
+            );
+        }
+    }
+
+    /// Splits a scenario launch on spaces, keeping double-quoted words whole.
+    fn launch_words(launch: &str) -> Vec<String> {
+        let mut words = Vec::new();
+        let mut word = String::new();
+        let mut quoted = false;
+        for character in launch.chars() {
+            match character {
+                '"' => quoted = !quoted,
+                ' ' if !quoted => {
+                    words.extend((!word.is_empty()).then(|| std::mem::take(&mut word)))
+                }
+                _ => word.push(character),
+            }
+        }
+        words.extend((!word.is_empty()).then_some(word));
+        words
+    }
+
+    // PRI-12 Each allowed launch option is kept on restart.
+    #[test]
+    fn each_allowed_pi_launch_option_is_kept_on_restart() {
+        let path = "/tmp/pri/sessions/c.jsonl";
+        for option in [
+            "--provider anthropic --model claude-sonnet-4-5",
+            "--models sonnet,haiku",
+            "--thinking high",
+            "--system-prompt \"Be brief\"",
+            "--append-system-prompt /tmp/pri/extra.md",
+            "--tools read,bash",
+            "-t read",
+            "--exclude-tools write",
+            "-xt write",
+            "--no-tools",
+            "-nt",
+            "--no-builtin-tools",
+            "-nbt",
+            "--extension /tmp/pri/ext.ts",
+            "-e /tmp/pri/ext.ts",
+            "--no-extensions -e /tmp/pri/ext.ts",
+            "-ne -e /tmp/pri/ext.ts",
+            "--skill /tmp/pri/skill",
+            "--no-skills",
+            "-ns",
+            "--prompt-template /tmp/pri/prompts",
+            "--no-prompt-templates",
+            "-np",
+            "--theme /tmp/pri/theme.json",
+            "--use-theme dark",
+            "--no-themes",
+            "--session-dir /tmp/pri/sessions",
+            "--tui-mode regular",
+            "--no-mcp",
+            "--no-context-files",
+            "-nc",
+            "--approve",
+            "-a",
+            "--no-approve",
+            "-na",
+            "--offline",
+            "--verbose",
+            "--name review",
+            "-n review",
+        ] {
+            let words = launch_words(option);
+            let launch: Vec<&str> = words.iter().map(String::as_str).collect();
+            let mut expected = launch.clone();
+            expected.extend(["--session", path]);
+            assert_eq!(
+                pi_resume_argv(&pi_launch(&launch), path).as_deref(),
+                Ok(&pi_launch(&expected)[..]),
+                "{option}"
+            );
+        }
+        assert_eq!(
+            launch_words("--system-prompt \"Be brief\""),
+            argv(&["--system-prompt", "Be brief"])
+        );
+    }
+
+    // PRI-13 Core refuses to rebuild any unreplayable Pi launch.
+    #[test]
+    fn core_refuses_to_rebuild_any_unreplayable_pi_launch() {
+        for launch in [
+            "\"fix the failing test\"",
+            "@/tmp/pri/notes.md",
+            "-p",
+            "--print",
+            "--mode rpc",
+            "--export /tmp/pri/out.html",
+            "--no-session",
+            "--api-key sk-test-0000",
+            "--adhd",
+            "--preset fast",
+            "--frobnicate",
+        ] {
+            let words = launch_words(launch);
+            let words: Vec<&str> = words.iter().map(String::as_str).collect();
+            assert_eq!(
+                pi_resume_argv(&pi_launch(&words), "/tmp/pri/sessions/k.jsonl"),
+                Err("unsupported_original_launch_argument".into()),
+                "{launch}"
+            );
+        }
+    }
+
     #[test]
     fn resumes_the_exact_custom_path_while_preserving_original_launch_flags() {
         let path = "/custom sessions/owner's conversation.jsonl";
@@ -1076,7 +1497,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            shell_quote(path),
+            shell_quote(path, false),
             "'/custom sessions/owner'\\''s conversation.jsonl'"
         );
         assert_eq!(
@@ -1209,6 +1630,28 @@ mod tests {
             rx,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[test]
+    fn fish_quoting_keeps_backslashes_and_quotes_inside_one_argument() {
+        // Fish treats \\ and \' as escapes inside single quotes; POSIX shells do not.
+        let arg = "x\\'; touch /tmp/pwn #\\";
+        assert_eq!(shell_quote(arg, true), "'x\\\\\\'; touch /tmp/pwn #\\\\'");
+        assert_eq!(shell_quote(arg, false), "'x\\'\\''; touch /tmp/pwn #\\'");
+    }
+
+    #[test]
+    fn a_mixed_omp_and_pi_run_shows_the_restart_idle_summary_notice() {
+        let mut app = app();
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Trailboss;
+        app.handle_internal_event(AppEvent::AgentRestartIdleFinished {
+            restarted: 2,
+            skipped: 0,
+            failed: 0,
+        });
+        let toast = app.state.toast.as_ref().expect("summary notice shown");
+        assert_eq!(toast.title, "Restart idle agents");
+        assert_eq!(toast.context, "2 restarted, 0 skipped, 0 failed");
     }
 
     #[test]
@@ -1425,5 +1868,129 @@ mod admission_tests {
         std::fs::remove_file(alias).unwrap();
         drop(listener);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod pi_launch_tests {
+    use super::*;
+
+    /// Serves one reporter connection on this test process's Pi control
+    /// endpoint, answering `launch-info` with `argv`, and returns every
+    /// operation the reporter received.
+    fn with_fake_pi_reporter(
+        launch: &[&str],
+        session_path: &str,
+    ) -> (Result<Vec<String>, String>, Vec<String>) {
+        let _endpoint = own_pi_endpoint();
+        use std::io::{BufRead, Write};
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let uid = unsafe { libc::geteuid() };
+        let directory = std::path::PathBuf::from(format!("/tmp/trailboss-pi-control-{uid}"));
+        let _ = std::fs::DirBuilder::new().mode(0o700).create(&directory);
+        let endpoint = directory.join(format!("{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&endpoint);
+        let listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
+        std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let exec_path = std::fs::read_link("/proc/self/exe")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let mut argv = vec![exec_path.clone(), exec_path.clone()];
+        argv.extend(launch.iter().map(|arg| (*arg).to_owned()));
+        let server = std::thread::spawn(move || {
+            let mut operations = Vec::new();
+            listener.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                let Ok((stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                stream.set_nonblocking(false).unwrap();
+                let mut line = String::new();
+                std::io::BufReader::new(&stream)
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                operations.push(request["operation"].as_str().unwrap().to_owned());
+                let reply = serde_json::json!({ "status": "accepted", "reason": "", "result": { "argv": argv, "exec_path": exec_path } });
+                writeln!(&stream, "{reply}").unwrap();
+                break;
+            }
+            operations
+        });
+        let me = process_identity(std::process::id()).unwrap();
+        let target = ControlTarget {
+            kind: RestartAgentKind::Pi,
+            shell: me.clone(),
+            agent: me,
+            pane_identity: "w1:p2".into(),
+        };
+        let rebuilt = pi_original_argv(&target, session_path)
+            .and_then(|argv| pi_resume_argv(&argv, session_path).map(|argv| argv[2..].to_vec()));
+        let operations = server.join().unwrap();
+        let _ = std::fs::remove_file(&endpoint);
+        (rebuilt, operations)
+    }
+
+    // Both tests use this process's endpoint path; `cargo test` runs them in one process.
+    fn own_pi_endpoint() -> std::sync::MutexGuard<'static, ()> {
+        static ENDPOINT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ENDPOINT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    // PRI-07 Pi on an older reporter is skipped as unsupported.
+    #[test]
+    fn pi_reporter_without_a_control_socket_is_an_unsupported_endpoint() {
+        let _endpoint = own_pi_endpoint();
+        let uid = unsafe { libc::geteuid() };
+        let endpoint = format!(
+            "/tmp/trailboss-pi-control-{uid}/{}.sock",
+            std::process::id()
+        );
+        let _ = std::fs::remove_file(endpoint);
+        let me = process_identity(std::process::id()).unwrap();
+        let target = ControlTarget {
+            kind: RestartAgentKind::Pi,
+            shell: me.clone(),
+            agent: me,
+            pane_identity: "w1:p2".into(),
+        };
+        assert_eq!(
+            pi_original_argv(&target, "/tmp/pri/sessions/h.jsonl"),
+            Err("unsupported_control_endpoint".into())
+        );
+    }
+
+    // PRI-03 Pi launches that cannot be replayed safely are skipped before anything stops.
+    #[test]
+    fn unreplayable_pi_launches_are_refused_after_only_the_read_only_launch_query() {
+        let path = "/tmp/pri/sessions/d.jsonl";
+        for launch in [
+            &["fix the failing test"][..],
+            &["@/tmp/pri/notes.md"],
+            &["--api-key", "sk-test-0000"],
+            &["--adhd"],
+            &["--preset", "fast"],
+            &["--frobnicate"],
+        ] {
+            let (rebuilt, operations) = with_fake_pi_reporter(launch, path);
+            assert_eq!(
+                rebuilt,
+                Err("unsupported_original_launch_argument".into()),
+                "{launch:?}"
+            );
+            assert_eq!(operations, ["launch-info"], "{launch:?}");
+        }
+        let (rebuilt, operations) = with_fake_pi_reporter(&["--offline"], path);
+        assert_eq!(
+            rebuilt,
+            Ok(vec!["--offline".into(), "--session".into(), path.into()])
+        );
+        assert_eq!(operations, ["launch-info"]);
     }
 }

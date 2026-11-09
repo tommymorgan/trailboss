@@ -1449,3 +1449,233 @@ test("OMP reporter refuses a symlink endpoint without following or unlinking it"
     unlinkSync(ompControlEndpoint);
   }
 });
+
+const piControlEndpoint = `/tmp/trailboss-pi-control-${process.geteuid?.()}/${process.pid}.sock`;
+const piRequest = {
+  pid: process.pid,
+  pane_id: "test:p1",
+  session_path: "/tmp/pri/sessions/a.jsonl",
+};
+
+type PiRestartTestState = {
+  idle: boolean;
+  pending: boolean;
+  editor: string;
+  sessionPath: string;
+  shutdowns: number;
+  // pi-subagents: whether its `subagent` tool is loaded and how its status RPC answers.
+  subagentTool: boolean;
+  subagentStatus: "fleet" | "silent" | "no-fleet";
+  totalActive: number;
+  statusRequests: number;
+  beforeStatusReply?: () => void;
+};
+
+// A Pi extension API whose event bus answers pi-subagents status RPCs from `state`.
+function piRestartApi(harness: ReturnType<typeof createExtensionHarness>, state: PiRestartTestState) {
+  const listeners = new Map<string, Set<Handler>>();
+  return {
+    on: harness.pi.on,
+    getAllTools: () => [{ name: "read" }, ...(state.subagentTool ? [{ name: "subagent" }] : [])],
+    events: {
+      on(event: string, handler: Handler) {
+        harness.eventHandlers.set(event, handler);
+        const handlers = listeners.get(event) ?? new Set<Handler>();
+        handlers.add(handler);
+        listeners.set(event, handlers);
+        return () => handlers.delete(handler);
+      },
+      emit(event: string, data: { requestId?: string; method?: string }) {
+        if (event !== "subagents:rpc:v1:request" || data?.method !== "status") return;
+        state.statusRequests += 1;
+        if (state.subagentStatus === "silent") return;
+        const fleet = { version: 1, entries: [], totalActive: state.totalActive, omitted: 0 };
+        const reply = {
+          version: 1,
+          requestId: data.requestId,
+          success: true,
+          data: state.subagentStatus === "fleet" ? { text: "", fleet } : { text: "" },
+        };
+        queueMicrotask(() => {
+          state.beforeStatusReply?.();
+          for (const handler of listeners.get(`subagents:rpc:v1:reply:${data.requestId}`) ?? []) {
+            handler(reply, undefined);
+          }
+        });
+      },
+    },
+  };
+}
+
+async function startPiRestartHarness() {
+  const requests = await startRecordingServer("pi-restart-control");
+  const harness = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/trailboss-agent-state.ts");
+  const state: PiRestartTestState = {
+    idle: true,
+    pending: false,
+    editor: "",
+    sessionPath: piRequest.session_path,
+    shutdowns: 0,
+    subagentTool: true,
+    subagentStatus: "fleet",
+    totalActive: 0,
+    statusRequests: 0,
+  };
+  install(piRestartApi(harness, state));
+  const context = {
+    hasUI: true,
+    mode: "tui",
+    isIdle: () => state.idle,
+    hasPendingMessages: () => state.pending,
+    ui: { getEditorText: () => state.editor },
+    sessionManager: {
+      getSessionFile: () => state.sessionPath,
+      getSessionId: () => "a",
+    },
+    shutdown: () => { state.shutdowns += 1; },
+  };
+  const ready = Promise.withResolvers<void>();
+  net.createServer = (...args) => {
+    const endpointServer = Reflect.apply(createServer, net, args);
+    endpointServer.once("listening", ready.resolve);
+    endpointServer.once("error", ready.reject);
+    return endpointServer;
+  };
+  try {
+    await harness.handlers.get("session_start")?.({ reason: "startup" }, context);
+  } finally {
+    net.createServer = createServer;
+  }
+  await ready.promise;
+  return { ...harness, state, context, requests };
+}
+
+function piControlRequest(request: Record<string, unknown>): Promise<unknown> {
+  const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+  const client = net.createConnection(piControlEndpoint);
+  let response = "";
+  client.setEncoding("utf8");
+  client.setTimeout(3000, () => client.destroy(new Error("control-response-timeout")));
+  client.on("error", reject);
+  client.on("connect", () => client.write(`${JSON.stringify(request)}\n`));
+  client.on("data", (chunk) => { response += chunk; });
+  client.on("end", () => {
+    try {
+      resolve(JSON.parse(response));
+    } catch (error) {
+      reject(error);
+    }
+  });
+  return promise;
+}
+
+// PRI-01 Idle Pi restarts into its exact session in the same shell.
+test("Pi v11 reporter returns its own launch and restarts an idle session once", async () => {
+  const { state } = await startPiRestartHarness();
+  expect(lstatSync(piControlEndpoint).mode & 0o777).toBe(0o600);
+  expect(await piControlRequest({ ...piRequest, operation: "launch-info" })).toEqual({
+    status: "accepted",
+    reason: "",
+    result: { argv: process.argv, exec_path: process.execPath },
+  });
+  expect(state.shutdowns).toBe(0);
+  expect(await piControlRequest({ ...piRequest, operation: "restart-if-idle" })).toEqual({
+    status: "accepted",
+    reason: "shutdown-requested",
+  });
+  expect(state.statusRequests).toBe(1);
+  expect(await piControlRequest({ ...piRequest, operation: "restart-if-idle" })).toEqual({
+    status: "skipped",
+    reason: "restart-already-accepted",
+  });
+  expect(state.shutdowns).toBe(1);
+});
+
+// PRI-04 Pi with background work is skipped.
+const piBackgroundConditions: Array<{
+  condition: string;
+  change: (state: PiRestartTestState, eventHandlers: Map<string, Handler>) => void;
+  reason: string;
+  publishes?: string;
+}> = [
+  {
+    condition: "pi-subagents has raised herdr:busy for one running async run",
+    change: (_state, eventHandlers) => { eventHandlers.get("herdr:busy")?.({ active: true }, undefined); },
+    // Core sees the published waiting state and skips as not_idle first.
+    reason: "reporter-not-idle",
+    publishes: "waiting",
+  },
+  {
+    condition: "pi-subagents status reports fleet.totalActive 1 while herdr:busy is clear",
+    change: (state) => { state.totalActive = 1; },
+    reason: "async-jobs-running",
+  },
+  {
+    condition: "pi-subagents status does not reply within the deadline",
+    change: (state) => { state.subagentStatus = "silent"; },
+    reason: "async-state-unavailable",
+  },
+  {
+    condition: "pi-subagents status replies without a fleet field",
+    change: (state) => { state.subagentStatus = "no-fleet"; },
+    reason: "async-state-unavailable",
+  },
+];
+
+for (const row of piBackgroundConditions) {
+  test(`Pi restart is skipped when ${row.condition}`, async () => {
+    const { state, eventHandlers, requests } = await startPiRestartHarness();
+    row.change(state, eventHandlers);
+    if (row.publishes) {
+      await waitFor(() => requestStates(requests).at(-1) === row.publishes);
+    }
+    expect(await piControlRequest({ ...piRequest, operation: "restart-if-idle" })).toEqual({
+      status: "skipped",
+      reason: row.reason,
+    });
+    expect(state.shutdowns).toBe(0);
+  });
+}
+
+test("Pi restart rechecks every synchronous gate after the background-run query", async () => {
+  const { state } = await startPiRestartHarness();
+  state.beforeStatusReply = () => { state.editor = "typed while waiting"; };
+  expect(await piControlRequest({ ...piRequest, operation: "restart-if-idle" })).toEqual({
+    status: "skipped",
+    reason: "editor-not-empty",
+  });
+  expect(state.statusRequests).toBe(1);
+  expect(state.shutdowns).toBe(0);
+});
+
+// PRI-05 Pi without pi-subagents restarts without a background-work query.
+test("Pi restart without a subagent tool accepts without a pi-subagents status query", async () => {
+  const { state } = await startPiRestartHarness();
+  state.subagentTool = false;
+  expect(await piControlRequest({ ...piRequest, operation: "restart-if-idle" })).toEqual({
+    status: "accepted",
+    reason: "shutdown-requested",
+  });
+  expect(state.statusRequests).toBe(0);
+  expect(state.shutdowns).toBe(1);
+});
+
+// PRI-06 Busy, drafted, blocked or focused Pi agents are skipped (reporter rows;
+// Working, Blocked and focused are Core rows in restart_idle.rs).
+const piDraftedStates: Array<{ state: string; change: (state: PiRestartTestState) => void; reason: string }> = [
+  { state: "the Pi agent is Idle with the queued follow-up \"next\"", change: (state) => { state.pending = true; }, reason: "pending-messages" },
+  { state: "the Pi agent is Idle with \"draft\" in its editor", change: (state) => { state.editor = "draft"; }, reason: "editor-not-empty" },
+];
+
+for (const row of piDraftedStates) {
+  test(`Pi restart is skipped when ${row.state}`, async () => {
+    const { state } = await startPiRestartHarness();
+    row.change(state);
+    expect(await piControlRequest({ ...piRequest, operation: "restart-if-idle" })).toEqual({
+      status: "skipped",
+      reason: row.reason,
+    });
+    expect(state.shutdowns).toBe(0);
+  });
+}
