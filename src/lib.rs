@@ -629,7 +629,9 @@ impl Input {
         }
         match core.paste(text) {
             Some(_) => Ok(()),
-            None => self.type_text(text),
+            None if text.is_empty() => Ok(()),
+            // The server brackets the text only when the pane enabled DECSET 2004.
+            None => self.pane_event(ClientPaneInputEvent::Paste(text.to_owned())),
         }
     }
     /// Stage a native clipboard image for the focused pane, if it accepts pane input.
