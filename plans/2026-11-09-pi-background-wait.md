@@ -32,11 +32,11 @@ Scenario: SettledPiWithBackgroundRunsReportsWaiting
   When pi-subagents emits herdr:busy with active false
   Then Trailboss receives state "idle"
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/pi-agent-status.feature::PiOwnTurnOutranksBackgroundWait
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: PiOwnTurnOutranksBackgroundWait
   Given a Pi TUI root session is waiting on background runs
   When the parent agent starts a turn

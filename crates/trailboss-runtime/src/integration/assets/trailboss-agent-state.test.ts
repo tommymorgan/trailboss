@@ -728,6 +728,32 @@ test("Pi reports waiting while background runs are active and idle once they fin
   expect(requestStates(requests)).toEqual(["idle", "waiting", "idle"]);
 });
 
+test("Pi parent turn outranks background waiting", async () => {
+  const requests = await startRecordingServer("pi-background-turn");
+  const { eventHandlers, handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/trailboss-agent-state.ts");
+  install(pi);
+
+  let idle = true;
+  const context = piContext(() => idle);
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  eventHandlers.get("herdr:busy")?.({ active: true, label: "⏳ 1 subagent (worker)" }, context);
+  await waitFor(() => requestStates(requests).at(-1) === "waiting");
+
+  idle = false;
+  handlers.get("agent_start")?.({}, context);
+  await waitFor(() => requestStates(requests).at(-1) === "working");
+
+  idle = true;
+  handlers.get("agent_settled")?.({}, context);
+  await waitFor(() => requestStates(requests).at(-1) === "waiting");
+  expect(requestStateMessages(requests).slice(-3)).toEqual([
+    ["waiting", "awaiting background work"],
+    ["working", undefined],
+    ["waiting", "awaiting background work"],
+  ]);
+});
+
 test("Pi reports the session replacement source", async () => {
   const requests = await startRecordingServer("pi-session-source");
   const { handlers, pi } = createExtensionHarness();
