@@ -706,6 +706,28 @@ test("Pi settlement preserves explicit blocked-state precedence", async () => {
   expect(requestStates(requests)).toEqual(["idle", "working", "blocked", "idle"]);
 });
 
+test("Pi reports waiting while background runs are active and idle once they finish", async () => {
+  const requests = await startRecordingServer("pi-background-waiting");
+  const { eventHandlers, handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/trailboss-agent-state.ts");
+  install(pi);
+
+  const context = piContext(() => true);
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => requestStates(requests).length === 1);
+
+  eventHandlers.get("herdr:busy")?.({ active: true, label: "⏳ 1 subagent (worker)" }, context);
+  await waitFor(() => requestStates(requests).length === 2);
+  expect(requestStateMessages(requests)).toEqual([
+    ["idle", undefined],
+    ["waiting", "awaiting background work"],
+  ]);
+
+  eventHandlers.get("herdr:busy")?.({ active: false }, context);
+  await waitFor(() => requestStates(requests).length === 3);
+  expect(requestStates(requests)).toEqual(["idle", "waiting", "idle"]);
+});
+
 test("Pi reports the session replacement source", async () => {
   const requests = await startRecordingServer("pi-session-source");
   const { handlers, pi } = createExtensionHarness();
@@ -1081,6 +1103,15 @@ function requestState(request: unknown): unknown {
     return undefined;
   }
   return request.params.state;
+}
+
+function requestStateMessages(requests: unknown[]): unknown[][] {
+  return requests
+    .filter((request) => isRecord(request) && request.method === "pane.report_agent")
+    .map((request) => {
+      const params = isRecord(request) && isRecord(request.params) ? request.params : {};
+      return [params.state, params.message];
+    });
 }
 
 function requestSessionPath(request: unknown): unknown {

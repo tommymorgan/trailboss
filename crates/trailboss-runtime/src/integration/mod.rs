@@ -41,7 +41,7 @@ pub(crate) const EXPERIMENTAL_INTEGRATION_TARGET_LABELS: &[&str] = &["letta", "s
 
 const PI_EXTENSION_INSTALL_NAME: &str = "trailboss-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/trailboss-agent-state.ts");
-const PI_INTEGRATION_VERSION: u32 = 9;
+const PI_INTEGRATION_VERSION: u32 = 10;
 const OMP_EXTENSION_INSTALL_NAME: &str = "trailboss-omp-agent-state.ts";
 const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/trailboss-agent-state.ts");
 const OMP_INTEGRATION_VERSION: u32 = 18;

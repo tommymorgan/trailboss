@@ -20,11 +20,11 @@
 > Boundary verification: Bun asset suite (all Pi and OMP tests) and `cargo test -p trailboss-runtime integration::` pass at the exact head; the recording-socket tests observe the scenario requests below.
 > Build status: COMPLETE locally, bookmark pi-background-wait-slice-1-task-1. Not pushed; installed ~/.pi extension and daily Trailboss untouched. Every commit head passed the Bun asset suite (57→61 tests, 0 fail, ~1.8s each). Final head: `cargo test -p trailboss-runtime --lib integration::` 183 passed (0.72s); clippy all-targets -D warnings 0 findings; rustfmt clean. Each new test failed under a mutation of the behavior it names. One bounded basic review: 0 defects; one test-name overclaim fixed.
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/pi-agent-status.feature::SettledPiWithBackgroundRunsReportsWaiting
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: SettledPiWithBackgroundRunsReportsWaiting
   Given a Pi TUI root session has reported idle
   When pi-subagents emits herdr:busy with active true and label "⏳ 1 subagent (worker)"
