@@ -21,3 +21,8 @@ Feature: Pi agent status reporting
     Then Trailboss receives state "blocked" with message "approval"
     When herdr:blocked is cleared while the background runs remain
     Then Trailboss receives state "waiting" with message "awaiting background work"
+
+  Scenario: PiBackgroundLabelChangeSendsNoIdle
+    Given a Pi TUI root session is waiting on background runs
+    When pi-subagents emits herdr:busy active false and then active true in the same tick
+    Then Trailboss receives no further state report
