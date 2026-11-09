@@ -796,6 +796,21 @@ test("Pi background label change sends no transient idle", async () => {
   expect(requestStates(requests)).toHaveLength(stateCount);
 });
 
+test("Pi reload reports background runs restored before its session start", async () => {
+  const requests = await startRecordingServer("pi-background-reload");
+  const { eventHandlers, handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/trailboss-agent-state.ts");
+  install(pi);
+
+  const context = piContext(() => true);
+  eventHandlers.get("herdr:busy")?.({ active: true, label: "⏳ 1 subagent (worker)" }, context);
+  await handlers.get("session_start")?.({ reason: "reload" }, context);
+  await waitFor(() => requestStates(requests).length >= 1);
+  await Bun.sleep(25);
+
+  expect(requestStateMessages(requests)).toEqual([["waiting", "awaiting background work"]]);
+});
+
 test("Pi reports the session replacement source", async () => {
   const requests = await startRecordingServer("pi-session-source");
   const { handlers, pi } = createExtensionHarness();

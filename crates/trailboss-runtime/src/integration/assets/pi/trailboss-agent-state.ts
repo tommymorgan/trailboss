@@ -234,13 +234,11 @@ export default function (pi) {
 
   // pi-subagents raises herdr:busy while async runs remain after the parent turn.
   // A label change clears and re-raises in one tick; publishing once per microtask
-  // keeps that swap from reporting a transient idle.
+  // keeps that swap from reporting a transient idle. After a reload, pi-subagents
+  // can restore busy before this session_start runs; count it now, report it there.
   pi.events.on("herdr:busy", (data) => {
-    if (!rootSession) {
-      return;
-    }
     busyCount = data?.active ? busyCount + 1 : Math.max(0, busyCount - 1);
-    if (busyPublishPending) {
+    if (!rootSession || busyPublishPending) {
       return;
     }
     busyPublishPending = true;

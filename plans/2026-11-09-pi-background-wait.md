@@ -66,11 +66,11 @@ Scenario: PiBackgroundLabelChangeSendsNoIdle
   When pi-subagents emits herdr:busy active false and then active true in the same tick
   Then Trailboss receives no further state report
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/pi-agent-status.feature::PiReloadRestoresBackgroundWait
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: PiReloadRestoresBackgroundWait
   Given a Pi reload restores an active background run before the Trailboss extension's session_start runs
   When the Trailboss extension's session_start runs in TUI mode with the parent idle
