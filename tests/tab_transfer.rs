@@ -190,6 +190,43 @@ fn inherited_current_pane_cli_reaches_the_moved_shell_after_source_core_exit() {
 }
 
 #[test]
+fn owned_fixture_teardown_stops_the_routing_helper_its_transfer_started() {
+    let alpha = Core::new();
+    let beta = Core::launch_with_executable(
+        alpha.home.clone(),
+        format!("{}-beta", alpha.name),
+        support::executable(),
+        false,
+    );
+    let home = alpha.home.clone();
+    let source = alpha.request("workspace.create", json!({"cwd":alpha.home,"focus":true}));
+    let destination = beta.request("workspace.create", json!({"cwd":beta.home}));
+    alpha.request(
+        "tab.transfer",
+        json!({
+            "tab_id":source["tab"]["tab_id"],"destination_session":beta.name,
+            "workspace_id":destination["workspace"]["workspace_id"],"operation_id":"helper-teardown"
+        }),
+    );
+    let helper = support::transfer_helper(&home).expect("cross-session transfer starts a helper");
+    drop(beta);
+    drop(alpha);
+    // Proves the helper stopped running. An unreaped zombie counts as stopped:
+    // reaping belongs to its parent (the Core or init), not to this fixture.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while std::fs::read(format!("/proc/{helper}/stat"))
+        .is_ok_and(|stat| !String::from_utf8_lossy(&stat).contains(") Z "))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "routing helper {helper} outlived its fixture home {}",
+            home.display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
 fn a_missing_destination_is_identified_without_disturbing_live_split_tabs() {
     assert_rejected_transfer_preserves_live_work(|alpha, _, source, destination| {
         let missing = format!("{}-missing", alpha.name);
