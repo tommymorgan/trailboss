@@ -37,6 +37,31 @@ The CLI reads only `HERDR_PANE_ID` for caller identity; Core resolves its curren
 
 Visible-title ambiguity is evaluated only among commands executable for the caller, using the same eligibility checks as `command list`. Disabled, off-platform, invalid-confirmation and missing-context plugin actions cannot shadow an executable Core or plugin title. Exact qualified IDs still select their own action and return its actionable availability error; an unavailable title with no executable match also fails without starting a handler.
 
+Task 3.1 completes both picker adapters. Move to session… discovers compatible
+running destinations on a worker using the native discovery path and matches the
+shared `session / space` label exactly. Empty sessions retain the native
+`session / Create space…` choice; only that branch consumes a second answer,
+`New destination space name`. Recently closed tabs uses the native history
+formatter and restores the selected stable history ID, including outside a pane.
+Duplicate, missing and invalid labels list every current choice. Missing text
+shows its actual next question without enumerated choices. Blank names and
+surplus answers fail before any transfer or restore is dispatched.
+
+After discovery, named moves retain their original pane-bound `ui.command.run`
+request through Core re-admission. The original terminal generation/process fence
+is checked again and Core resolves the caller's current tab before dispatching
+`tab.transfer`; a retained shell can run another move after its first Core exits.
+
+Named move operation identity is `command-tab-move-<request.id>`. API callers must
+use a unique request ID for each intended move and can derive its recovery ID
+before submission. The CLI generates that ID before contacting Core, and preserves
+the operation ID in transport/decode errors even if the response is lost. Successful
+cross-session transfer responses include `result.operation_id` alongside the
+existing `result.transfer`. Query that operation's status after an uncertain result;
+do not resubmit the move. Named execution never retries or waits for reconciliation.
+Native picker rendering and branch controls remain unchanged. This is a local
+build, not deployment or independent PRD fidelity verification.
+
 ## Proposed interface
 
 Task-local engineering proposal implementing the accepted decisions, not additional standing policy:

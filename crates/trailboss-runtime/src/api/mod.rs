@@ -86,6 +86,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
     )
 }
 
+#[derive(Debug)]
 pub struct ApiRequestMessage {
     pub request: Request,
     pub respond_to: std::sync::mpsc::Sender<String>,

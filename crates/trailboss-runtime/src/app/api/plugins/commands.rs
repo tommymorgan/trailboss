@@ -632,24 +632,13 @@ pub(crate) fn projection(
             .closed_tabs
             .iter()
             .map(|entry| {
-                let timestamp = time::OffsetDateTime::from_unix_timestamp_nanos(
-                    i128::from(entry.closed_at) * 1_000_000,
+                let label = crate::core_actions::closed_tab_choice_label(
+                    &entry.label,
+                    &entry.workspace_label,
+                    entry.closed_at,
                 );
-                let closed = timestamp
-                    .map(|date| {
-                        format!(
-                            "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
-                            date.year(),
-                            u8::from(date.month()),
-                            date.day(),
-                            date.hour(),
-                            date.minute(),
-                            date.second()
-                        )
-                    })
-                    .unwrap_or_else(|_| "Unknown close time".to_owned());
                 row(
-                    &format!("{} · {} · {closed}", entry.label, entry.workspace_label),
+                    &label,
                     Some(&format!("tab.closed.restore:{}", entry.id)),
                     None,
                 )

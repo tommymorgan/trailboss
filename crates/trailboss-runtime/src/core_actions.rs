@@ -175,6 +175,8 @@ impl CoreAction {
             Self::New | Self::NewTab => Some("New tab name"),
             Self::RenameSpace => Some("Rename space"),
             Self::RenameTab => Some("Rename tab"),
+            Self::MoveToSession => Some("Move to session"),
+            Self::RecentlyClosedTabs => Some("Recently closed tabs"),
             _ => None,
         }
     }
@@ -183,8 +185,6 @@ impl CoreAction {
 impl CoreCommandDescriptor {
     pub fn runnable_by_name(&self) -> bool {
         self.target != CoreCommandTarget::ClientLocal
-            && self.action != CoreAction::MoveToSession
-            && self.interaction != CoreCommandInteraction::Picker
     }
 }
 
@@ -201,4 +201,75 @@ pub fn command_descriptor(
                 CoreFocusMode::Previous => "previous",
             }) == mode.as_deref()
     })
+}
+
+/// Identical destination wording on native and named-command surfaces.
+pub fn transfer_destination_label(session: &str, workspace: Option<&str>) -> String {
+    format!("{session} / {}", workspace.unwrap_or("Create space…"))
+}
+
+pub(crate) fn closed_tab_choice_label(label: &str, workspace: &str, closed_at: u64) -> String {
+    let closed = time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(closed_at) * 1_000_000)
+        .map(|date| {
+            format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+                date.year(),
+                u8::from(date.month()),
+                date.day(),
+                date.hour(),
+                date.minute(),
+                date.second(),
+            )
+        })
+        .unwrap_or_else(|_| "Unknown close time".to_owned());
+    format!("{label} · {workspace} · {closed}")
+}
+
+pub(crate) enum NamedCommandRun {
+    Error(crate::api::schema::ErrorBody),
+    DiscoverTransfer {
+        tab_id: String,
+        answers: Vec<String>,
+    },
+}
+
+impl From<crate::api::schema::ErrorBody> for NamedCommandRun {
+    fn from(error: crate::api::schema::ErrorBody) -> Self {
+        Self::Error(error)
+    }
+}
+
+pub(crate) fn select_command_choice(
+    question: &str,
+    answer: Option<&String>,
+    labels: &[String],
+) -> Result<usize, (&'static str, String)> {
+    let mut matches = labels
+        .iter()
+        .enumerate()
+        .filter(|(_, label)| answer == Some(label));
+    let first = matches.next().map(|(index, _)| index);
+    let duplicate = matches.next().is_some();
+    if let Some(index) = first.filter(|_| !duplicate) {
+        return Ok(index);
+    }
+    let code = if answer.is_none() {
+        "missing_answer"
+    } else if duplicate {
+        "ambiguous_choice"
+    } else {
+        "invalid_choice"
+    };
+    Err((
+        code,
+        format!(
+            "{question}: select one choice; valid choices: {}",
+            labels.join(", ")
+        ),
+    ))
+}
+
+/// A caller knows this identity before submitting a named move, even if its response is lost.
+pub fn named_transfer_operation_id(request_id: &str) -> String {
+    format!("command-tab-move-{request_id}")
 }

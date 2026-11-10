@@ -157,3 +157,82 @@ Scenario: ListPluginsWithArgumentsAndBypassConfirmation
   And each raw-tail command retains its declared argument hint
   When command run selects the confirmation-fragment action
   Then it starts without requesting a confirmation and immediately returns its plugin log ID
+
+Scenario: MoveTabToVisibleDestination
+  Given caller Planning's live shell is in alpha and compatible beta contains space Work
+  And command list exposes "Move to session…" with only its first choice-prompt hint
+  When command run "Move to session…" "beta / Work" is requested
+  Then the same tab is transferred through tab.transfer to beta's Work
+  And the CLI prints the existing transfer result or start acknowledgment with its operation identity
+  And the tab's shell and running agent are not restarted
+  And no native picker window is opened
+
+Scenario: RestoreClosedTabByVisibleLabel
+  Given Recently closed tabs lists "Planning · Work · 2026-11-09 14:00:00 UTC"
+  When command run "Recently closed tabs" uses that exact label outside a pane
+  Then tab.closed.restore receives the ID of that choice
+  And the CLI prints the existing restore result
+  And the restored tab has the same meaning and destination as selecting that row in the native picker
+
+Scenario Outline: RejectInvalidPickerLabels
+  Given <picker> has the same currently valid choices and visible labels as its native picker
+  When command run receives <selection>
+  Then it exits nonzero, lists all currently valid labels and changes no tab
+  And a missing answer identifies this picker's current selection question alongside its valid labels
+  Examples:
+    | picker | selection |
+    | Move to session… | omitted |
+    | Move to session… | no matching label |
+    | Move to session… | label matching two destination spaces |
+    | Recently closed tabs | omitted |
+    | Recently closed tabs | no matching label |
+    | Recently closed tabs | label matching two history entries |
+    | Recently closed tabs with empty history | any label |
+
+Scenario Outline: PickerUsesCurrentValidationAndErrors
+  Given a command-list choice was valid when discovered
+  When command run selects it after <change>
+  Then it returns the same current-choice validation or operation error as the native picker
+  And it does not fall back to another choice or automatically repeat a transfer
+  Examples:
+    | change |
+    | destination beta stops |
+    | beta is incompatible |
+    | destination workspace disappears |
+    | selected closed-tab entry is no longer available |
+    | transfer outcome is unresolved after dispatch |
+
+Scenario: CreateDestinationSpaceWithNextOrderedAnswer
+  Given caller Planning's live tab is in alpha and compatible running beta has no spaces
+  And beta / Create space… is a valid visible destination label in the native picker
+  When command run "Move to session…" "beta / Create space…" "Build" is requested
+  Then the first answer selects the create-space branch and the second supplies its New destination space name
+  And the existing tab.transfer operation creates Build in beta and moves Planning into it
+  And it prints the normal result or start acknowledgment with operation identity
+  And Planning's shell and running agent are not restarted
+
+Scenario: MissingFollowupShowsActualNextQuestion
+  Given compatible beta has no spaces and alpha contains caller Planning
+  When command run "Move to session…" "beta / Create space…" omits the next answer
+  Then it exits nonzero and shows the next palette question New destination space name
+  And it identifies a text answer as required with no enumerated valid choices for that text prompt
+  And no space is created and Planning remains in alpha unchanged
+
+Scenario Outline: RejectSurplusPickerAnswersOnSelectedBranch
+  Given alpha contains caller Planning and beta has the selected destination state
+  When command run receives "Move to session…" followed by <answers>
+  Then it exits nonzero with an extra-answer error before starting tab.transfer
+  And no destination space or tab is created or moved
+  Examples:
+    | answers |
+    | "beta / Work" "Build" |
+    | "beta / Create space…" "Build" "surplus" |
+
+Scenario: ListShowsOnlyFirstPromptHint
+  Given beta contains no spaces and a context-valid caller requests command list
+  Then Move to session… shows only its first destination-choice prompt hint
+  And it does not show New destination space name as an unconditional second argument
+  When command run "Move to session…" omits the first answer
+  Then it fails showing the destination-choice question and all current valid labels including beta / Create space…
+  When command run "Move to session…" "beta / Create space…" omits the second answer
+  Then it fails showing New destination space name rather than repeating the destination-choice question

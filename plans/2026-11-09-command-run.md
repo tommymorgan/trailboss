@@ -8,7 +8,8 @@
 > PRD coverage: plans/command-run.prd-coverage.md
 > Context: docs/command-run.md; CONTEXT.md
 > Source base: master@origin 6e8c692b
-> Readiness: Task 1.1 implemented locally; Tasks 2.1 and 3.1 remain unbuilt. No push, deployment or runtime activation is authorized.
+> Execution base: master@origin `5056d54a`, followed by `transfer-helper-rollback-race`; the planning research base above is retained as provenance.
+> Readiness: All 24 scenarios in Tasks 1.1, 2.1 and 3.1 implemented locally. Formal revision-17 review approved Tasks 2.1 and 3.1; the Task 1.1 argv finding and helper listener-ownership finding are repaired and await their independent re-review. Task bookmarks each contain one feature-level commit, as subsequently authorized. Exact-head boundary and final gates passed after restacking the repairs; no push, deployment, daily-runtime activation or implementation-fidelity verification is claimed.
 
 ## Slice 1: Run built-in commands from the caller's pane
 
@@ -272,11 +273,11 @@ Scenario: ListPluginsWithArgumentsAndBypassConfirmation
 > Shippable state: Complete same-label Move to session and Recently closed tabs adapters are exposed together, including ordered branching answers, missing/duplicate choices, current validation and errors. Empty destinations accept a second positional space-name answer. All answers are validated before dispatch; no selectable destination is silently dropped.
 > Boundary verification: At this exact head, use two owned Cores; move the caller's existing tab to beta / Work and restore an exact closed-tab label, proving caller process continuity and same results as existing handlers. Reject missing, duplicate, stale and surplus choices without fallback. Move into empty beta with answers "beta / Create space…" and "Build"; omit the second answer to observe the name prompt without mutation.
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::MoveTabToVisibleDestination
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: MoveTabToVisibleDestination
   Given caller Planning's live shell is in alpha and compatible beta contains space Work
   And command list exposes "Move to session…" with only its first choice-prompt hint
@@ -285,22 +286,22 @@ Scenario: MoveTabToVisibleDestination
   And the CLI prints the existing transfer result or start acknowledgment with its operation identity
   And the tab's shell and running agent are not restarted
   And no native picker window is opened
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::RestoreClosedTabByVisibleLabel
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: RestoreClosedTabByVisibleLabel
   Given Recently closed tabs lists "Planning · Work · 2026-11-09 14:00:00 UTC"
   When command run "Recently closed tabs" uses that exact label outside a pane
   Then tab.closed.restore receives the ID of that choice
   And the CLI prints the existing restore result
   And the restored tab has the same meaning and destination as selecting that row in the native picker
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::RejectInvalidPickerLabels
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: RejectInvalidPickerLabels
   Given <picker> has the same currently valid choices and visible labels as its native picker
   When command run receives <selection>
@@ -315,11 +316,11 @@ Scenario Outline: RejectInvalidPickerLabels
     | Recently closed tabs | no matching label |
     | Recently closed tabs | label matching two history entries |
     | Recently closed tabs with empty history | any label |
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::PickerUsesCurrentValidationAndErrors
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: PickerUsesCurrentValidationAndErrors
   Given a command-list choice was valid when discovered
   When command run selects it after <change>
@@ -332,11 +333,11 @@ Scenario Outline: PickerUsesCurrentValidationAndErrors
     | destination workspace disappears |
     | selected closed-tab entry is no longer available |
     | transfer outcome is unresolved after dispatch |
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::CreateDestinationSpaceWithNextOrderedAnswer
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: CreateDestinationSpaceWithNextOrderedAnswer
   Given caller Planning's live tab is in alpha and compatible running beta has no spaces
   And beta / Create space… is a valid visible destination label in the native picker
@@ -346,11 +347,11 @@ Scenario: CreateDestinationSpaceWithNextOrderedAnswer
   And it prints the normal result or start acknowledgment with operation identity
   And Planning's shell and running agent are not restarted
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::MissingFollowupShowsActualNextQuestion
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: MissingFollowupShowsActualNextQuestion
   Given compatible beta has no spaces and alpha contains caller Planning
   When command run "Move to session…" "beta / Create space…" omits the next answer
@@ -358,11 +359,11 @@ Scenario: MissingFollowupShowsActualNextQuestion
   And it identifies a text answer as required with no enumerated valid choices for that text prompt
   And no space is created and Planning remains in alpha unchanged
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::RejectSurplusPickerAnswersOnSelectedBranch
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: RejectSurplusPickerAnswersOnSelectedBranch
   Given alpha contains caller Planning and beta has the selected destination state
   When command run receives "Move to session…" followed by <answers>
@@ -373,11 +374,11 @@ Scenario Outline: RejectSurplusPickerAnswersOnSelectedBranch
     | "beta / Work" "Build" |
     | "beta / Create space…" "Build" "surplus" |
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::ListShowsOnlyFirstPromptHint
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: ListShowsOnlyFirstPromptHint
   Given beta contains no spaces and a context-valid caller requests command list
   Then Move to session… shows only its first destination-choice prompt hint
@@ -386,6 +387,95 @@ Scenario: ListShowsOnlyFirstPromptHint
   Then it fails showing the destination-choice question and all current valid labels including beta / Create space…
   When command run "Move to session…" "beta / Create space…" omits the second answer
   Then it fails showing New destination space name rather than repeating the destination-choice question
+
+#### Local build evidence for Task 3.1
+
+Each row has a scenario commit and an observed failing production mutation,
+followed by restored GREEN. Commands use
+`cargo test --test command_run <test-name> -- --exact`; exact test names are in
+`tests/command_run.rs`. Durations below are test runtime, not compilation.
+
+| Scenario | Initial test | GREEN | Mutation RED | Restored GREEN |
+|---|---:|---:|---:|---:|
+| MoveTabToVisibleDestination | RED 1.14s | 4.65s | 1.14s, discard selected workspace ID | 4.71s |
+| RestoreClosedTabByVisibleLabel | RED 0.73s | 0.80s | 0.74s, corrupt selected history ID | 0.80s |
+| RejectInvalidPickerLabels | RED 1.46s | 1.43s | 4.75s, remove uniqueness guard | 1.42s |
+| PickerUsesCurrentValidationAndErrors | inherited GREEN 1.53s | 1.53s | 1.15s, omit operation identity | 1.55s |
+| CreateDestinationSpaceWithNextOrderedAnswer | RED 1.20s | 4.70s | 4.74s, use first answer for name | 4.72s |
+| MissingFollowupShowsActualNextQuestion | RED 1.17s | 1.19s | 1.20s, repeat first question | 1.19s |
+| RejectSurplusPickerAnswersOnSelectedBranch | RED 4.75s | 1.13s | 4.65s, admit one extra answer | 1.12s |
+| ListShowsOnlyFirstPromptHint | inherited GREEN 1.18s | 1.18s | 1.19s, advertise branch-only name prompt | final focused layer |
+
+The current-validation and list-hint regressions were already satisfied by the
+earlier shared adapters; their initial runs were GREEN, not missing-behavior RED.
+The mutation failures above are real, but are not relabeled as initial TDD RED.
+The unresolved-outcome fixture denies operation-lock creation after discovery;
+the incompatible fixture changes only an owned Core's advertised protocol.
+These are bounded failure fixtures, not a new compatibility or fault campaign.
+
+The two successful destination tests additionally run the existing owned
+foreground OMP reporter fixture on Planning's PTY. They compare original shell
+and reporter `/proc` start/TTY identities, retain the terminal ID and agent
+session, and accept the original locator's lifecycle report after movement.
+Only fixture Cores, shells, reporters and per-home transfer helpers are used.
+No daily Core or actual user agent is attached or restarted.
+
+Focused final layer: `cargo test --test command_run -- --test-threads=1`
+passed 26/26 in 48.56s. Native history selection passed 1/1 in 4.46s;
+native empty-destination creation passed 1/1 in 5.16s. Strict focused Clippy
+(`cargo clippy --test command_run -- -D warnings`) passed with no warnings
+in 10.15s; `cargo fmt --all` completed. The generated protocol schema was
+updated with `TRAILBOSS_UPDATE_API_SCHEMA=1` and its current-artifact test
+passed 1/1 in 0.02s. No broad workspace gates or review were run here.
+
+Review fixes preserve the original pane-bound request through deferred discovery
+and re-admission; terminal generation/process checks remain intact and the current
+tab is re-resolved before dispatch. Three regressions cover a retained shell's
+second named move after its original Core exits, a successful response's operation
+identity, and a real committed move whose response is dropped by an owned proxy.
+The proxy observes one request and one persisted operation, with no automatic retry.
+All three were observed RED before the fixes and GREEN together in 17.08s.
+Mutations restoring premature request replacement, removing success identity, and
+removing recovery identity from CLI transport errors each failed their regression.
+The retained-shell witness waits for the owned original Core process to exit,
+not merely its stop acknowledgment. With that condition satisfied, the request
+replacement mutation fails specifically with `stale_terminal_route` / “forwarding
+requires an explicit terminal target” (5.74s). Lost-response recovery also queries
+the returned operation ID through `tab.transfer.status` and observes Committed.
+
+The combined fix includes the native-click fixture repair in
+`tests/support/action_producer.rs` and `tests/plugin_actions.rs`: generated owner
+command fragments are not proof that the real owner action row is ready. The
+fixture now waits for the owner/action/context-bound row and verifies the actual
+rendered hit. Its independently executed gated readiness mutation failed; the
+three restored focused regressions passed in 10.220s. Detailed peer receipt:
+`/tmp/trailboss-command-run-native-click-fix-evidence.json`. This is a fixture
+readiness repair, not a production native command change.
+
+Combined review-fix focused proof: command-run 28/28 passed in 61.06s;
+the three native producer/click regressions passed in 0.92s; strict focused
+Clippy for both test targets passed with zero warnings in 11.25s; formatting
+completed; generated API schema freshness passed 1/1 in 0.02s. These are local
+focused checks, not parent final gates, delivery, or independent fidelity.
+
+Formal review repairs preserve shell-decoded selector/answer text before global
+session/remote option extraction and consume one `--` separator. The two-owned-Core
+regression was RED before the fix and under separate boundary/separator mutations,
+then GREEN. The prerequisite helper now fences unresolved prior activation with a
+serialized Cancel preflight before source preparation. Its controlled concurrent
+adopter witness was RED before the fence and when only the fence was removed;
+the restored nine-test failure suite passed, including Stage EOF before helper death.
+
+Restacked boundary proof on 2026-11-09: Task 1.1 `7ef35664` passed 20/20
+command-run/native-owner integrations, bins, formatting and workspace strict Clippy.
+Task 2.1 `b82d1fd8` passed 113/113 integrations across eight binaries and the same
+build/style checks. Final code head `fcd5ad6e` passed bins (13.310s), formatting
+(2.517s), workspace strict Clippy (16.730s), library tests (3,785 passed, 13 skipped;
+21.352s wall), and the 20 affected integration targets (180 passed, 16 skipped;
+66.492s wall). Evidence: `/tmp/trailboss-command-run-review-repair-gates.json`.
+This subsequent amendment changes only this evidence/readiness text.
+
+
 
 ## Procedure pins
 
@@ -397,13 +487,16 @@ Scenario: ListShowsOnlyFirstPromptHint
 - Plan decomposition procedure: `01a14125-6821-73a7-895f-f9a9cefb0bdf`, revision 4.
 - PRD fidelity audit and planning learning: `01a14125-681c-7742-854c-95ec0619f326`, revision 3.
 - Plan build procedure: `01a14125-6812-7d36-9b62-f66b5b886e10`, revision 5.
+- Task build procedure: `01a14125-6815-7dbb-9d59-ea4c63ddd2b4`, revision 3.
+- Workflow block policy: `01a14125-6848-754f-a006-a18f046ae68d`, revision 2.
+- Review unit splitting procedure: `01a14125-6825-73e2-9382-1814779b894b`, revision 4.
 
 ## Planning evidence
 
-Scenarios specify only CLI/API-visible behavior. Technical contracts and rationale are in docs/command-run.md. Living files are deliberately not written until their implementation task; all metadata remains TODO/NO. No feature is claimed delivered or runtime-verified. Estimates use current catalog projection, native Core invoke, plugin dispatch and picker sizes; no applicable Trailboss LOC cap was found in the supplied scope, and Infilla limits do not apply. Build uses the pinned Plan build procedure, sequentially per task with exact-head boundary evidence; this planning assignment runs no product checks.
+Scenarios specify only CLI/API-visible behavior. Technical contracts and rationale are in docs/command-run.md. Living scenarios now reflect the locally implemented tasks; DONE/YES records build progress, not production delivery or independent fidelity. Estimates use the existing catalog projection, native Core invoke, plugin dispatch and picker sizes. Build remains sequential by task with exact-head boundary evidence; no push or deployment is authorized.
 
 ## Coverage and independent fidelity audit
 
 Source enumeration: Goal plus R1–R12, 13/13 source units mapped to 35 atomic rows. Ledger completeness: 35/35, 0 extraction misses. Covered rows with authored scenario pointers: 34/34. Dispositions: 34 covered, 1 out-of-scope (R7), 0 no-plan, 0 deferred, 0 deviations. R12 resolves the nested destination-name contradiction; no open product question remains.
 
-The subsequent independent audit pass applied the mandatory living-artifact existence gate, separately from authoring checks: `features/command-run.feature` is absent (exact-path lookup, 2026-11-09). Therefore 0/34 covered rows are implementation-fidelity verified, all 34 remain unverified/not built, and no adversarial built-scenario diff is allowed yet. No living Gherkin was written to manufacture eligibility. There are 0 prior-audit escapes, 0 benchmark gaps, 0 new extraction gaps and 0 proposed deviations; implementation divergence cannot be judged before build. Planned coverage is complete; implementation fidelity is not yet verified.
+The planning-time independent audit found no living artifact and therefore verified 0/34 covered rows. The subsequent local build has created `features/command-run.feature` and completed the plan's scenarios, but no new independent implementation-fidelity audit has run: all 34 covered rows remain fidelity-unverified and the PRD is not declared satisfied. Planning-time findings were 0 prior-audit escapes, 0 benchmark gaps, 0 extraction gaps and 0 proposed deviations. Build evidence does not replace an independent scenario-versus-source audit.

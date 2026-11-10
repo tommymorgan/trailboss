@@ -1,15 +1,16 @@
 use crate::{
     api::schema::{ErrorBody, Method, Request, UiCommandRunParams},
     app::App,
-    core_actions::CoreAction,
+    core_actions::{CoreAction, NamedCommandRun},
 };
 use serde_json::json;
 
-fn error(code: &str, message: &str) -> ErrorBody {
+fn error(code: &str, message: &str) -> NamedCommandRun {
     ErrorBody {
         code: code.into(),
         message: message.into(),
     }
+    .into()
 }
 
 impl App {
@@ -22,7 +23,12 @@ impl App {
             Ok(method) => {
                 self.handle_api_request_after_internal_events_drained(Request { id, method })
             }
-            Err(error) => super::responses::encode_error_body(id, error),
+            Err(NamedCommandRun::DiscoverTransfer { .. }) => super::responses::encode_error(
+                id,
+                "server_unavailable",
+                "destination discovery requires a running Core",
+            ),
+            Err(NamedCommandRun::Error(error)) => super::responses::encode_error_body(id, error),
         }
     }
 
@@ -31,7 +37,7 @@ impl App {
     pub(crate) fn resolve_ui_command_run(
         &mut self,
         params: &UiCommandRunParams,
-    ) -> Result<Method, ErrorBody> {
+    ) -> Result<Method, NamedCommandRun> {
         let catalog = self.ui_command_catalog()?;
         // A stable identity disambiguates titles, including a title that happens
         // to spell another command's ID. Only title-only lookup is ambiguous.
@@ -126,11 +132,43 @@ impl App {
                 )
             })?;
         let action = descriptor.action;
+        if action == CoreAction::RecentlyClosedTabs {
+            let labels: Vec<_> = self
+                .state
+                .closed_tabs
+                .iter()
+                .map(|entry| {
+                    crate::core_actions::closed_tab_choice_label(
+                        &entry.label,
+                        &entry.workspace_label,
+                        entry.closed_at,
+                    )
+                })
+                .collect();
+            let index = crate::core_actions::select_command_choice(
+                "Recently closed tabs",
+                params.answers.first(),
+                &labels,
+            )
+            .map_err(|(code, message)| error(code, &message))?;
+            if params.answers.len() > 1 {
+                return Err(error(
+                    "extra_answer",
+                    "extra answer: command accepts no further answers",
+                ));
+            }
+            let entry = &self.state.closed_tabs[index];
+            return Ok(Method::TabClosedRestore(
+                crate::api::schema::ClosedTabRestoreParams {
+                    closed_tab_id: entry.id.clone(),
+                },
+            ));
+        }
         let expected = usize::from(matches!(
             descriptor.interaction,
             crate::core_actions::CoreCommandInteraction::Name { .. }
         ));
-        if params.answers.len() > expected {
+        if action != CoreAction::MoveToSession && params.answers.len() > expected {
             return Err(error(
                 "extra_answer",
                 "extra answer: command accepts no further answers",
@@ -155,6 +193,12 @@ impl App {
             tab = self.state.workspaces[ws]
                 .find_tab_index_for_pane(pane)
                 .and_then(|t| self.public_tab_id(ws, t));
+        }
+        if action == CoreAction::MoveToSession {
+            return Err(NamedCommandRun::DiscoverTransfer {
+                tab_id: tab.expect("caller tab resolved"),
+                answers: params.answers.clone(),
+            });
         }
         let (method, values) = crate::core_actions::prepare_named(
             action,

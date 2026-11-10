@@ -301,6 +301,7 @@ impl App {
             return encode_success(
                 id,
                 ResponseResult::TabTransfer {
+                    operation_id: params.operation_id,
                     transfer: TabTransferResult {
                         changed,
                         previous_tab_id,
@@ -430,7 +431,13 @@ impl App {
                 },
             });
         }
-        encode_success(id, ResponseResult::TabTransfer { transfer })
+        encode_success(
+            id,
+            ResponseResult::TabTransfer {
+                transfer,
+                operation_id: params.operation_id,
+            },
+        )
     }
 
     pub(super) fn handle_tab_close(&mut self, id: String, target: TabTarget) -> String {

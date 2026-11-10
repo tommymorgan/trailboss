@@ -70,13 +70,34 @@ pub(super) fn run(args: &[String]) -> std::io::Result<i32> {
         eprintln!("usage: trailboss command run <title-or-id> [answer ...]");
         return Ok(2);
     };
+    let id = format!(
+        "cli:command:{}:{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(std::io::Error::other)?
+            .as_nanos(),
+    );
+    let recovery = matches!(
+        command.as_str(),
+        "Move to session…" | "host:move-to-session"
+    )
+    .then(|| crate::core_actions::named_transfer_operation_id(&id));
     let response = super::send_request(&Request {
-        id: "cli:command".into(),
+        id,
         method: Method::UiCommandRun(UiCommandRunParams {
             command: command.clone(),
             answers: positional.cloned().collect(),
             pane_id: std::env::var("HERDR_PANE_ID").ok(),
         }),
+    }).map_err(|error| {
+        if let Some(operation) = recovery {
+            std::io::Error::new(error.kind(), format!(
+                "{error}; operation_id={operation}; outcome may be unresolved; query the same operation ID, do not repeat the move",
+            ))
+        } else {
+            error
+        }
     })?;
     super::print_response(&response)
 }

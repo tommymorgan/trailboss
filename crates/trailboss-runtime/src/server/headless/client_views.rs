@@ -856,7 +856,7 @@ impl HeadlessServer {
         viewers: Option<Vec<u64>>,
         result: &Option<api::schema::ResponseResult>,
     ) {
-        if let Some(api::schema::ResponseResult::TabTransfer { transfer }) = result {
+        if let Some(api::schema::ResponseResult::TabTransfer { transfer, .. }) = result {
             if transfer.changed {
                 #[cfg(unix)]
                 if let Some(popup) = self

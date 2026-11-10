@@ -18,9 +18,14 @@ pub struct CommandInvokeParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UiCommandRunParams {
     /// Exact visible title or stable Core / qualified plugin identity.
+    /// Named moves use operation_id = "command-tab-move-" + the enclosing request ID;
+    /// use a unique request ID per intended move and retain it for outcome recovery.
     pub command: String,
-    /// Ordered shell-decoded answers. Raw-tail plugins consume at most one
-    /// unchanged string; omission differs from an explicit empty answer.
+    /// Ordered shell-decoded answers. Pickers match exact current visible labels;
+    /// Move to session consumes a second space-name answer only for Create space….
+    /// Missing answers report the next question; surplus answers fail before dispatch.
+    /// Raw-tail plugins consume at most one unchanged string; omission differs
+    /// from an explicit empty answer.
     #[serde(default)]
     pub answers: Vec<String>,
     /// Caller pane locator resolved by Core; never replaced by global focus.

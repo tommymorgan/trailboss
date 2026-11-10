@@ -534,6 +534,11 @@ pub(crate) enum ServerEvent {
         boot_id: String,
         data: String,
     },
+    #[cfg(unix)]
+    NamedTransferPrepared {
+        message: Box<crate::api::ApiRequestMessage>,
+        params: crate::api::schema::TabTransferParams,
+    },
     /// A client-owned shell invoked one endpoint operation through this connection.
     ClientShellEndpointRequest {
         client_id: u64,

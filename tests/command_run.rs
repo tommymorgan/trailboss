@@ -4,6 +4,19 @@ use serde_json::json;
 use std::process::{Command, Output};
 
 fn cli(core: &support::Core, args: &[&str], pane: Option<&str>) -> Output {
+    cli_command(core, args, pane).output().unwrap()
+}
+
+fn cli_command(core: &support::Core, args: &[&str], pane: Option<&str>) -> Command {
+    cli_command_target(core, args, pane, true)
+}
+
+fn cli_command_target(
+    core: &support::Core,
+    args: &[&str],
+    pane: Option<&str>,
+    explicit: bool,
+) -> Command {
     let mut command = Command::new(support::executable());
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("HERDR_") || key == "TRAILBOSS_SESSION" {
@@ -16,11 +29,770 @@ fn cli(core: &support::Core, args: &[&str], pane: Option<&str>) -> Output {
     if let Some(pane) = pane {
         command.env("HERDR_PANE_ID", pane);
     }
+    if explicit {
+        command.args(["--session", &core.name]);
+    }
+    command.args(args);
     command
-        .args(["--session", &core.name])
-        .args(args)
-        .output()
+}
+
+#[test]
+fn retained_shell_can_run_second_named_move_after_original_core_exit() {
+    let mut alpha = owned_alpha();
+    let beta = support::Core::launch_with_executable(
+        alpha.home.clone(),
+        "beta".into(),
+        support::executable(),
+        false,
+    );
+    let (caller, _) = fixture(&alpha);
+    let pane = caller["root_pane"]["pane_id"].as_str().unwrap();
+    alpha.request(
+        "pane.send_text",
+        json!({"pane_id":pane,"text":"printf '%s\\n' \"$$\" > retained-shell.pid\n"}),
+    );
+    let pid = wait_file(&alpha.home.join("retained-shell.pid"))
+        .trim()
+        .to_owned();
+    let identity = process_identity(&pid);
+    let terminal =
+        alpha.request("pane.get", json!({"pane_id":pane}))["pane"]["terminal_id"].clone();
+    beta.request("workspace.create", json!({"label":"Work","cwd":beta.home}));
+    let first = cli(
+        &alpha,
+        &["command", "run", "Move to session…", "beta / Work"],
+        Some(pane),
+    );
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    alpha.request("server.stop", json!({}));
+    assert!(
+        alpha.child.wait().unwrap().success(),
+        "original Core must have exited before the second named move"
+    );
+    let gamma = support::Core::launch_with_executable(
+        alpha.home.clone(),
+        "gamma".into(),
+        support::executable(),
+        false,
+    );
+    gamma.request("workspace.create", json!({"label":"Work","cwd":gamma.home}));
+    let snapshot = beta.request("session.snapshot", json!({}));
+    let moved = snapshot["snapshot"]["panes"]
+        .as_array()
         .unwrap()
+        .iter()
+        .find(|p| p["terminal_id"] == terminal)
+        .unwrap()["pane_id"]
+        .clone();
+    beta.request("pane.send_text", json!({"pane_id":moved,"text":format!(
+        "'{}' command run 'Move to session…' 'gamma / Work' > retained-move.json 2> retained-move.err; printf '%s\\n' \"$?\" > retained-move.done\n",
+        support::executable().display(),
+    )}));
+    assert_eq!(
+        wait_file(&alpha.home.join("retained-move.done")).trim(),
+        "0",
+        "{}",
+        std::fs::read_to_string(alpha.home.join("retained-move.err")).unwrap()
+    );
+    assert!(
+        gamma.request("session.snapshot", json!({}))["snapshot"]["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tab| tab["label"] == "Planning")
+    );
+    assert_eq!(process_identity(&pid), identity);
+}
+
+#[test]
+fn lost_named_move_response_keeps_caller_recoverable_operation_identity() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    let alpha = owned_alpha();
+    let beta = support::Core::launch_with_executable(
+        alpha.home.clone(),
+        "beta".into(),
+        support::executable(),
+        false,
+    );
+    let (caller, _) = fixture(&alpha);
+    let pane = caller["root_pane"]["pane_id"].as_str().unwrap();
+    beta.request("workspace.create", json!({"label":"Work","cwd":beta.home}));
+    let proxy_path = alpha.home.join("lost-response.sock");
+    let listener = UnixListener::bind(&proxy_path).unwrap();
+    let source = alpha.home.join("trailboss/sessions/alpha/trailboss.sock");
+    let proxy = std::thread::spawn(move || loop {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        let mut client = BufReader::new(stream);
+        let mut request = String::new();
+        client.read_line(&mut request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&request).unwrap();
+        let mut upstream = BufReader::new(UnixStream::connect(&source).unwrap());
+        upstream
+            .get_mut()
+            .set_read_timeout(Some(std::time::Duration::from_secs(15)))
+            .unwrap();
+        upstream.get_mut().write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        upstream.read_line(&mut response).unwrap();
+        if parsed["method"] == "ui.command.run" {
+            return (
+                parsed,
+                serde_json::from_str::<serde_json::Value>(&response).unwrap(),
+            );
+        }
+        client.get_mut().write_all(response.as_bytes()).unwrap();
+    });
+    let output = cli_command_target(
+        &alpha,
+        &["command", "run", "Move to session…", "beta / Work"],
+        Some(pane),
+        false,
+    )
+    .env("HERDR_SOCKET_PATH", &proxy_path)
+    .output()
+    .unwrap();
+    let (request, committed) = proxy.join().unwrap();
+    assert!(committed["result"]["transfer"].is_object(), "{committed}");
+    assert!(!output.status.success());
+    let operation = committed["result"]["operation_id"]
+        .as_str()
+        .expect("success exposes recovery identity");
+    assert_eq!(
+        operation,
+        format!("command-tab-move-{}", request["id"].as_str().unwrap())
+    );
+    let recovered = alpha.request("tab.transfer.status", json!({"operation_id":operation}));
+    assert_eq!(recovered["status"]["operation_id"], operation);
+    assert_eq!(recovered["status"]["phase"], "committed");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(operation),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        operation_files(&alpha),
+        2,
+        "one operation JSON and one lock; no hidden retry"
+    );
+}
+
+fn owned_alpha() -> support::Core {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let home = std::env::temp_dir().join(format!("command-run-boundary-{stamp}"));
+    std::fs::create_dir(&home).unwrap();
+    support::Core::launch(home, "alpha".into())
+}
+
+fn process_identity(pid: &str) -> String {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let fields: Vec<_> = stat
+        .rsplit_once(") ")
+        .unwrap()
+        .1
+        .split_whitespace()
+        .collect();
+    assert_ne!(fields[0], "Z");
+    format!(
+        "{}:{}:{:?}",
+        fields[19],
+        fields[4],
+        std::fs::read_link(format!("/proc/{pid}/fd/0")).unwrap()
+    )
+}
+
+fn start_owned_reporter(core: &support::Core, pane: &str) -> (String, Vec<(String, String)>) {
+    let terminal = core.request("pane.get", json!({"pane_id":pane}))["pane"]["terminal_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    core.request(
+        "pane.send_text",
+        json!({"pane_id":pane,"text":format!(
+            "HERDR_AGENT=omp python3 '{}/tests/support/stale_pane_reporter.py' '{}'\n",
+            env!("CARGO_MANIFEST_DIR"), core.home.display(),
+        )}),
+    );
+    let ready: serde_json::Value =
+        serde_json::from_str(&wait_file(&core.home.join("reporter.ready"))).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while core.request("pane.get", json!({"pane_id":pane}))["pane"]["agent"] != "omp" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "owned foreground reporter was not detected"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    std::fs::write(core.home.join("working.go"), "").unwrap();
+    let replies: serde_json::Value =
+        serde_json::from_str(&wait_file(&core.home.join("working.reply"))).unwrap();
+    assert!(
+        replies
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|reply| reply["result"]["type"] == "ok"),
+        "{replies}"
+    );
+    let identities = ["shell_pid", "pid"]
+        .iter()
+        .map(|field| {
+            let pid = ready[field].as_u64().unwrap().to_string();
+            let identity = process_identity(&pid);
+            (pid, identity)
+        })
+        .collect();
+    (terminal, identities)
+}
+
+fn assert_owned_reporter_continues(core: &support::Core, proof: (String, Vec<(String, String)>)) {
+    let snapshot = core.request("session.snapshot", json!({}));
+    let pane = snapshot["snapshot"]["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pane| pane["terminal_id"] == proof.0)
+        .unwrap()["pane_id"]
+        .clone();
+    std::fs::write(core.home.join("idle.go"), "").unwrap();
+    let replies: serde_json::Value =
+        serde_json::from_str(&wait_file(&core.home.join("idle.reply"))).unwrap();
+    assert!(
+        replies
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|reply| reply["result"]["type"] == "ok"),
+        "{replies}"
+    );
+    assert_eq!(
+        core.request("pane.get", json!({"pane_id":pane}))["pane"]["agent_session"]["value"],
+        "retained-session"
+    );
+    for (pid, identity) in proof.1 {
+        assert_eq!(process_identity(&pid), identity, "process/PTY restarted");
+    }
+    std::fs::write(core.home.join("reporter.done"), "").unwrap();
+}
+
+#[test]
+fn list_shows_only_first_picker_prompt_hint() {
+    let alpha = support::Core::new();
+    let beta = support::Core::launch_with_executable(
+        alpha.home.clone(),
+        "beta".into(),
+        support::executable(),
+        false,
+    );
+    for workspace in beta.request("workspace.list", json!({}))["workspaces"]
+        .as_array()
+        .unwrap()
+    {
+        beta.request(
+            "workspace.close",
+            json!({"workspace_id":workspace["workspace_id"]}),
+        );
+    }
+    let (caller, _) = fixture(&alpha);
+    let pane = caller["root_pane"]["pane_id"].as_str().unwrap();
+    let list = alpha.request("ui.command.list", json!({"pane_id":pane}));
+    let command = list["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["title"] == "Move to session…")
+        .unwrap();
+    assert_eq!(command["argument_hint"], "Move to session");
+    assert!(!list.to_string().contains("New destination space name"));
+    let output = cli(&alpha, &["command", "list"], Some(pane));
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("Move to session…") && text.contains("Move to session"));
+    assert!(!text.contains("New destination space name"));
+    let first = cli(&alpha, &["command", "run", "Move to session…"], Some(pane));
+    let first = String::from_utf8_lossy(&first.stderr);
+    assert!(
+        first.contains("Move to session") && first.contains("beta / Create space…"),
+        "{first}"
+    );
+    assert!(!first.contains("New destination space name"));
+    let second = cli(
+        &alpha,
+        &["command", "run", "Move to session…", "beta / Create space…"],
+        Some(pane),
+    );
+    let second = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        second.contains("New destination space name") && !second.contains("valid choices"),
+        "{second}"
+    );
+    assert_eq!(operation_files(&alpha), 0);
+}
+
+#[test]
+fn reject_surplus_picker_answers_on_selected_branch() {
+    let alpha = support::Core::new();
+    let beta = support::Core::launch_with_executable(
+        alpha.home.clone(),
+        "beta".into(),
+        support::executable(),
+        false,
+    );
+    let (caller, _) = fixture(&alpha);
+    let pane = caller["root_pane"]["pane_id"].as_str().unwrap();
+    beta.request("workspace.create", json!({"label":"Work","cwd":beta.home}));
+    for create in [false, true] {
+        if create {
+            for workspace in beta.request("workspace.list", json!({}))["workspaces"]
+                .as_array()
+                .unwrap()
+            {
+                beta.request(
+                    "workspace.close",
+                    json!({"workspace_id":workspace["workspace_id"]}),
+                );
+            }
+        }
+        let before = alpha.request("session.snapshot", json!({}));
+        let beta_before = beta.request("session.snapshot", json!({}));
+        let args = if create {
+            vec![
+                "command",
+                "run",
+                "Move to session…",
+                "beta / Create space…",
+                "Build",
+                "surplus",
+            ]
+        } else {
+            vec!["command", "run", "Move to session…", "beta / Work", "Build"]
+        };
+        let output = cli(&alpha, &args, Some(pane));
+        assert!(
+            !output.status.success(),
+            "surplus answer started a transfer"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("extra_answer"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(operation_files(&alpha), 0);
+        assert_eq!(
+            before["snapshot"]["tabs"],
+            alpha.request("session.snapshot", json!({}))["snapshot"]["tabs"]
+        );
+        let beta_after = beta.request("session.snapshot", json!({}));
+        assert_eq!(
+            beta_before["snapshot"]["workspaces"],
+            beta_after["snapshot"]["workspaces"]
+        );
+        assert_eq!(
+            beta_before["snapshot"]["tabs"],
+            beta_after["snapshot"]["tabs"]
+        );
+    }
+    alpha.request("tab.close", json!({"tab_id":caller["tab"]["tab_id"]}));
+    let history = alpha.request("tab.closed.list", json!({}));
+    let label = history_label(&history["closed_tabs"][0]);
+    let output = cli(
+        &alpha,
+        &["command", "run", "Recently closed tabs", &label, "surplus"],
+        None,
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("extra_answer"));
+    assert_eq!(history, alpha.request("tab.closed.list", json!({})));
+}
+
+fn operation_files(core: &support::Core) -> usize {
+    std::fs::read_dir(core.home.join("trailboss/tab-transfer"))
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("op-")
+        })
+        .count()
+}
+
+#[test]
+fn missing_followup_shows_actual_next_question_without_dispatch() {
+    let alpha = support::Core::new();
+    let beta = support::Core::launch_with_executable(
+        alpha.home.clone(),
+        "beta".into(),
+        support::executable(),
+        false,
+    );
+    for workspace in beta.request("workspace.list", json!({}))["workspaces"]
+        .as_array()
+        .unwrap()
+    {
+        beta.request(
+            "workspace.close",
+            json!({"workspace_id":workspace["workspace_id"]}),
+        );
+    }
+    let (caller, _) = fixture(&alpha);
+    let pane = caller["root_pane"]["pane_id"].as_str().unwrap();
+    let before = alpha.request("session.snapshot", json!({}));
+    for answer in [None, Some(""), Some("   ")] {
+        let mut args = vec!["command", "run", "Move to session…", "beta / Create space…"];
+        args.extend(answer);
+        let output = cli(&alpha, &args, Some(pane));
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(
+            diagnostic.contains("New destination space name"),
+            "{diagnostic}"
+        );
+        assert!(!diagnostic.contains("valid choices"), "{diagnostic}");
+        if answer.is_none() {
+            assert!(diagnostic.contains("text answer required"), "{diagnostic}");
+        }
+        assert_eq!(
+            operation_files(&alpha),
+            0,
+            "validation must precede tab.transfer"
+        );
+        assert!(beta.request("workspace.list", json!({}))["workspaces"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            before["snapshot"]["tabs"],
+            alpha.request("session.snapshot", json!({}))["snapshot"]["tabs"]
+        );
+    }
+}
+
+#[test]
+fn create_destination_space_with_next_ordered_answer() {
+    let alpha = owned_alpha();
+    let beta = support::Core::launch_with_executable(
+        alpha.home.clone(),
+        "beta".into(),
+        support::executable(),
+        false,
+    );
+    for workspace in beta.request("workspace.list", json!({}))["workspaces"]
+        .as_array()
+        .unwrap()
+    {
+        beta.request(
+            "workspace.close",
+            json!({"workspace_id":workspace["workspace_id"]}),
+        );
+    }
+    let (caller, _) = fixture(&alpha);
+    let pane = caller["root_pane"]["pane_id"].as_str().unwrap();
+    let continuity = start_owned_reporter(&alpha, pane);
+    let output = cli(
+        &alpha,
+        &[
+            "command",
+            "run",
+            "Move to session…",
+            "beta / Create space…",
+            "Build",
+        ],
+        Some(pane),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let snapshot = beta.request("session.snapshot", json!({}));
+    assert_eq!(
+        snapshot["snapshot"]["workspaces"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(snapshot["snapshot"]["workspaces"][0]["label"], "Build");
+    assert_eq!(snapshot["snapshot"]["tabs"][0]["label"], "Planning");
+    assert_eq!(snapshot["snapshot"]["panes"].as_array().unwrap().len(), 1);
+    assert_owned_reporter_continues(&beta, continuity);
+}
+
+#[test]
+fn picker_uses_current_validation_and_preserves_unresolved_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let alpha = support::Core::new();
+    let beta = support::Core::launch_with_executable(
+        alpha.home.clone(),
+        "beta".into(),
+        support::executable(),
+        false,
+    );
+    let (caller, _) = fixture(&alpha);
+    let pane = caller["root_pane"]["pane_id"].as_str().unwrap();
+    let work = beta.request("workspace.create", json!({"label":"Work","cwd":beta.home}));
+    beta.request(
+        "workspace.close",
+        json!({"workspace_id":work["workspace"]["workspace_id"]}),
+    );
+    let rejected = cli(
+        &alpha,
+        &["command", "run", "Move to session…", "beta / Work"],
+        Some(pane),
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("invalid_choice"));
+    beta.request("workspace.create", json!({"label":"Work","cwd":beta.home}));
+    let root = alpha.home.join("trailboss/tab-transfer");
+    let registration = root.join("core-62657461.json");
+    let original = std::fs::read(&registration).unwrap();
+    let mut incompatible: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    incompatible["version"] = json!(0);
+    std::fs::write(&registration, incompatible.to_string()).unwrap();
+    let rejected = cli(
+        &alpha,
+        &["command", "run", "Move to session…", "beta / Work"],
+        Some(pane),
+    );
+    std::fs::write(&registration, original).unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("invalid_choice"));
+    // Discovery remains readable; creating the operation lock fails after dispatch.
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let unresolved = cli(
+        &alpha,
+        &["command", "run", "Move to session…", "beta / Work"],
+        Some(pane),
+    );
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let diagnostic = String::from_utf8_lossy(&unresolved.stderr);
+    assert!(!unresolved.status.success());
+    assert!(
+        diagnostic.contains("transfer_unresolved")
+            && diagnostic.contains("operation_id=command-tab-move-")
+            && diagnostic.contains("do not repeat the move"),
+        "{diagnostic}"
+    );
+    assert_eq!(
+        diagnostic.matches("operation_id=").count(),
+        1,
+        "{diagnostic}"
+    );
+    drop(beta);
+    let stopped = cli(
+        &alpha,
+        &["command", "run", "Move to session…", "beta / Work"],
+        Some(pane),
+    );
+    assert!(!stopped.status.success());
+    assert!(String::from_utf8_lossy(&stopped.stderr).contains("invalid_choice"));
+    alpha.request("tab.close", json!({"tab_id":caller["tab"]["tab_id"]}));
+    let history = alpha.request("tab.closed.list", json!({}));
+    let entry = &history["closed_tabs"][0];
+    let label = history_label(entry);
+    alpha.request(
+        "tab.closed.restore",
+        json!({"closed_tab_id":entry["closed_tab_id"]}),
+    );
+    let stale = cli(
+        &alpha,
+        &["command", "run", "Recently closed tabs", &label],
+        None,
+    );
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("invalid_choice"));
+}
+
+#[test]
+fn reject_invalid_picker_labels_without_mutation() {
+    let alpha = support::Core::new();
+    let beta = support::Core::launch_with_executable(
+        alpha.home.clone(),
+        "beta".into(),
+        support::executable(),
+        false,
+    );
+    let (caller, _) = fixture(&alpha);
+    let pane = caller["root_pane"]["pane_id"].as_str().unwrap();
+    for label in ["Work", "Work", "Other"] {
+        beta.request("workspace.create", json!({"label":label,"cwd":beta.home}));
+    }
+    let before = alpha.request("session.snapshot", json!({}));
+    for answer in [None, Some("missing"), Some("beta / Work")] {
+        let mut args = vec!["command", "run", "Move to session…"];
+        args.extend(answer);
+        let output = cli(&alpha, &args, Some(pane));
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{diagnostic}");
+        assert!(
+            diagnostic.contains("Move to session")
+                && diagnostic.contains("beta / Work")
+                && diagnostic.contains("beta / Other"),
+            "{diagnostic}"
+        );
+    }
+    assert_eq!(
+        before["snapshot"]["tabs"],
+        alpha.request("session.snapshot", json!({}))["snapshot"]["tabs"]
+    );
+    for answer in [None, Some("missing")] {
+        let mut args = vec!["command", "run", "Recently closed tabs"];
+        args.extend(answer);
+        let output = cli(&alpha, &args, None);
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(
+            diagnostic.contains("Recently closed tabs") && diagnostic.contains("valid choices"),
+            "{diagnostic}"
+        );
+    }
+    // Keep the workspace alive while closing same-named rows within one second.
+    for _ in 0..3 {
+        let tab = alpha.request("tab.create", json!({"workspace_id":caller["workspace"]["workspace_id"],"label":"Duplicate","cwd":alpha.home}));
+        alpha.request("tab.close", json!({"tab_id":tab["tab"]["tab_id"]}));
+    }
+    let history = alpha.request("tab.closed.list", json!({}));
+    let labels: Vec<_> = history["closed_tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(history_label)
+        .collect();
+    let duplicate = labels
+        .iter()
+        .find(|label| labels.iter().filter(|other| *other == *label).count() > 1)
+        .expect("three fast closures share a visible second");
+    for answer in [None, Some("missing"), Some(duplicate.as_str())] {
+        let mut args = vec!["command", "run", "Recently closed tabs"];
+        args.extend(answer);
+        let output = cli(&alpha, &args, None);
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{diagnostic}");
+        assert!(
+            diagnostic.contains("Recently closed tabs")
+                && labels.iter().all(|label| diagnostic.contains(label)),
+            "{diagnostic}"
+        );
+    }
+    assert_eq!(history, alpha.request("tab.closed.list", json!({})));
+}
+
+fn history_label(entry: &serde_json::Value) -> String {
+    let seconds = entry["closed_at"].as_u64().unwrap() / 1000;
+    let date = Command::new("date")
+        .env_clear()
+        .args(["-u", "-d", &format!("@{seconds}"), "+%Y-%m-%d %H:%M:%S UTC"])
+        .output()
+        .unwrap();
+    assert!(date.status.success());
+    format!(
+        "{} · {} · {}",
+        entry["label"].as_str().unwrap(),
+        entry["workspace_label"].as_str().unwrap(),
+        String::from_utf8(date.stdout).unwrap().trim()
+    )
+}
+
+#[test]
+fn restore_closed_tab_by_visible_label_outside_pane() {
+    let core = support::Core::new();
+    let (caller, decoy) = fixture(&core);
+    core.request("tab.close", json!({"tab_id":caller["tab"]["tab_id"]}));
+    core.request("tab.close", json!({"tab_id":decoy["tab"]["tab_id"]}));
+    let history = core.request("tab.closed.list", json!({}));
+    let entry = history["closed_tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["label"] == "Planning")
+        .unwrap();
+    let label = history_label(entry);
+    let output = cli(
+        &core,
+        &["command", "run", "Recently closed tabs", &label],
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let snapshot = core.request("session.snapshot", json!({}));
+    assert!(snapshot["snapshot"]["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |workspace| workspace["workspace_id"] == result["result"]["workspace_id"]
+                && workspace["label"] == "Work"
+        ));
+    let remaining = core.request("tab.closed.list", json!({}));
+    assert_eq!(remaining["closed_tabs"].as_array().unwrap().len(), 1);
+    assert_eq!(remaining["closed_tabs"][0]["label"], "Other");
+}
+
+#[test]
+fn move_tab_to_visible_destination() {
+    let alpha = owned_alpha();
+    let beta = support::Core::launch_with_executable(
+        alpha.home.clone(),
+        "beta".into(),
+        support::executable(),
+        false,
+    );
+    let (caller, _) = fixture(&alpha);
+    beta.request("workspace.create", json!({"label":"Work","cwd":beta.home}));
+    let pane = caller["root_pane"]["pane_id"].as_str().unwrap();
+    let continuity = start_owned_reporter(&alpha, pane);
+    let output = cli(
+        &alpha,
+        &["command", "run", "Move to session…", "beta / Work"],
+        Some(pane),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        result["result"]["operation_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("command-tab-move-"))
+            && result["result"]["transfer"].is_object(),
+        "{result}"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let snapshot = beta.request("session.snapshot", json!({}));
+        if snapshot["snapshot"]["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tab| tab["label"] == "Planning")
+        {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{snapshot}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let snapshot = alpha.request("session.snapshot", json!({}));
+    assert!(!snapshot["snapshot"]["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tab| tab["label"] == "Planning"));
+    assert_owned_reporter_continues(&beta, continuity);
 }
 
 #[test]
@@ -481,6 +1253,8 @@ fn list_runnable_core_commands_and_hints() {
         ("Close tab", "host:close-tab"),
         ("Focus tab", "host:focus"),
         ("Restart idle agents", "host:restart-idle-agents"),
+        ("Move to session…", "host:move-to-session"),
+        ("Recently closed tabs", "host:recently-closed-tabs"),
     ] {
         assert!(text.contains(title) && text.contains(id), "{text}");
     }
@@ -493,14 +1267,8 @@ fn list_runnable_core_commands_and_hints() {
         assert!(text.contains(hint), "{text}");
     }
     let list = core.request("ui.command.list", json!({"pane_id":pane}));
-    assert_eq!(list["commands"].as_array().unwrap().len(), 8);
-    for title in [
-        "Move to session…",
-        "Recently closed tabs",
-        "Previous tab",
-        "Detach from session",
-        "Switch session",
-    ] {
+    assert_eq!(list["commands"].as_array().unwrap().len(), 10);
+    for title in ["Previous tab", "Detach from session", "Switch session"] {
         assert!(!text.contains(title), "{text}");
     }
     let outside = core.request("ui.command.list", json!({}));
@@ -510,7 +1278,10 @@ fn list_runnable_core_commands_and_hints() {
         .iter()
         .map(|c| c["title"].as_str().unwrap())
         .collect();
-    assert_eq!(titles, ["New space", "Restart idle agents"]);
+    assert_eq!(
+        titles,
+        ["New space", "Restart idle agents", "Recently closed tabs"]
+    );
     let outside_cli = cli(&core, &["command", "list"], None);
     assert!(outside_cli.status.success());
     assert!(!String::from_utf8_lossy(&outside_cli.stdout).contains("Rename tab"));
@@ -882,13 +1653,7 @@ fn list_plugins_with_arguments_and_bypass_confirmation() {
     ] {
         assert!(text.contains(value), "{text}");
     }
-    for value in [
-        "Broken confirmation",
-        "Move to session",
-        "Recently closed tabs",
-    ] {
-        assert!(!text.contains(value), "{text}");
-    }
+    assert!(!text.contains("Broken confirmation"), "{text}");
     let outside = cli(&core, &["command", "list"], None);
     let outside = String::from_utf8(outside.stdout).unwrap();
     assert!(!outside.contains("omp: clear"), "{outside}");

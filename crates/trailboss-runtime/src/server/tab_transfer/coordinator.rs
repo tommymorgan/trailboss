@@ -194,6 +194,7 @@ pub(crate) fn begin_transfer(source: CoreRegistration, message: crate::api::ApiR
             }
             Ok(crate::api::schema::ResponseResult::TabTransfer {
                 transfer: status.transfer.ok_or_else(storage::denied)?,
+                operation_id: Some(operation_id.clone()),
             })
         })();
         let response = match result {

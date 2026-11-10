@@ -1894,6 +1894,10 @@ impl HeadlessServer {
                 self.finish_tab_transfer_destinations(client_id, boot_id, data);
                 false
             }
+            #[cfg(unix)]
+            ServerEvent::NamedTransferPrepared { message, params } => {
+                self.handle_prepared_named_transfer(*message, false, false, Some(params))
+            }
             ServerEvent::ClientConnected {
                 client_id,
                 cols,
@@ -2992,9 +2996,24 @@ impl HeadlessServer {
 
     fn handle_api_request_with_shutdown_check_inner(
         &mut self,
+        msg: api::ApiRequestMessage,
+        skip_default_workspace_for_request: bool,
+        client_local: bool,
+    ) -> bool {
+        self.handle_prepared_named_transfer(
+            msg,
+            skip_default_workspace_for_request,
+            client_local,
+            None,
+        )
+    }
+
+    fn handle_prepared_named_transfer(
+        &mut self,
         mut msg: api::ApiRequestMessage,
         skip_default_workspace_for_request: bool,
         client_local: bool,
+        prepared_transfer: Option<api::schema::TabTransferParams>,
     ) -> bool {
         if self.shutting_down || self.host_shutdown_requested() {
             // During shutdown, respond with server_unavailable.
@@ -3033,7 +3052,21 @@ impl HeadlessServer {
         if let api::schema::Method::UiCommandRun(params) = &msg.request.method {
             match self.app.resolve_ui_command_run(params) {
                 Ok(method) => msg.request.method = method,
-                Err(error) => {
+                Err(crate::core_actions::NamedCommandRun::DiscoverTransfer { tab_id, answers }) => {
+                    if let Some(mut prepared) = prepared_transfer {
+                        // Admission above still sees the original pane-bound request;
+                        // resolve its current tab only after the generation/process fence.
+                        prepared.tab_id = tab_id;
+                        msg.request.method = api::schema::Method::TabTransfer(prepared);
+                    } else {
+                        #[cfg(unix)]
+                        self.discover_named_transfer(msg, tab_id, answers);
+                        #[cfg(not(unix))]
+                        Self::reject_api_request_for_shutdown(msg);
+                        return false;
+                    }
+                }
+                Err(crate::core_actions::NamedCommandRun::Error(error)) => {
                     let response = serde_json::to_string(&api::schema::ErrorResponse {
                         id: msg.request.id,
                         error,

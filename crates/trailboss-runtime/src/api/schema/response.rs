@@ -106,6 +106,9 @@ pub enum ResponseResult {
     },
     TabTransfer {
         transfer: TabTransferResult,
+        /// Cross-session operation identity, also recoverable from a named request's ID.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
     },
     TabTransferStatus {
         status: super::tabs::TabTransferStatus,

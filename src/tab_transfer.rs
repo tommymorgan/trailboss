@@ -186,13 +186,9 @@ impl Picker {
             self.destinations = reply.destinations;
             let mut children = vec![label("Move to session")];
             for (index, destination) in self.destinations.iter().enumerate() {
-                let title = format!(
-                    "{} / {}",
-                    destination.session,
-                    destination
-                        .workspace_label
-                        .as_deref()
-                        .unwrap_or("Create space…")
+                let title = trailboss_runtime::core_actions::transfer_destination_label(
+                    &destination.session,
+                    destination.workspace_label.as_deref(),
                 );
                 let mut choice = row(title, &format!("{SELECT}{index}"));
                 if destination.workspace_id.is_none() {
