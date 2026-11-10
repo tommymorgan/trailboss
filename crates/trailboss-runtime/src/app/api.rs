@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 mod agent_control;
 mod agent_view;
 mod agents;
+mod command_run;
 mod env;
 mod integrations;
 mod layouts;
@@ -1369,8 +1370,11 @@ impl App {
             Method::PluginDisable(params) => {
                 return self.handle_plugin_disable(request.id, params);
             }
-            Method::UiCommandList(_) => {
-                return self.handle_ui_command_list(request.id);
+            Method::UiCommandList(params) => {
+                return self.handle_ui_command_list(request.id, params);
+            }
+            Method::UiCommandRun(params) => {
+                return self.handle_ui_command_run(request.id, params);
             }
             Method::PluginActionList(params) => {
                 return self.handle_plugin_action_list(request.id, params);

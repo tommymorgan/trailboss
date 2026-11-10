@@ -26,16 +26,56 @@ use super::super::responses::{encode_error, encode_success};
 use super::{manifest, plugin_manifest_available};
 
 impl App {
-    pub(in crate::app) fn handle_ui_command_list(&mut self, id: String) -> String {
-        if let Err(error) = self.refresh_installed_plugins() {
-            return encode_error(id, "plugin_registry_load_failed", error.to_string());
-        }
+    pub(crate) fn ui_command_catalog(
+        &mut self,
+    ) -> Result<Vec<UiCommandInfo>, crate::api::schema::ErrorBody> {
+        self.refresh_installed_plugins()
+            .map_err(|error| crate::api::schema::ErrorBody {
+                code: "plugin_registry_load_failed".into(),
+                message: error.to_string(),
+            })?;
         let ordinary =
             super::sidebar_ui_rows(&self.state.installed_plugins, &self.state.plugin_ui_dynamic);
-        let (commands, _) = match projection(&self.state, ordinary, false, false) {
-            Ok(publication) => publication,
-            Err(error) => return encode_error(id, "ui_command_projection_failed", error),
+        projection(&self.state, ordinary, true, true)
+            .map(|(commands, _)| commands)
+            .map_err(|message| crate::api::schema::ErrorBody {
+                code: "ui_command_projection_failed".into(),
+                message,
+            })
+    }
+    pub(in crate::app) fn handle_ui_command_list(
+        &mut self,
+        id: String,
+        params: crate::api::schema::UiCommandListParams,
+    ) -> String {
+        let has_context = if let Some(locator) = params.pane_id.as_deref() {
+            if self.parse_pane_id(locator).is_none() {
+                return encode_error(
+                    id,
+                    "pane_not_found",
+                    format!("Trailboss pane is unavailable: {locator}"),
+                );
+            }
+            true
+        } else {
+            false
         };
+        let mut commands = match self.ui_command_catalog() {
+            Ok(commands) => commands,
+            Err(error) => return super::super::responses::encode_error_body(id, error),
+        };
+        commands.retain_mut(|command| {
+            let Some(descriptor) = crate::core_actions::command_descriptor(&command.key) else {
+                return false;
+            };
+            if !descriptor.runnable_by_name()
+                || (!has_context && descriptor.target != CoreCommandTarget::Global)
+            {
+                return false;
+            }
+            command.argument_hint = descriptor.action.name_prompt().map(str::to_owned);
+            true
+        });
         encode_success(
             id,
             ResponseResult::UiCommandList {
@@ -181,11 +221,13 @@ impl io::Write for FrameJson {
 
 fn bounded_publication(
     boot_id: &str,
+    commands: Vec<UiCommandInfo>,
     rows: Vec<EndpointPluginUiItem>,
-) -> Result<Vec<EndpointPluginUiItem>, String> {
+) -> Result<(Vec<UiCommandInfo>, Vec<EndpointPluginUiItem>), String> {
     // Reserve the largest existing revision encoding, so the same complete
     // publication fits every client's current paired snapshot/UI revision.
     let publication = EndpointPluginUi {
+        commands,
         boot_id: boot_id.to_owned(),
         revision: u64::MAX,
         ui: rows,
@@ -206,7 +248,7 @@ fn bounded_publication(
         }
         .to_string());
     }
-    Ok(publication.ui)
+    Ok((publication.commands, publication.ui))
 }
 
 fn retain_supported_node(node: &mut Node, switch_fragment: &str, unsupported_action: &str) -> bool {
@@ -573,5 +615,5 @@ pub(crate) fn projection(
     drop(ordinary_ids);
     let mut rows = ordinary;
     rows.extend(generated);
-    Ok((commands, bounded_publication(&state.command_boot_id, rows)?))
+    bounded_publication(&state.command_boot_id, commands, rows)
 }

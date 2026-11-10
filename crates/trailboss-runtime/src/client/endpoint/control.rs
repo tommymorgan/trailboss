@@ -190,6 +190,7 @@ mod tests {
                     role: "status-working".into(),
                 }],
             }],
+            &[],
         )
         .unwrap();
         let crate::protocol::ServerMessage::EndpointControl { kind, data } = message else {

@@ -4787,6 +4787,41 @@
           ],
           "type": "string"
         },
+        "UiCommandListParams": {
+          "properties": {
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "UiCommandRunParams": {
+          "properties": {
+            "answers": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "command": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        },
         "WorkspaceCloseParams": {
           "properties": {
             "close_group": {
@@ -6853,7 +6888,23 @@
               "type": "string"
             },
             "params": {
-              "$ref": "#/schemas/request/$defs/EmptyParams"
+              "$ref": "#/schemas/request/$defs/UiCommandListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "ui.command.run",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/UiCommandRunParams"
             }
           },
           "required": [

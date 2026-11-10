@@ -128,3 +128,77 @@ core_actions! {
     Create => "host:create" [],
     Cancel => "host:cancel" [],
 }
+
+/// Named palette preparation shared by native submission and the API adapter.
+/// Labels are validated for blankness, never normalized.
+pub fn prepare_named(
+    action: CoreAction,
+    workspace: Option<&str>,
+    tab: Option<&str>,
+    answer: Option<&str>,
+) -> Result<(&'static str, serde_json::Value), (&'static str, &'static str)> {
+    use serde_json::json;
+    let prompt = action.name_prompt();
+    if let Some(prompt) = prompt {
+        let Some(name) = answer else {
+            return Err(("missing_answer", prompt));
+        };
+        if name.trim().is_empty() {
+            return Err(("invalid_name", "invalid name: enter a nonblank name"));
+        }
+    }
+    Ok(match action {
+        CoreAction::NewSpace => ("workspace.create", json!({"label":answer,"focus":true})),
+        CoreAction::New | CoreAction::NewTab => match workspace {
+            Some(workspace) => (
+                "tab.create",
+                json!({"workspace_id":workspace,"label":answer,"focus":true}),
+            ),
+            None => ("workspace.create", json!({"label":answer,"focus":true})),
+        },
+        CoreAction::RenameSpace => (
+            "workspace.rename",
+            json!({"workspace_id":workspace,"label":answer}),
+        ),
+        CoreAction::RenameTab => ("tab.rename", json!({"tab_id":tab,"label":answer})),
+        CoreAction::CloseTab => ("tab.close", json!({"tab_id":tab})),
+        CoreAction::Focus => ("tab.focus", json!({"tab_id":tab})),
+        CoreAction::RestartIdleAgents => ("agent.restart_idle", json!({})),
+        _ => return Err(("command_not_found", "command not found")),
+    })
+}
+
+impl CoreAction {
+    pub fn name_prompt(self) -> Option<&'static str> {
+        match self {
+            Self::NewSpace => Some("New space name"),
+            Self::New | Self::NewTab => Some("New tab name"),
+            Self::RenameSpace => Some("Rename space"),
+            Self::RenameTab => Some("Rename tab"),
+            _ => None,
+        }
+    }
+}
+
+impl CoreCommandDescriptor {
+    pub fn runnable_by_name(&self) -> bool {
+        self.target != CoreCommandTarget::ClientLocal
+            && self.action != CoreAction::MoveToSession
+            && self.interaction != CoreCommandInteraction::Picker
+    }
+}
+
+pub fn command_descriptor(
+    key: &crate::api::schema::UiCommandKey,
+) -> Option<&'static CoreCommandDescriptor> {
+    let crate::api::schema::UiCommandKey::Core { action_id, mode } = key else {
+        return None;
+    };
+    CORE_COMMANDS.iter().find(|descriptor| {
+        descriptor.action.id() == action_id
+            && descriptor.focus_mode.map(|focus| match focus {
+                CoreFocusMode::Targeted => "targeted",
+                CoreFocusMode::Previous => "previous",
+            }) == mode.as_deref()
+    })
+}

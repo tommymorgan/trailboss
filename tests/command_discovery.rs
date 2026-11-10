@@ -1,3 +1,5 @@
+#[path = "support/native_commands.rs"]
+mod native_commands;
 #[path = "support/restart.rs"]
 mod restart;
 mod support;
@@ -142,7 +144,7 @@ fn dedicated_palette_hides_targetless_operations_and_this_clients_unavailable_pr
             }),
         );
     }
-    let catalog = core.request("ui.command.list", json!({}));
+    let catalog = native_commands::catalog(&core);
     let command = |action: &str, mode: Option<&str>| {
         let mut key = json!({"kind":"core","action_id":action});
         if let Some(mode) = mode {
@@ -714,7 +716,7 @@ for line in sys.stdin:
             true,
         );
         let key = json!({"kind":"plugin","plugin_id":"fixture.execution-owner","action_id":"route-probe"});
-        let catalog = core.request("ui.command.list", json!({}));
+        let catalog = native_commands::catalog(&core);
         let command = catalog["commands"]
             .as_array()
             .unwrap()
@@ -978,7 +980,7 @@ fn selected_blue_refresh_use_invokes_only_its_owner_once_on_captured_target() {
             "path":concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/sidebar-menus"),"enabled":true
         }),
     );
-    let catalog = core.request("ui.command.list", json!({}));
+    let catalog = native_commands::catalog(&core);
     let mut locators = Vec::new();
     for owner in ["fixture.red", "fixture.blue"] {
         let key = json!({"kind":"plugin","plugin_id":owner,"action_id":"refresh"});
@@ -1330,7 +1332,7 @@ fn dedicated_palette_omits_core_known_unavailable_actions_without_disabled_rows(
         let candidate =
             json!({"kind":"plugin","plugin_id":"fixture.availability","action_id":"candidate"});
         let eligible = json!({"kind":"plugin","plugin_id":"fixture.availability-control","action_id":"control"});
-        let initial = core.request("ui.command.list", json!({}));
+        let initial = native_commands::catalog(&core);
         let old_locator = initial["commands"]
             .as_array()
             .unwrap()
@@ -1367,7 +1369,7 @@ fn dedicated_palette_omits_core_known_unavailable_actions_without_disabled_rows(
         }
         // This real API refresh establishes Core's authoritative availability
         // before the dedicated consumer starts. No open selection is exercised.
-        let current = core.request("ui.command.list", json!({}));
+        let current = native_commands::catalog(&core);
         let commands = current["commands"].as_array().unwrap();
         assert!(
             !commands.iter().any(|command| command["key"] == candidate),
@@ -1595,7 +1597,7 @@ fn palette_consumer_retains_independent_catalog_authorities_and_targets() {
     // inferred from the palette rows whose completeness this witness tests.
     let deadline = Instant::now() + Duration::from_secs(8);
     let catalog = loop {
-        let catalog = core.request("ui.command.list", json!({}));
+        let catalog = native_commands::catalog(&core);
         if client.declarations.as_ref().is_some_and(|declarations| {
             catalog["commands"]
                 .as_array()
@@ -2363,7 +2365,7 @@ fn palette_discovery_finds_and_runs_independent_inventory_without_sidebar_focus(
         let mut owners = core.attach();
         let deadline = Instant::now() + Duration::from_secs(8);
         loop {
-            let catalog = core.request("ui.command.list", json!({}));
+            let catalog = native_commands::catalog(&core);
             if owners.declarations.as_ref().is_some_and(|declarations| {
                 catalog["commands"]
                     .as_array()
@@ -2437,7 +2439,7 @@ fn palette_discovery_finds_and_runs_independent_inventory_without_sidebar_focus(
             }
             assert!(Instant::now() < deadline, "default palette never published");
         }
-        let catalog = core.request("ui.command.list", json!({}));
+        let catalog = native_commands::catalog(&core);
         let key = if owner == "trailboss.core" {
             let mut key = json!({"kind":"core","action_id":action});
             if let Some(mode) = mode {
@@ -2663,7 +2665,7 @@ fn reserved_core_action_collision_is_discoverable_but_cannot_detach_through_plug
     )
     .unwrap();
     core.request("plugin.link", json!({"path":owner,"enabled":true}));
-    let catalog = core.request("ui.command.list", json!({}));
+    let catalog = native_commands::catalog(&core);
     let command = catalog["commands"]
         .as_array()
         .unwrap()
@@ -2762,7 +2764,7 @@ fn consume_command_catalog(change: CatalogChange) {
     core.request("plugin.link", json!({"path":owner,"enabled":true}));
     if matches!(change, CatalogChange::AddAction) {
         let key = json!({"kind":"plugin","plugin_id":"demo.owner","action_id":"record-target"});
-        let before = core.request("ui.command.list", json!({}));
+        let before = native_commands::catalog(&core);
         assert!(!before["commands"]
             .as_array()
             .unwrap()
@@ -2771,7 +2773,7 @@ fn consume_command_catalog(change: CatalogChange) {
         // Only the ordinary manifest changes. No link, enable, registration,
         // consumer rewrite or action-specific publication call follows it.
         std::fs::write(owner.join("trailboss-plugin.toml"), &complete_manifest).unwrap();
-        let refreshed = core.request("ui.command.list", json!({}));
+        let refreshed = native_commands::catalog(&core);
         let published: Vec<_> = refreshed["commands"]
             .as_array()
             .unwrap()
@@ -2789,7 +2791,7 @@ fn consume_command_catalog(change: CatalogChange) {
             .is_some_and(|name| !name.is_empty()));
     }
     let title_transition = if matches!(change, CatalogChange::RenameAction) {
-        let before = core.request("ui.command.list", json!({}));
+        let before = native_commands::catalog(&core);
         let key = json!({"kind":"plugin","plugin_id":"demo.owner","action_id":"record-target"});
         let command = before["commands"]
             .as_array()
@@ -2822,7 +2824,7 @@ fn consume_command_catalog(change: CatalogChange) {
             "title = \"Capture review target\"",
         );
         std::fs::write(owner.join("trailboss-plugin.toml"), renamed).unwrap();
-        let after = core.request("ui.command.list", json!({}));
+        let after = native_commands::catalog(&core);
         let changed = after["commands"]
             .as_array()
             .unwrap()
@@ -2966,7 +2968,7 @@ fn consume_command_catalog(change: CatalogChange) {
 fn c03_core_inventory_resolves_to_native_actions_without_controls_or_rpc_commands() {
     use trailboss_runtime::protocol::widgets::Node;
     let core = support::Core::new();
-    let catalog = core.request("ui.command.list", json!({}));
+    let catalog = native_commands::catalog(&core);
     let commands = catalog["commands"].as_array().unwrap();
     // Source-independent user inventory: intentionally not copied from CORE_COMMANDS
     // at runtime, and not inferred from API methods or reserved parser membership.
@@ -3177,7 +3179,7 @@ fn assert_unavailable_command_rows(cases: &[(&str, &str)]) {
             std::fs::remove_file(path.join("executed")).unwrap();
         }
         let key = json!({"kind":"plugin","plugin_id":"demo.owner","action_id":"record-target"});
-        let initial = core.request("ui.command.list", json!({}));
+        let initial = native_commands::catalog(&core);
         let issued = initial["commands"]
             .as_array()
             .unwrap()
@@ -3243,7 +3245,7 @@ fn assert_unavailable_command_rows(cases: &[(&str, &str)]) {
             }
             _ => unreachable!(),
         }
-        let current = core.request("ui.command.list", json!({}));
+        let current = native_commands::catalog(&core);
         assert!(
             !current["commands"]
                 .as_array()
@@ -3340,7 +3342,7 @@ fn c07_duplicate_titles_and_dotted_names_invoke_only_the_selected_structured_own
             core.request("plugin.link", json!({"path":plugin,"enabled":true}));
             outputs.push(plugin.join("executed.jsonl"));
         }
-        let catalog = core.request("ui.command.list", json!({}));
+        let catalog = native_commands::catalog(&core);
         let commands: Vec<_> = keys
             .iter()
             .map(|key| {
@@ -3841,7 +3843,7 @@ with open('executed', 'a') as output:
     .unwrap();
     core.request("plugin.link", json!({"path":plugin,"enabled":true}));
     let key = json!({"kind":"plugin","plugin_id":"demo.owner","action_id":"record-target"});
-    let catalog = core.request("ui.command.list", json!({}));
+    let catalog = native_commands::catalog(&core);
     let command = catalog["commands"]
         .as_array()
         .unwrap()
@@ -3959,7 +3961,7 @@ fn c12_ordinary_producer_cannot_claim_issued_command_namespace_or_redirect_owner
     .unwrap();
     core.request("plugin.link", json!({"path":owner,"enabled":true}));
     let key = json!({"kind":"plugin","plugin_id":"demo.owner","action_id":"record-target"});
-    let catalog = core.request("ui.command.list", json!({}));
+    let catalog = native_commands::catalog(&core);
     let issued = catalog["commands"]
         .as_array()
         .unwrap()
@@ -4090,7 +4092,7 @@ fn c13_all_129_owner_actions_have_bounded_exports_and_action_129_executes() {
     std::fs::write(plugin.join("trailboss-plugin.toml"), manifest).unwrap();
     std::fs::write(plugin.join("record.py"), "import json, os, sys\nwith open('executed.jsonl', 'a') as output:\n output.write(json.dumps({'action':sys.argv[1],'owner':os.environ['HERDR_PLUGIN_ID'],'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON'])})+'\\n')\n").unwrap();
     core.request("plugin.link", json!({"path":plugin,"enabled":true}));
-    let catalog = core.request("ui.command.list", json!({}));
+    let catalog = native_commands::catalog(&core);
     let commands: Vec<_> = catalog["commands"]
         .as_array()
         .unwrap()
@@ -4241,7 +4243,7 @@ fn c16_confirmation_copies_the_current_owner_export_without_an_outer_action() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    let catalog = core.request("ui.command.list", json!({}));
+    let catalog = native_commands::catalog(&core);
     let command = catalog["commands"].as_array().unwrap().iter().find(|command|
         command["key"] == json!({"kind":"plugin","plugin_id":"fixture.confirmation","action_id":"close-space"})).unwrap();
     let mut client = core.attach();
@@ -4372,7 +4374,7 @@ fn c16_invalid_or_ambiguous_owner_confirmations_withdraw_and_ordinary_publicatio
     let mut locator = None;
     let mut check = |marker: &str, usable: bool| {
         let declarations = observed(marker);
-        let catalog = core.request("ui.command.list", json!({}));
+        let catalog = native_commands::catalog(&core);
         let command = catalog["commands"]
             .as_array()
             .unwrap()
@@ -4629,7 +4631,7 @@ fn c17_actual_paired_revisions_refresh_owners_and_restart_invalidates_old_locato
     std::fs::write(owner.join("record.py"),
         "import json, os\nwith open('executed.jsonl','a') as output:\n output.write(json.dumps({'owner':os.environ['HERDR_PLUGIN_ID'],'action':os.environ['HERDR_PLUGIN_ACTION_ID'],'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON'])})+'\\n')\n").unwrap();
     core.request("plugin.link", json!({"path":owner,"enabled":true}));
-    let before = core.request("ui.command.list", json!({}));
+    let before = native_commands::catalog(&core);
     let mut stream = connect(&core);
     let (before_snapshot, before_ui) = paired(&mut stream, |_| true);
     assert_catalog(&before, &before_ui);
@@ -4647,7 +4649,7 @@ fn c17_actual_paired_revisions_refresh_owners_and_restart_invalidates_old_locato
         manifest("Refreshed owner title", true),
     )
     .unwrap();
-    let refreshed = core.request("ui.command.list", json!({}));
+    let refreshed = native_commands::catalog(&core);
     let second = refreshed["commands"]
         .as_array()
         .unwrap()
@@ -4700,7 +4702,7 @@ fn c17_actual_paired_revisions_refresh_owners_and_restart_invalidates_old_locato
         .collect();
     drop(stream);
     core.restart();
-    let restarted = core.request("ui.command.list", json!({}));
+    let restarted = native_commands::catalog(&core);
     assert_ne!(
         refreshed["boot_id"], restarted["boot_id"],
         "new Core process must have a new actual boot identity"
@@ -4926,7 +4928,7 @@ fn c20_native_nested_use_dispatches_explicit_child_scope_after_other_focus() {
     std::fs::write(owner.join("record.py"),
         "import json, os\nwith open('executed.jsonl','a') as output:\n output.write(json.dumps({'owner':os.environ['HERDR_PLUGIN_ID'],'action':os.environ['HERDR_PLUGIN_ACTION_ID'],'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON'])})+'\\n')\n").unwrap();
     core.request("plugin.link", json!({"path":owner,"enabled":true}));
-    let catalog = core.request("ui.command.list", json!({}));
+    let catalog = native_commands::catalog(&core);
     let command = catalog["commands"]
         .as_array()
         .unwrap()
@@ -5109,7 +5111,7 @@ fn c21_empty_eligible_plugin_set_keeps_full_core_inventory_and_real_targeted_foc
     .unwrap();
     core.request("plugin.link", json!({"path":retired,"enabled":true}));
     let stale_key = json!({"kind":"plugin","plugin_id":"fixture.retired","action_id":"retired"});
-    assert!(core.request("ui.command.list", json!({}))["commands"]
+    assert!(native_commands::catalog(&core)["commands"]
         .as_array()
         .unwrap()
         .iter()
@@ -5303,7 +5305,7 @@ fn unusual_title_native_invocations(titles: [String; 3], display: [String; 2]) {
             "the unchanged legacy manifest normalizer must accept and retain {action}'s title"
         );
     }
-    let catalog = core.request("ui.command.list", json!({}));
+    let catalog = native_commands::catalog(&core);
     let commands: Vec<_> = actions
         .iter()
         .zip(&titles)
@@ -5589,7 +5591,7 @@ fn confirmation_locator_refresh(captured_scope: bool) {
         .collect();
     let deadline = Instant::now() + Duration::from_secs(5);
     let commands = loop {
-        let catalog = core.request("ui.command.list", json!({}));
+        let catalog = native_commands::catalog(&core);
         let commands: Vec<Value> = keys
             .iter()
             .filter_map(|key| {
@@ -6237,9 +6239,9 @@ fn palette_observer_and_catalog_follow_the_api_socket_override() {
         String::from_utf8_lossy(&output.stderr)
     );
     let catalog: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let inherited_catalog = inherited.request("ui.command.list", json!({}));
+    let inherited_catalog = native_commands::catalog(&inherited);
     assert_ne!(catalog["boot_id"], inherited_catalog["boot_id"]);
-    assert!(catalog["capabilities"]
+    assert!(core.request("ui.command.list", json!({}))["capabilities"]
         .as_array()
         .unwrap()
         .contains(&json!("plugin_action_arguments_v1")));
@@ -6581,7 +6583,7 @@ fn argument_catalog_preserves_owner_text_but_projects_safe_optional_input_metada
         "id = \"fixture.argument-metadata\"\nname = \"Argument metadata\"\nversion = \"1.0.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"raw\"\ntitle = {title:?}\nargument_input = {{ kind = \"raw_tail\" }}\nargument_hint = {hint:?}\ncommand = [\"true\"]\n[[actions]]\nid = \"no-hint\"\ntitle = \"No hint\"\nargument_input = {{ kind = \"raw_tail\" }}\ncommand = [\"true\"]\n[[actions]]\nid = \"legacy\"\ntitle = \"Legacy\"\ncommand = [\"true\"]\n"
     )).unwrap();
     core.request("plugin.link", json!({"path":owner,"enabled":true}));
-    let catalog = core.request("ui.command.list", json!({}));
+    let catalog = native_commands::catalog(&core);
     assert!(catalog["capabilities"]
         .as_array()
         .unwrap()

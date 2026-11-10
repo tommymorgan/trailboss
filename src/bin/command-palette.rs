@@ -8,8 +8,7 @@ use std::{
 };
 use trailboss::{core::Core, sidebar::Declarations};
 use trailboss_runtime::{
-    api_client::{ApiClient, ConnectionTarget},
-    api_schema::{Request, UiCommandInfo, UiCommandKey, UiCommandTarget},
+    api_schema::{UiCommandInfo, UiCommandKey, UiCommandTarget},
     protocol::{
         self,
         endpoint::*,
@@ -370,10 +369,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
     });
-    let api = ApiClient::for_target(ConnectionTarget::SocketPath(api_path));
-    let request: Request = serde_json::from_value(
-        json!({"id":"palette-catalog","method":"ui.command.list","params":{}}),
-    )?;
     let mut snapshot: Option<ClientShellSnapshot> = None;
     let mut ui: Option<EndpointPluginUi> = None;
     let mut previous_inputs = Value::Null;
@@ -408,25 +403,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|tree| (item.plugin_id.clone(), tree.clone()))
             })
             .collect();
-        // Ignore frame/status/focus churn and our own declaration. Only semantic
-        // owner declarations and resource choices require another catalog read.
-        let inputs = json!({"boot":snapshot.boot_id,"declarations":declarations,
+        // Ignore frame/status/focus churn and our own declaration. Rebuild only
+        // when native command metadata, owner declarations or resource choices change.
+        let inputs = json!({"boot":snapshot.boot_id,"declarations":declarations,"commands":ui.commands,
             "workspaces":snapshot.workspaces.iter().map(|w| (&w.workspace_id,&w.label)).collect::<Vec<_>>(),
             "tabs":snapshot.tabs.iter().map(|t| (&t.workspace_id,&t.tab_id,&t.label)).collect::<Vec<_>>(),
             "panes":snapshot.panes.iter().map(|p| (&p.pane_id,&p.label)).collect::<Vec<_>>()});
         if inputs == previous_inputs {
             continue;
         }
-        let reply = api.request_value(&request)?;
-        if let Some(error) = reply.get("error") {
-            return Err(format!("command discovery failed: {error}").into());
-        }
-        let result = &reply["result"];
-        if result["boot_id"] != snapshot.boot_id {
-            continue;
-        }
-        let commands: Vec<UiCommandInfo> = serde_json::from_value(result["commands"].clone())?;
-        let next = serde_json::to_string(&declaration(snapshot, &commands, &declarations))?;
+        let commands = &ui.commands;
+        let next = serde_json::to_string(&declaration(snapshot, commands, &declarations))?;
         if next != previous_output {
             let mut output = io::stdout().lock();
             writeln!(output, "{next}")?;

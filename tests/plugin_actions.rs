@@ -8,6 +8,54 @@ mod support;
 use action_producer::FocusProducer;
 use std::time::{Duration, Instant};
 
+fn assert_composed_action(
+    fixture: &FocusProducer,
+    y: usize,
+    expected_owner: &str,
+    expected_action: &str,
+) {
+    let mut client = fixture.core.attach();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        client.receive().unwrap();
+        let mut core = trailboss::core::Core::default();
+        core.update_session(
+            client.workspace_id.clone(),
+            client.focused_tab_id.clone(),
+            client.focused_pane_id.is_some(),
+        );
+        if let Some((owner, action, context)) = client.declarations.as_ref().and_then(|trees| {
+            trailboss::terminal::action_at(
+                &core,
+                trees,
+                trailboss::terminal::Rect {
+                    x: 0,
+                    y: 0,
+                    width: 80,
+                    height: 24,
+                },
+                0,
+                5,
+                y as u16,
+            )
+        }) {
+            assert_eq!(owner, expected_owner);
+            assert_eq!(action, expected_action);
+            assert_eq!(
+                context.workspace_id.as_deref(),
+                Some(fixture.workspace.as_str())
+            );
+            assert_eq!(context.tab_id.as_deref(), Some(fixture.target.as_str()));
+            assert_eq!(
+                fixture.action_ready(client.declarations.as_ref().unwrap()),
+                expected_owner == "fixture.observed-focus"
+            );
+            return;
+        }
+        assert!(Instant::now() < deadline, "composed target action missing");
+    }
+}
+
 #[test]
 fn producer_stdin_action_correlates_unfocused_tab_and_successful_result() {
     let fixture = FocusProducer::new();
@@ -58,9 +106,47 @@ fn living_dispatch_plugin_actions_through_stdin_envelopes() {
                 .contains("Unfocused")
         })
         .unwrap();
+    assert_composed_action(&fixture, y, "fixture.observed-focus", "focus-tab");
     console.click(5, y);
     fixture.assert_completed();
     console.text("\x02q");
+}
+
+#[test]
+fn generated_command_fragments_do_not_make_action_producer_ready() {
+    let fixture = FocusProducer::start_gated();
+    let mut console = console::Console::new(&fixture.core);
+    let rows = console.wait(|rows| {
+        rows.iter().any(|row| {
+            row.chars()
+                .take(20)
+                .collect::<String>()
+                .contains("Unfocused")
+        })
+    });
+    let y = rows
+        .iter()
+        .position(|row| {
+            row.chars()
+                .take(20)
+                .collect::<String>()
+                .contains("Unfocused")
+        })
+        .unwrap();
+    // Before the real list zone is published, stock UI has the same label but
+    // routes its click to Core, not this producer. Owner metadata is not readiness.
+    assert_composed_action(&fixture, y, "tommymorgan.stock-ui", "host:focus");
+    console.click(5, y);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fixture.focused() != fixture.target {
+        assert!(Instant::now() < deadline, "fallback did not focus target");
+        std::thread::yield_now();
+    }
+    let envelopes = std::fs::read_to_string(fixture.plugin.join("envelopes")).unwrap();
+    assert!(!envelopes.contains("\"kind\":\"request\""), "{envelopes}");
+    fixture.release_publication();
+    fixture.wait_ready();
+    assert_composed_action(&fixture, y, "fixture.observed-focus", "focus-tab");
 }
 
 #[path = "support/reserved_actions.rs"]

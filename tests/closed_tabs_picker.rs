@@ -1,4 +1,6 @@
 #![cfg(unix)]
+#[path = "support/native_commands.rs"]
+mod native_commands;
 mod support;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -148,7 +150,7 @@ fn native_recently_closed_picker_restores_selected_entry_from_both_entrypoints_a
                 entries.push(workspace);
             }
             let before = core.request("tab.closed.list", json!({}));
-            let catalog = core.request("ui.command.list", json!({}));
+            let catalog = native_commands::catalog(&core);
             assert!(
                 catalog["commands"]
                     .as_array()

@@ -40,6 +40,7 @@ fn state_with_plugin_rows() -> ClientShellState {
     state.set_endpoint_plugin_ui(
         &ClientEndpointId::Local,
         EndpointPluginUi {
+            commands: Vec::new(),
             boot_id: "boot-1".into(),
             revision: 1,
             ui: plugin_rows(),
@@ -76,6 +77,7 @@ fn state_with_many_plugin_rows(count: usize, focused_tab: Option<&str>) -> Clien
     state.set_endpoint_plugin_ui(
         &ClientEndpointId::Local,
         EndpointPluginUi {
+            commands: Vec::new(),
             boot_id: "boot-1".into(),
             revision: 1,
             ui: rows,
@@ -196,6 +198,7 @@ fn clicking_dynamic_row_sends_row_context() {
     state.set_endpoint_plugin_ui(
         &ClientEndpointId::Local,
         EndpointPluginUi {
+            commands: Vec::new(),
             boot_id: "boot-1".into(),
             revision: 1,
             ui: vec![EndpointPluginUiItem {
@@ -259,6 +262,7 @@ fn focused_tab_row_carries_active_row_background() {
     state.set_endpoint_plugin_ui(
         &ClientEndpointId::Local,
         EndpointPluginUi {
+            commands: Vec::new(),
             boot_id: "boot-1".into(),
             revision: 1,
             ui: vec![
@@ -294,6 +298,7 @@ fn workspace_header_carries_focus_background_when_focused_tab_row_is_absent() {
     state.set_endpoint_plugin_ui(
         &ClientEndpointId::Local,
         EndpointPluginUi {
+            commands: Vec::new(),
             boot_id: "boot-1".into(),
             revision: 1,
             ui: vec![EndpointPluginUiItem {
@@ -335,6 +340,7 @@ fn segments_render_with_role_colors_and_unknown_roles_fall_back() {
     state.set_endpoint_plugin_ui(
         &ClientEndpointId::Local,
         EndpointPluginUi {
+            commands: Vec::new(),
             boot_id: "boot-1".into(),
             revision: 1,
             ui: vec![
@@ -423,6 +429,7 @@ fn bg_segment_role_paints_the_row_background() {
     state.set_endpoint_plugin_ui(
         &ClientEndpointId::Local,
         EndpointPluginUi {
+            commands: Vec::new(),
             boot_id: "boot-1".into(),
             revision: 1,
             ui: vec![EndpointPluginUiItem {
@@ -480,6 +487,7 @@ fn footer_role_rows_pin_to_the_footer_line_and_replace_the_default_footer() {
     state.set_endpoint_plugin_ui(
         &ClientEndpointId::Local,
         EndpointPluginUi {
+            commands: Vec::new(),
             boot_id: "boot-1".into(),
             revision: 1,
             ui: vec![
@@ -551,6 +559,7 @@ fn native_workspace_rows_return_when_plugin_ui_is_empty() {
     state.set_endpoint_plugin_ui(
         &ClientEndpointId::Local,
         EndpointPluginUi {
+            commands: Vec::new(),
             boot_id: "boot-1".into(),
             revision: 2,
             ui: Vec::new(),
@@ -579,6 +588,7 @@ fn leader_rows_fill_with_dots_and_right_align_the_cluster() {
     state.set_endpoint_plugin_ui(
         &ClientEndpointId::Local,
         EndpointPluginUi {
+            commands: Vec::new(),
             boot_id: "boot-1".into(),
             revision: 1,
             ui: vec![EndpointPluginUiItem {
@@ -625,6 +635,7 @@ fn focused_plugin_row_renders_bold() {
     state.set_endpoint_plugin_ui(
         &ClientEndpointId::Local,
         EndpointPluginUi {
+            commands: Vec::new(),
             boot_id: "boot-1".into(),
             revision: 2,
             ui: vec![EndpointPluginUiItem {

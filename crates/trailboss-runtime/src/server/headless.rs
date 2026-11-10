@@ -2073,13 +2073,14 @@ impl HeadlessServer {
                         return false;
                     }
                 };
-                let plugin_ui_message = if plugin_ui_rows.is_empty() {
+                let plugin_ui_message = if plugin_ui_rows.ui.is_empty() {
                     None
                 } else {
                     match crate::protocol::endpoint::plugin_ui_message(
                         &seed_snapshot.boot_id,
                         seed_snapshot.revision,
-                        &plugin_ui_rows,
+                        &plugin_ui_rows.ui,
+                        &plugin_ui_rows.commands,
                     ) {
                         Ok(message) => Some(message),
                         Err(err) => {
@@ -2092,7 +2093,8 @@ impl HeadlessServer {
                 connection.shell_snapshot = Some(seed_snapshot);
                 connection.shell_agent_completions = Some(completion_projection);
                 connection.shell_agent_view = agent_view;
-                connection.shell_plugin_ui = (!plugin_ui_rows.is_empty()).then_some(plugin_ui_rows);
+                connection.shell_plugin_ui =
+                    (!plugin_ui_rows.ui.is_empty()).then_some(plugin_ui_rows);
                 self.clients.insert(client_id, connection);
                 if self.app.state.popup_pane.is_some() && self.popup_owner_tab_id.is_none() {
                     self.popup_owner_tab_id = self.shell_tab_id_for_client(client_id);
@@ -3024,6 +3026,20 @@ impl HeadlessServer {
                     if let Ok(response) = response {
                         let _ = msg.respond_to.send(response);
                     }
+                    return false;
+                }
+            }
+        }
+        if let api::schema::Method::UiCommandRun(params) = &msg.request.method {
+            match self.app.resolve_ui_command_run(params) {
+                Ok(method) => msg.request.method = method,
+                Err(error) => {
+                    let response = serde_json::to_string(&api::schema::ErrorResponse {
+                        id: msg.request.id,
+                        error,
+                    })
+                    .expect("named command error serialization");
+                    let _ = msg.respond_to.send(response);
                     return false;
                 }
             }

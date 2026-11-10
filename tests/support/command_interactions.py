@@ -26,7 +26,7 @@ import time
 import traceback
 import unicodedata
 
-from command_compatibility import digest, request
+from command_compatibility import digest, projection, request
 from command_definitions import PRODUCERS, until
 from neutral_consumer import Reader, read_exact, send
 
@@ -73,33 +73,6 @@ def core_key(action, mode=None):
 
 
 CLOSE_SPACE = {'kind': 'plugin', 'plugin_id': OWNER, 'action_id': 'close-space'}
-
-
-def projection(endpoint):
-    """Read the actual unmodified generation-1 endpoint frame, without requiring
-    a valid sidebar confirmation export (negative cases intentionally lack it).
-    """
-    with socket.socket(socket.AF_UNIX) as connection:
-        connection.settimeout(8)
-        connection.connect(str(endpoint))
-        send(connection, 20, 'endpoint.hello.v1', json.dumps({
-            'generation': 1, 'cell_width_px': 0, 'cell_height_px': 0,
-            'surface_size': {'cols': 100, 'rows': 30}, 'pixel_mouse': False,
-            'direct_graphics': False, 'endpoint_keybindings': False, 'mouse_capture': False,
-            'surface_active': False, 'surface_reuse': False, 'surface_delta': False,
-            'surface_scroll': False, 'snapshot_codecs': ['shell.snapshot.v1'],
-            'surface_codecs': ['shell.surface.v1'], 'input_codecs': ['shell.input.semantic.v1'],
-            'blob_codecs': ['shell.blob.v1']}))
-        while True:
-            size = struct.unpack('<I', read_exact(connection, 4))[0]
-            assert size <= 2 * 1024 * 1024, 'oversized generation-1 frame'
-            reader = Reader(read_exact(connection, size))
-            if reader.integer() != 20:
-                continue
-            key, payload = reader.text(), reader.text()
-            reader.finish()
-            if key == 'endpoint.plugin-ui.v1':
-                return json.loads(payload)
 
 
 def exports(value):
@@ -461,7 +434,8 @@ class OwnedSession:
                 return value
         self.initial_projection = until(published, 'actual ordinary consumer publication')
         self.save('initial-projection.json', self.initial_projection)
-        self.catalog = self.api_call('ui.command.list')
+        self.catalog = {'boot_id': self.initial_projection['boot_id'],
+                        'commands': self.initial_projection['commands']}
         self.receipt['boot_id'] = self.catalog['boot_id']
         palette = next(fragment['tree'] for owner, fragment in exports(self.initial_projection)
                        if owner == CONSUMER and fragment['name'] == 'command-palette')
@@ -537,14 +511,14 @@ class OwnedSession:
             if resource:
                 self.branch()
         def resolved():
-            current = self.api_call('ui.command.list')
+            current = projection(self.endpoint)
             found = [item for item in current['commands'] if item['key'] == key]
             assert len(found) == 1, (key, found)
             command = found[0]
             if command.get('diagnostic'):
                 return None
             return command if any(fragment['name'] == command['fragment_name']
-                                  for _, fragment in exports(projection(self.endpoint))) else None
+                                  for _, fragment in exports(current)) else None
         command = until(resolved, 'selected actual catalog locator becomes resolvable')
         self.receipt['selected_command'] = command
         self.keys(command['title'].encode())
@@ -593,9 +567,9 @@ class OwnedSession:
             self.configuration['owner_mode'] = mode
             self.config.write_text(json.dumps(self.configuration))
         def blocked():
-            catalog = self.api_call('ui.command.list')
-            item = next(command for command in catalog['commands'] if command['key'] == CLOSE_SPACE)
             value = projection(self.endpoint)
+            catalog = {'boot_id': value['boot_id'], 'commands': value['commands']}
+            item = next(command for command in catalog['commands'] if command['key'] == CLOSE_SPACE)
             # A config edit is not proof of publication. In particular the
             # second #22 phase must not accept the previous missing-export
             # diagnostic before the wrong-action tree actually reaches Core.
@@ -807,11 +781,11 @@ def run_case(session, name, index):
             session.configuration['owner_mode'] = 'valid'
             session.config.write_text(json.dumps(session.configuration))
             def recovered():
-                item = next(item for item in session.api_call('ui.command.list')['commands']
-                            if item['key'] == CLOSE_SPACE)
+                value = projection(session.endpoint)
+                item = next(item for item in value['commands'] if item['key'] == CLOSE_SPACE)
                 return not item.get('diagnostic') and any(
                     owner == OWNER and fragment['name'] == item['fragment_name']
-                    for owner, fragment in exports(projection(session.endpoint)))
+                    for owner, fragment in exports(value))
             until(recovered, 'ordinary owner stream publication restores generated confirmation')
             baseline, logs = session.snapshot(), session.action_logs()
             command = session.command(CLOSE_SPACE)
@@ -885,7 +859,7 @@ def run_case(session, name, index):
             until(lambda: session.native.poll() is not None, 'only invoking native client detaches')
             assert session.native.returncode == 0, session.native.returncode
             assert session.core.poll() is None
-            assert session.api_call('ui.command.list')['boot_id'] == session.receipt['boot_id']
+            assert projection(session.endpoint)['boot_id'] == session.receipt['boot_id']
             session.unchanged(baseline)
         elif name == 'targeted-focus':
             until(lambda: session.snapshot()['focused_tab_id'] == session.b, 'captured target really focused')

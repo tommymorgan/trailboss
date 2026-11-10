@@ -5,27 +5,7 @@ import socket
 import struct
 import sys
 from neutral_consumer import Reader, read_exact, send
-
-
-def request(path, method):
-    with socket.socket(socket.AF_UNIX) as connection:
-        connection.settimeout(8)
-        connection.connect(path)
-        connection.sendall((json.dumps({'id': 'catalog-consumer', 'method': method, 'params': {}}) + '\n').encode())
-        data = bytearray()
-        while b'\n' not in data:
-            part = connection.recv(65536)
-            assert part, 'Core closed JSON API without a response'
-            data.extend(part)
-        return json.loads(data.split(b'\n')[0])
-
-
-def catalog(path):
-    reply = request(path, 'ui.command.list')
-    assert 'result' in reply, f'C01 requires the real ui.command.list API, received {reply}'
-    result = reply['result']
-    assert result['boot_id'] and result['commands'], result
-    return result
+from command_compatibility import native_catalog as catalog
 
 
 def selected(commands, keys=None):

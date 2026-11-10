@@ -10,7 +10,7 @@ import select
 import sys
 import time
 
-from command_compatibility import request
+from command_compatibility import native_catalog
 
 
 def label(text):
@@ -22,7 +22,7 @@ def column(children):
 
 
 def consumer(config):
-    catalog = request(config['api'], 'ui.command.list')
+    catalog = native_catalog(config['api'])
     resources, global_commands = [], []
     for command in catalog['commands']:
         use = {'type': 'use', 'name': command['fragment_name']}

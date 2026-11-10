@@ -19,7 +19,7 @@ import termios
 import threading
 import time
 
-from command_compatibility import declarations, digest, request
+from command_compatibility import declarations, digest, native_catalog, request
 
 
 KEY = {'kind': 'core', 'action_id': 'host:focus'}
@@ -112,7 +112,7 @@ def run_case(args, label, expected_title):
                 context = {'workspace_id': workspace, 'tab_id': target, 'pane_id': pane}
                 for plugin in PALETTE_PLUGINS:
                     request(api, 'plugin.link', {'path': str(plugins / plugin), 'enabled': True})
-                catalog = request(api, 'ui.command.list')
+                catalog = native_catalog(api)
                 commands = [item for item in catalog['commands'] if item['key'] == KEY]
                 assert len(commands) == (1 if expected_title else 0), (label, commands)
                 command = commands[0] if commands else None

@@ -1014,6 +1014,31 @@ impl Core {
                 Effect::Consumed
             }
             CoreAction::Create => {
+                if self.require_name && !matches!(self.interaction, Interaction::TransferSpace) {
+                    let (action, workspace, tab) = match &self.interaction {
+                        Interaction::NewSpace => (CoreAction::NewSpace, None, None),
+                        Interaction::NewTab { workspace_id } => {
+                            (CoreAction::New, workspace_id.as_deref(), None)
+                        }
+                        Interaction::RenameSpace { workspace_id } => {
+                            (CoreAction::RenameSpace, Some(workspace_id.as_str()), None)
+                        }
+                        Interaction::RenameTab { tab_id } => {
+                            (CoreAction::RenameTab, None, Some(tab_id.as_str()))
+                        }
+                        _ => return Effect::Consumed,
+                    };
+                    let Ok((method, params)) = trailboss_runtime::core_actions::prepare_named(
+                        action,
+                        workspace,
+                        tab,
+                        Some(&self.input_text),
+                    ) else {
+                        return Effect::Consumed;
+                    };
+                    self.interaction = Interaction::None;
+                    return Effect::Request { method, params };
+                }
                 if (self.require_name
                     || matches!(
                         self.interaction,

@@ -892,6 +892,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PluginEnable(_) => "plugin.enable",
         Method::PluginDisable(_) => "plugin.disable",
         Method::UiCommandList(_) => "ui.command.list",
+        Method::UiCommandRun(_) => "ui.command.run",
         Method::PluginActionList(_) => "plugin.action.list",
         Method::PluginActionInvoke(_) => "plugin.action.invoke",
         Method::PluginLogList(_) => "plugin.log.list",

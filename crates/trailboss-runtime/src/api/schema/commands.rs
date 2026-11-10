@@ -14,3 +14,18 @@ pub struct CommandInvokeParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<super::PaneSelectionReadParams>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UiCommandRunParams {
+    pub command: String,
+    #[serde(default)]
+    pub answers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UiCommandListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+}

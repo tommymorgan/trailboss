@@ -154,6 +154,9 @@ pub struct EndpointPluginUi {
     pub revision: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ui: Vec<EndpointPluginUiItem>,
+    /// Native palette inventory; the public API catalog is runnable-only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<crate::api::schema::UiCommandInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,11 +211,20 @@ pub fn plugin_ui_message(
     boot_id: &str,
     revision: u64,
     ui: &[EndpointPluginUiItem],
+    commands: &[crate::api::schema::UiCommandInfo],
 ) -> serde_json::Result<ServerMessage> {
-    let projection = EndpointPluginUi {
-        boot_id: boot_id.to_owned(),
+    #[derive(Serialize)]
+    struct Projection<'a> {
+        boot_id: &'a str,
+        revision: u64,
+        ui: &'a [EndpointPluginUiItem],
+        commands: &'a [crate::api::schema::UiCommandInfo],
+    }
+    let projection = Projection {
+        boot_id,
         revision,
-        ui: ui.to_vec(),
+        ui,
+        commands,
     };
     Ok(ServerMessage::EndpointControl {
         kind: PLUGIN_UI_KIND.into(),

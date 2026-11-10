@@ -2,6 +2,8 @@
 mod argument_lifecycle;
 #[path = "support/console.rs"]
 mod console;
+#[path = "support/native_commands.rs"]
+mod native_commands;
 mod support;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1093,7 +1095,7 @@ fn cancelling_existing_core_flows_discards_drafts_without_reopening_search() {
                     if retained_new_space_controller {
                         // There was no standalone named NewSpace entrypoint. This
                         // is parity of its retained old-palette controller only.
-                        let catalog = core.request("ui.command.list", json!({}));
+                        let catalog = native_commands::catalog(&core);
                         let command = catalog["commands"]
                             .as_array()
                             .unwrap()
@@ -1760,7 +1762,7 @@ fn unavailable_open_selection_disappears_without_activating_a_neighbor_or_replac
             }
             _ => unreachable!(),
         }
-        core.request("ui.command.list", json!({}));
+        native_commands::catalog(&core);
         let deadline = Instant::now() + Duration::from_secs(8);
         loop {
             if let Some(declarations) = &client.declarations {
@@ -1930,7 +1932,7 @@ fn reordered_duplicate_commands_keep_the_selected_owner_and_captured_resource() 
     }
     // The public custom provider controls only ordering/context wrappers. Its
     // leaves are unmodified, real Core-issued Uses attributed to the two owners.
-    let catalog = core.request("ui.command.list", json!({}));
+    let catalog = native_commands::catalog(&core);
     let locators: Vec<String> = ["fixture.reorder-blue", "fixture.reorder-red"]
         .iter()
         .map(|owner| {
@@ -2425,7 +2427,7 @@ fn discovered_owner_rows_hide_missing_captured_resources_without_authorizing_man
             );
             client.receive().unwrap();
         }
-        let catalog = core.request("ui.command.list", json!({}));
+        let catalog = native_commands::catalog(&core);
         for owner in ["fixture.context-unavailable", "fixture.context-eligible"] {
             let command = catalog["commands"]
                 .as_array()
@@ -2618,7 +2620,7 @@ fn discovered_previous_uses_client_history_while_rename_keeps_the_menu_target() 
         native.previous_tab(client.snapshot.as_ref().unwrap()),
         c["tab"]["tab_id"].as_str()
     );
-    let catalog = core.request("ui.command.list", json!({}));
+    let catalog = native_commands::catalog(&core);
     let previous = catalog["commands"]
         .as_array()
         .unwrap()
@@ -3093,7 +3095,7 @@ fn discovered_display_identity(
     std::fs::write(owner.join("publish.py"),
         "import sys\nprint(open('declaration.json').read(),flush=True)\nfor line in sys.stdin: pass\n").unwrap();
     core.request("plugin.link", json!({"path":owner,"enabled":true}));
-    let catalog = core.request("ui.command.list", json!({}));
+    let catalog = native_commands::catalog(&core);
     let mut fragments = Vec::new();
     for (action, title) in [("a-decoy", &decoy), ("z-original", &original)] {
         let expected_key =
@@ -3336,7 +3338,7 @@ fn discovered_display_identity(
         events[0]["context"]["pane_id"],
         captured["root_pane"]["pane_id"]
     );
-    let after = core.request("ui.command.list", json!({}));
+    let after = native_commands::catalog(&core);
     for (action, title) in [("a-decoy", &decoy), ("z-original", &original)] {
         let expected_key =
             json!({"kind":"plugin","plugin_id":"fixture.display-owner","action_id":action});
@@ -3505,7 +3507,7 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         for plugin in ["stock-ui", "sidebar-menus", "command-palette"] {
             link(&core, plugin);
         }
-        let catalog = core.request("ui.command.list", json!({}));
+        let catalog = native_commands::catalog(&core);
         let target_fragment = catalog["commands"]
             .as_array()
             .unwrap()
@@ -3915,7 +3917,7 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         .unwrap();
         core.request("plugin.link", json!({"path":directory,"enabled":true}));
     }
-    let catalog = core.request("ui.command.list", json!({}));
+    let catalog = native_commands::catalog(core);
     ["fixture.raw-blue", "fixture.raw-red"]
         .iter()
         .map(|owner| {

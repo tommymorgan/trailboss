@@ -513,6 +513,39 @@ pub enum UiCommandKey {
     },
 }
 
+impl UiCommandKey {
+    pub fn matches_stable_id(&self, selector: &str) -> bool {
+        match self {
+            Self::Core { action_id, mode } if mode.as_deref() == Some("previous") => {
+                selector.strip_suffix(":previous") == Some(action_id.as_str())
+            }
+            Self::Core { action_id, .. } => selector == action_id,
+            Self::Plugin {
+                plugin_id,
+                action_id,
+            } => {
+                selector
+                    .strip_prefix(plugin_id)
+                    .and_then(|tail| tail.strip_prefix('/'))
+                    == Some(action_id.as_str())
+            }
+        }
+    }
+    /// Human-copyable identity. Fragment names remain boot-scoped locators.
+    pub fn stable_id(&self) -> String {
+        match self {
+            Self::Core { action_id, mode } if mode.as_deref() == Some("previous") => {
+                format!("{action_id}:previous")
+            }
+            Self::Core { action_id, .. } => action_id.clone(),
+            Self::Plugin {
+                plugin_id,
+                action_id,
+            } => format!("{plugin_id}/{action_id}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UiCommandTarget {

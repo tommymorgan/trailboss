@@ -181,7 +181,7 @@ pub(crate) struct ClientConnection {
     /// View policy paired with the last coherent shell replacement.
     pub(crate) shell_agent_view: Option<crate::api::schema::AgentViewSetParams>,
     /// Plugin-declared UI rows paired with the last coherent shell replacement.
-    pub(crate) shell_plugin_ui: Option<Vec<crate::protocol::endpoint::EndpointPluginUiItem>>,
+    pub(crate) shell_plugin_ui: Option<crate::protocol::endpoint::EndpointPluginUi>,
     /// Monotonic shell replacement revision for this connection.
     pub(crate) shell_projection_revision: u64,
     /// Whether this shell is waiting for one ordered endpoint command response.

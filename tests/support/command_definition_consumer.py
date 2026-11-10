@@ -3,11 +3,11 @@ import json
 from pathlib import Path
 import sys
 
-from command_compatibility import request
+from command_compatibility import native_catalog
 
 
 config = json.loads(Path(sys.argv[1]).read_text())
-catalog = request(config['api'], 'ui.command.list')
+catalog = native_catalog(config['api'])
 key = {'kind': 'core', 'action_id': 'host:focus'}
 command = next((item for item in catalog['commands'] if item['key'] == key), None)
 fragment = command['fragment_name'] if command else config.get('stale_fragment')

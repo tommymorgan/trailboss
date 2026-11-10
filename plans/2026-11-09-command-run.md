@@ -8,7 +8,7 @@
 > PRD coverage: plans/command-run.prd-coverage.md
 > Context: docs/command-run.md; CONTEXT.md
 > Source base: master@origin 6e8c692b
-> Readiness: Build-ready plan; every accepted requirement is authored and task-decomposed. Planning only: all behavior remains unbuilt. No implementation, runtime activation, push or Linear publication is authorized.
+> Readiness: Task 1.1 implemented locally; Tasks 2.1 and 3.1 remain unbuilt. No push, deployment or runtime activation is authorized.
 
 ## Slice 1: Run built-in commands from the caller's pane
 
@@ -22,22 +22,22 @@
 > Shippable state: All non-picker built-in commands run by title/ID with caller context; window-only commands remain native-only. Plugin and picker rows are not advertised as runnable until their adapters exist. Existing native palette and custom-keybinding execution remain usable; no unusable new command is exposed.
 > Boundary verification: At this exact task head without successors, create Research outside a pane; run the listed built-ins from an owned pane with decoy global focus; observe only caller targets through workspace/tab APIs. Check native-only actions remain native and fail through the API. Confirm unimplemented picker/plugin adapters are absent from runnable discovery.
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::CreateSpaceByTitle
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: CreateSpaceByTitle
   Given a running owned Core with no active pane
   When I run trailboss command run "New space" "Research"
   Then the CLI exits zero with the workspace creation result
   And workspace.list contains the new space named Research
   And no native window or confirmation prompt is required
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::RunCoreCommandsInCallerContext
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: RunCoreCommandsInCallerContext
   Given caller pane w1:p1 belongs to tab Planning in space Work
   And Core-global focus and a native window are on decoy tab Other in space Personal
@@ -52,11 +52,11 @@ Scenario Outline: RunCoreCommandsInCallerContext
     | Rename tab | "Build" | Planning is renamed Build |
     | Focus tab | omitted | Planning becomes the focused tab |
     | Close tab | omitted | Planning is closed without confirmation |
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::PreserveCoreInputMeaning
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: PreserveCoreInputMeaning
   Given caller pane w1:p1 belongs to Planning in Work
   When command run submits <title> with <argument>
@@ -69,11 +69,11 @@ Scenario Outline: PreserveCoreInputMeaning
     | Rename space | whitespace only | invalid-name error and no rename |
     | Rename tab | "  Planning v2  " | rename uses exactly the palette-submitted name |
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::RejectSurplusCoreAnswersBeforeDispatch
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: RejectSurplusCoreAnswersBeforeDispatch
   Given caller Planning's pane in Work and the command's native prompt sequence
   When command run receives <title> followed by <answers>
@@ -86,21 +86,21 @@ Scenario Outline: RejectSurplusCoreAnswersBeforeDispatch
     | Close tab | surplus |
     | Restart idle agents | surplus |
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::RestartIdleAgentsByName
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: RestartIdleAgentsByName
   Given a running owned Core with an eligible idle agent and a protected busy agent
   When command run "Restart idle agents" is called without pane context
   Then it returns the existing agent.restart_idle result
   And the existing restart eligibility rules preserve the busy agent
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::ResolveExactTitlesAndStableIds
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: ResolveExactTitlesAndStableIds
   Given command list exposes New space and its stable ID host:new-space
   When command run uses <selector> with argument Research
@@ -109,11 +109,11 @@ Scenario Outline: ResolveExactTitlesAndStableIds
     | selector |
     | New space |
     | host:new-space |
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::RejectMissingOrAmbiguousCommands
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: RejectMissingOrAmbiguousCommands
   Given two enabled palette commands are titled Shared with different stable IDs
   When command run receives <selector>
@@ -123,11 +123,11 @@ Scenario Outline: RejectMissingOrAmbiguousCommands
     | selector | diagnostic |
     | Shared | ambiguous title with both titles and stable IDs |
     | does-not-exist | command not found |
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::RequireRealCallerPane
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: RequireRealCallerPane
   Given Core-global focus is on decoy tab Other
   And the caller has <pane_context>
@@ -138,22 +138,22 @@ Scenario Outline: RequireRealCallerPane
     | pane_context |
     | no HERDR_PANE_ID |
     | an inherited locator no longer resolved by Core |
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::ResolveMovedPaneRatherThanCachedLocation
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: ResolveMovedPaneRatherThanCachedLocation
   Given the same running shell's inherited HERDR_PANE_ID resolves through a Core alias to Planning in space Build
   And inherited HERDR_WORKSPACE_ID and HERDR_TAB_ID still name its old location
   When that shell runs command run "Rename tab" "Current"
   Then only its current containing tab is renamed Current
   And neither the old location nor the globally focused decoy is changed
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::ExcludeWindowOnlyCommandsFromApi
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: ExcludeWindowOnlyCommandsFromApi
   Given a native window supports its existing <title> command
   When an API caller requests ui.command.list and then attempts ui.command.run by that command's title and stable key
@@ -164,11 +164,11 @@ Scenario Outline: ExcludeWindowOnlyCommandsFromApi
     | Detach from session |
     | Switch session |
     | Previous tab |
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::ListRunnableCoreCommandsAndHints
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: ListRunnableCoreCommandsAndHints
   Given caller pane Planning in Work and the complete non-picker Core adapter
   When trailboss command list is run

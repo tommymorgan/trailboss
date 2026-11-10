@@ -55,7 +55,11 @@ fn run() -> io::Result<()> {
         trailboss_runtime::remote::extract_remote_args(&raw).map_err(io::Error::other)?;
     let mut args =
         trailboss_runtime::session::configure_from_args(&raw).map_err(io::Error::other)?;
-    let executable = if let Some(index) = args.iter().position(|arg| arg == "--remote-executable") {
+    let launch_end = trailboss_runtime::cli::command_run_payload_start(&args).unwrap_or(args.len());
+    let executable = if let Some(index) = args[..launch_end]
+        .iter()
+        .position(|arg| arg == "--remote-executable")
+    {
         if remote.is_none() {
             return Err(io::Error::other("--remote-executable requires --remote"));
         }
@@ -104,6 +108,7 @@ fn run() -> io::Result<()> {
                 | "notification"
                 | "integration"
                 | "plugin"
+                | "command"
                 | "__tab-transfer-helper"
         )
     ) {

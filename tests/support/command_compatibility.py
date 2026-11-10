@@ -35,6 +35,40 @@ def request(path, method, params=None):
         return reply['result']
 
 
+def projection(endpoint):
+    """Read Core's actual generation-1 native UI projection, including commands."""
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.settimeout(8)
+        connection.connect(str(endpoint))
+        send(connection, 20, 'endpoint.hello.v1', json.dumps({
+            'generation': 1, 'cell_width_px': 0, 'cell_height_px': 0,
+            'surface_size': {'cols': 100, 'rows': 30}, 'pixel_mouse': False,
+            'direct_graphics': False, 'endpoint_keybindings': False, 'mouse_capture': False,
+            'surface_active': False, 'surface_reuse': False, 'surface_delta': False,
+            'surface_scroll': False, 'snapshot_codecs': ['shell.snapshot.v1'],
+            'surface_codecs': ['shell.surface.v1'], 'input_codecs': ['shell.input.semantic.v1'],
+            'blob_codecs': ['shell.blob.v1']}))
+        while True:
+            size = struct.unpack('<I', read_exact(connection, 4))[0]
+            assert size <= 2 * 1024 * 1024, 'oversized generation-1 frame'
+            reader = Reader(read_exact(connection, size))
+            if reader.integer() != 20:
+                continue
+            key, payload = reader.text(), reader.text()
+            reader.finish()
+            if key == 'endpoint.plugin-ui.v1':
+                return json.loads(payload)
+
+
+def native_catalog(api):
+    """Refresh registry state, then observe native metadata beside the session API."""
+    request(api, 'plugin.list')
+    value = projection(Path(api).with_name('trailboss-client.sock'))
+    assert value['boot_id'] and value['commands'], (
+        'Core native endpoint must publish command metadata', value)
+    return {'boot_id': value['boot_id'], 'commands': value['commands']}
+
+
 def declarations(path):
     with socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(8)
@@ -157,8 +191,8 @@ def run_case(args, binary, annotation, current):
                 issued = [fragment['name'] for fragment in all_fragments
                           if fragment['name'].startswith('trailboss.command.v1:')]
                 if current:
-                    discovered = request(api, 'ui.command.list')
-                    assert discovered['boot_id'] == projection['boot_id']
+                    assert projection['boot_id'] == decoded['snapshots'][0]['boot_id']
+                    assert projection['commands'], 'candidate must publish native command metadata'
                     assert issued, 'candidate must publish generated fragments alongside unchanged producers'
                 else:
                     assert not issued, 'old Core artifact must genuinely predate discovery'

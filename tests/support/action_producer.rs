@@ -14,7 +14,21 @@ pub struct FocusProducer {
     boot_id: String,
 }
 impl FocusProducer {
+    // Generated command fragments carry this owner before its retained producer
+    // publishes a list zone. Wait for the target's real action before native attach.
     pub fn new() -> Self {
+        let fixture = Self::start(false);
+        fixture.wait_ready();
+        fixture
+    }
+
+    // Hold only real declaration publication, so the regression can observe the
+    // stock fallback without delaying startup by an arbitrary amount of time.
+    pub fn start_gated() -> Self {
+        Self::start(true)
+    }
+
+    fn start(gate_publication: bool) -> Self {
         let core = Core::new();
         let first = core.request(
             "workspace.create",
@@ -29,10 +43,13 @@ impl FocusProducer {
         let target = second["tab"]["tab_id"].as_str().unwrap().to_owned();
         let plugin = core.home.join("observed-producer");
         std::fs::create_dir_all(&plugin).unwrap();
+        if !gate_publication {
+            std::fs::write(plugin.join("allow-declaration"), "").unwrap();
+        }
         let root = env!("CARGO_MANIFEST_DIR");
         // Observe bytes at the real retained producer boundary, without replacing its behavior.
         let source = format!(
-            r#"import {{ appendFileSync }} from 'node:fs';
+            r#"import {{ appendFileSync, existsSync, watch }} from 'node:fs';
 const child = Bun.spawn(['bun', {producer:?}, '--watch'], {{stdin:'pipe',stdout:'pipe',stderr:'inherit'}});
 appendFileSync('envelopes', JSON.stringify({{kind:'started',pid:child.pid,socket:process.env.HERDR_SOCKET_PATH}})+'\n');
 async function lines(stream, handle) {{
@@ -50,6 +67,13 @@ async function lines(stream, handle) {{
 void lines(child.stdout, async line => {{
   const value = JSON.parse(line);
   if (value.herdr === 'action_result') appendFileSync('envelopes',JSON.stringify({{kind:'result',...value}})+'\n');
+  if (value.herdr === 'widget_tree' && !existsSync('allow-declaration')) {{
+    await new Promise(resolve => {{
+      const released = () => {{ if (existsSync('allow-declaration')) {{ watcher.close(); resolve(); }} }};
+      const watcher = watch('.', released);
+      released();
+    }});
+  }}
   process.stdout.write(line+'\n');
 }});
 await lines(Bun.stdin.stream(), async line => {{
@@ -97,6 +121,36 @@ child.kill(); await child.exited;
             "Given must be unfocused"
         );
         fixture
+    }
+
+    pub fn action_ready(&self, declarations: &trailboss::sidebar::Declarations) -> bool {
+        trailboss::sidebar::rows(declarations).any(|(owner, node)| matches!(
+            node,
+            trailboss_runtime::protocol::widgets::Node::Row { action: Some(action), context, .. }
+                if owner == "fixture.observed-focus" && action == "focus-tab"
+                    && context.workspace_id.as_deref() == Some(self.workspace.as_str())
+                    && context.tab_id.as_deref() == Some(self.target.as_str())
+        ))
+    }
+
+    pub fn release_publication(&self) {
+        std::fs::write(self.plugin.join("allow-declaration"), "").unwrap();
+    }
+
+    pub fn wait_ready(&self) {
+        let mut observer = self.core.attach();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while observer
+            .declarations
+            .as_ref()
+            .is_none_or(|trees| !self.action_ready(trees))
+        {
+            observer.receive().unwrap();
+            assert!(
+                Instant::now() < deadline,
+                "real owner action declaration missing"
+            );
+        }
     }
     pub fn focused(&self) -> String {
         let snapshot = self.core.request("session.snapshot", json!({}));

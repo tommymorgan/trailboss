@@ -585,8 +585,7 @@ impl HeadlessServer {
                 .as_ref();
             let plugin_ui_projection = plugin_ui_rows
                 .and_then(|rows| rows.as_ref().ok())
-                .filter(|rows| !rows.is_empty())
-                .map(Vec::as_slice);
+                .filter(|projection| !projection.ui.is_empty());
             if matches!(mode, ClientConnectionMode::ClientShell) {
                 if let Some(Err(error)) = plugin_ui_rows {
                     self.send_to_client(
@@ -688,7 +687,7 @@ impl HeadlessServer {
                 if client.shell_snapshot.as_ref() != Some(&candidate)
                     || client.shell_agent_completions.as_ref() != Some(&completions)
                     || client.shell_agent_view != agent_view
-                    || client.shell_plugin_ui.as_deref() != plugin_ui_projection
+                    || client.shell_plugin_ui.as_ref() != plugin_ui_projection
                 {
                     client.shell_projection_revision =
                         client.shell_projection_revision.saturating_add(1);
@@ -760,7 +759,9 @@ impl HeadlessServer {
                         match crate::protocol::endpoint::plugin_ui_message(
                             &candidate.boot_id,
                             candidate.revision,
-                            plugin_ui_projection.unwrap_or_default(),
+                            plugin_ui_projection.map_or(&[], |projection| projection.ui.as_slice()),
+                            plugin_ui_projection
+                                .map_or(&[], |projection| projection.commands.as_slice()),
                         )
                         .map_err(std::io::Error::other)
                         .and_then(|message| {
@@ -800,7 +801,7 @@ impl HeadlessServer {
                     client.shell_snapshot = Some(candidate);
                     client.shell_agent_completions = Some(completions);
                     client.shell_agent_view = agent_view;
-                    client.shell_plugin_ui = plugin_ui_projection.map(|rows| rows.to_vec());
+                    client.shell_plugin_ui = plugin_ui_projection.cloned();
                 }
                 shell_projection_revision = client.shell_projection_revision;
                 if !client.shell_surface_active {

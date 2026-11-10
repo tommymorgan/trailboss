@@ -48,7 +48,12 @@ pub fn extract_remote_args(args: &[String]) -> Result<(Vec<String>, Option<Remot
     let mut keybindings_seen = false;
     let mut live_handoff = false;
     let mut index = 1;
+    let payload_start = crate::cli::command_run_payload_start(args);
     while index < args.len() {
+        if payload_start == Some(index) {
+            cleaned.extend_from_slice(&args[index..]);
+            break;
+        }
         let arg = &args[index];
         if arg == "--" {
             cleaned.extend_from_slice(&args[index..]);
