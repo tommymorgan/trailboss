@@ -291,6 +291,14 @@ pub(super) fn adopt(core: &CoreRegistration) -> io::Result<()> {
         return Ok(());
     }
     let helper: HelperIdentity = storage::read(&storage::root()?.join("helper.json"))?;
+    // A previous adopter may have lost its Activate reply before retained.json
+    // was published. The helper serializes control requests: an acknowledged
+    // Cancel drains that Activate and certifies this endpoint is not active.
+    // Refuse without touching the source acceptor if ownership is uncertain.
+    request(
+        HelperRequest::Cancel(core.public_endpoint.clone()),
+        Vec::new(),
+    )?;
     let packet = match transport::call(core, CoreRequest::PrepareFrontDoor, Vec::new()) {
         Ok(packet) => packet,
         Err(error) => {
@@ -303,15 +311,14 @@ pub(super) fn adopt(core: &CoreRegistration) -> io::Result<()> {
         return Err(storage::denied());
     }
     if let Err(error) = request(HelperRequest::Stage(core.clone()), packet.descriptors) {
-        if request(
+        // The preflight fenced earlier adopters, and this adopter has not
+        // Activated. Stage only retains a passive descriptor, so resumption
+        // is safe even if Cancel fails or EOF precedes observable helper death.
+        let _ = request(
             HelperRequest::Cancel(core.public_endpoint.clone()),
             Vec::new(),
-        )
-        .is_ok()
-            || !storage::alive(helper.pid, helper.start)
-        {
-            let _ = transport::call(core, CoreRequest::ResumeFrontDoor, Vec::new());
-        }
+        );
+        let _ = transport::call(core, CoreRequest::ResumeFrontDoor, Vec::new());
         return Err(error);
     }
     // A live helper with a lost Activate acknowledgement may already accept;

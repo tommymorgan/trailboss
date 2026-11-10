@@ -134,6 +134,150 @@ fn helper_exit_before_adoption_commit_preserves_original_endpoint_and_usable_inp
     assert_adoption_preserves_original_endpoint(false, Some("helper-exit"));
 }
 
+#[test]
+fn unresolved_activation_cannot_resume_a_second_source_acceptor() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let name = format!("ar-{nonce:x}");
+    let home = std::env::temp_dir().join(&name);
+    std::fs::create_dir(&home).unwrap();
+    let executable = fault_wrapper(&home, "activation-race");
+    let alpha = Core::launch_with_executable(home, name, executable, true);
+    let beta = Core::launch_with_executable(
+        alpha.home.clone(),
+        format!("{}-beta", alpha.name),
+        support::executable(),
+        false,
+    );
+    let source = alpha.request("workspace.create", json!({"cwd":alpha.home}));
+    let destination = beta.request("workspace.create", json!({"cwd":alpha.home}));
+    let before = alpha.request("session.snapshot", json!({}));
+    let endpoint = alpha
+        .home
+        .join("trailboss/sessions")
+        .join(&alpha.name)
+        .join("trailboss.sock");
+    let identity = std::fs::symlink_metadata(&endpoint).unwrap();
+    let connect = || {
+        let stream = UnixStream::connect(&endpoint).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        BufReader::new(stream)
+    };
+    // Both public handlers exist before quiescence. The second coordinator's
+    // ensure must finish before the helper stops dispatching Activate.
+    let accepted = || {
+        std::fs::read_to_string(alpha.home.join("os-fault-receipt"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains("source public client accepted"))
+            .count()
+    };
+    let baseline = accepted();
+    let mut first = connect();
+    let mut second = connect();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while accepted() < baseline + 2 {
+        assert!(
+            Instant::now() < deadline,
+            "public handlers did not accept both clients"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let params = json!({
+        "tab_id":source["tab"]["tab_id"], "destination_session":beta.name,
+        "workspace_id":destination["workspace"]["workspace_id"]
+    });
+    std::thread::scope(|scope| {
+        let first_call = scope.spawn(|| {
+            wire_request(&mut first, "first", "tab.transfer", {
+                let mut params = params.clone();
+                params["operation_id"] = json!("first-uncertain-activation");
+                params
+            })
+        });
+        wait_fault_event(&alpha.home, "first Activate ready");
+        let second_call = scope.spawn(|| {
+            wire_request(&mut second, "second", "tab.transfer", {
+                let mut params = params.clone();
+                params["operation_id"] = json!("second-adoption");
+                params
+            })
+        });
+        wait_fault_event(&alpha.home, "second adoption lock attempted");
+        std::fs::write(alpha.home.join("os-fault-armed.activate-send"), b"go").unwrap();
+        wait_fault_event(&alpha.home, "helper Activate dispatch held");
+        let first_reply = first_call.join().unwrap();
+        assert_eq!(
+            first_reply["error"]["code"], "tab_transfer_failed",
+            "{first_reply}"
+        );
+        assert!(!alpha
+            .home
+            .join("trailboss/tab-transfer/retained.json")
+            .exists());
+        wait_fault_event(&alpha.home, "second helper control queued");
+        std::fs::write(alpha.home.join("os-fault-armed.activate-dispatch"), b"go").unwrap();
+        let second_reply = second_call.join().unwrap();
+        assert_eq!(
+            second_reply["error"]["code"], "tab_transfer_failed",
+            "{second_reply}"
+        );
+        assert!(support::transfer_helper(&alpha.home).is_some());
+    });
+    // The helper's real public accept syscall is gated. A resumed source
+    // would answer this queued request, proving two acceptors. Do not replay
+    // the request after releasing the helper.
+    let mut pending = connect();
+    pending
+        .get_mut()
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    writeln!(
+        pending.get_mut(),
+        "{}",
+        json!({
+            "id":"sole-acceptor", "method":"session.snapshot", "params":{}
+        })
+    )
+    .unwrap();
+    let mut line = String::new();
+    let blocked = pending.read_line(&mut line).unwrap_err();
+    assert!(matches!(
+        blocked.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ));
+    std::fs::write(alpha.home.join("os-fault-armed.accept"), b"go").unwrap();
+    pending
+        .get_mut()
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    pending.read_line(&mut line).unwrap();
+    let reply: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(reply["id"], "sole-acceptor");
+    assert_eq!(reply["result"]["snapshot"], before["snapshot"]);
+    let after = std::fs::symlink_metadata(&endpoint).unwrap();
+    assert_eq!(
+        (identity.dev(), identity.ino(), identity.mode()),
+        (after.dev(), after.ino(), after.mode())
+    );
+}
+
+fn wait_fault_event(home: &Path, event: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let receipt = std::fs::read_to_string(home.join("os-fault-receipt")).unwrap_or_default();
+        if receipt.contains(event) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "missing {event}: {receipt}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn assert_adoption_preserves_original_endpoint(replace_socket: bool, os_fault: Option<&str>) {
     let mut alpha = if let Some(mode) = os_fault {
         let nonce = std::time::SystemTime::now()
@@ -233,6 +377,19 @@ fn assert_adoption_preserves_original_endpoint(replace_socket: bool, os_fault: O
                 else { json!("nonexistent-adoption-workspace") },"operation_id":"adoption-selected-tab-retained"
         }),
     );
+    if os_fault == Some("helper-exit") {
+        // Stage has reached EOF and Cancel has failed, but the exact helper
+        // remains alive behind the fixture gate until this response arrives.
+        assert!(support::transfer_helper(&alpha.home).is_some());
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("failed to fill whole buffer"),
+            "{refused}"
+        );
+        std::fs::write(alpha.home.join("os-fault-armed.release"), b"release").unwrap();
+    }
     assert_eq!(refused["error"]["code"], "tab_transfer_failed");
     if replace_socket {
         assert!(
@@ -531,6 +688,7 @@ fn assert_native_destination(native: &mut console::Console, session: &str, works
 const OS_FAULT_SHIM: &str = r#"
 #define _GNU_SOURCE
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/stat.h>
 #include <poll.h>
 #include <fcntl.h>
@@ -594,6 +752,82 @@ static void receipt(const char *event) {
     if (write(fd, line, size) != size) _exit(92);
     close(fd);
 }
+static void gate(const char *suffix, const char *event) {
+    char path[4096];
+    snprintf(path, sizeof(path), "%s.%s", getenv("BOUNDARY_FAULT_ARM"), suffix);
+    if (mkfifo(path, 0600)) _exit(97);
+    receipt(event);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    char token;
+    if (fd < 0 || read(fd, &token, 1) != 1) _exit(98);
+    close(fd);
+}
+static atomic_int activation_sent;
+static atomic_int stage_reply_fd = -1;
+ssize_t send(int fd, const void *bytes, size_t length, int flags) {
+    static ssize_t (*real_send)(int, const void *, size_t, int);
+    if (!real_send) real_send = dlsym(RTLD_NEXT, "send");
+    int activation = owned() && mode("activation-race") && memmem(bytes, length, "\"Activate\"", 10);
+    if (owned() && mode("activation-race") && memmem(bytes, length, "\"Stage\"", 7)
+            && !atomic_load(&activation_sent))
+        atomic_store(&stage_reply_fd, fd);
+    if (activation) atomic_store(&activation_sent, 1);
+    ssize_t result = real_send(fd, bytes, length, flags);
+    if (activation && result == (ssize_t)length) {
+        // Lose only the real Activate acknowledgement, leaving the helper
+        // dispatch alive and pending, just as a timed-out coordinator does.
+        shutdown(fd, SHUT_RD);
+    } else if (owned() && mode("activation-race") && atomic_load(&activation_sent)
+            && (memmem(bytes, length, "\"Stage\"", 7) || memmem(bytes, length, "\"Cancel\"", 8))) {
+        receipt("second helper control queued");
+    }
+    return result;
+}
+ssize_t recv(int fd, void *bytes, size_t length, int flags) {
+    static ssize_t (*real_recv)(int, void *, size_t, int);
+    if (!real_recv) real_recv = dlsym(RTLD_NEXT, "recv");
+    ssize_t result = real_recv(fd, bytes, length, flags);
+    const char *source = getenv("BOUNDARY_FAULT_CORE");
+    if (result > 0 && owned() && mode("activation-race")
+            && fd == atomic_load(&stage_reply_fd)
+            && memmem(bytes, result, "\"helper-v1\"", 11)) {
+        atomic_store(&stage_reply_fd, -1);
+        // Stage has replied, before the next Activate connection exists.
+        gate("activate-send", "first Activate ready");
+    }
+    if (result > 0 && mode("activation-race") && source && strtol(source, 0, 10) == getppid()
+            && memmem(bytes, result, "\"Activate\"", 10)) {
+        gate("activate-dispatch", "helper Activate dispatch held");
+    }
+    return result;
+}
+int accept4(int fd, struct sockaddr *address, socklen_t *length, int flags) {
+    static int (*real_accept4)(int, struct sockaddr *, socklen_t *, int);
+    if (!real_accept4) real_accept4 = dlsym(RTLD_NEXT, "accept4");
+    const char *source = getenv("BOUNDARY_FAULT_CORE");
+    if (mode("activation-race") && source && strtol(source, 0, 10) == getppid()) {
+        struct sockaddr_un local;
+        socklen_t size = sizeof(local);
+        if (!getsockname(fd, (struct sockaddr *)&local, &size) && local.sun_family == AF_UNIX
+                && strstr(local.sun_path, "/trailboss.sock")) {
+            char path[4096];
+            snprintf(path, sizeof(path), "%s.accept", getenv("BOUNDARY_FAULT_ARM"));
+            if (access(path, F_OK)) {
+                errno = EAGAIN;
+                return -1;
+            }
+        }
+    }
+    int result = real_accept4(fd, address, length, flags);
+    if (result >= 0 && owned() && mode("activation-race")) {
+        struct sockaddr_un local;
+        socklen_t size = sizeof(local);
+        if (!getsockname(fd, (struct sockaddr *)&local, &size) && local.sun_family == AF_UNIX
+                && strstr(local.sun_path, "/trailboss.sock"))
+            receipt("source public client accepted");
+    }
+    return result;
+}
 ssize_t sendmsg(int fd, const struct msghdr *message, int flags) {
     static ssize_t (*real_sendmsg)(int, const struct msghdr *, int);
     if (!real_sendmsg) real_sendmsg = dlsym(RTLD_NEXT, "sendmsg");
@@ -633,7 +867,23 @@ ssize_t recvmsg(int fd, struct msghdr *message, int flags) {
     const char *activation = getenv("BOUNDARY_FAULT_ARM");
     if (result > 0 && mode("helper-exit") && source_pid && activation && !access(activation, F_OK)
             && strtol(source_pid, 0, 10) == getppid() && listener_rights(message)) {
+        // Close Stage/control and every listener before becoming observably
+        // dead. This forces the pre-activation rollback race without signals.
+        char release[4096];
+        snprintf(release, sizeof(release), "%s.release", activation);
+        if (mkfifo(release, 0600)) _exit(95);
         receipt("routing helper exited after listener delivery before adoption commit");
+        for (int probe = 3; probe < 1024; probe++) {
+            int accepting = 0;
+            socklen_t size = sizeof(accepting);
+            if (!getsockopt(probe, SOL_SOCKET, SO_ACCEPTCONN, &accepting, &size) && accepting)
+                close(probe);
+        }
+        close(fd);
+        int gate = open(release, O_RDONLY | O_CLOEXEC);
+        char token;
+        if (gate < 0 || read(gate, &token, 1) != 1) _exit(96);
+        close(gate);
         _exit(86);
     }
     if (result > 0 && owned() && (mode("import-pipe") || mode("routes-lock")) && pty_rights(message)) {
@@ -655,6 +905,17 @@ int pipe(int fds[2]) {
 int flock(int fd, int operation) {
     static int (*real_flock)(int, int);
     if (!real_flock) real_flock = dlsym(RTLD_NEXT, "flock");
+    if (owned() && mode("activation-race")) {
+        static atomic_int adoption_locks;
+        char target[512], name[64];
+        snprintf(name, sizeof(name), "/proc/self/fd/%d", fd);
+        ssize_t length = readlink(name, target, sizeof(target) - 1);
+        if (length > 0) {
+            target[length] = 0;
+            if (strstr(target, "/front-") && atomic_fetch_add(&adoption_locks, 1) == 1)
+                receipt("second adoption lock attempted");
+        }
+    }
     if (owned() && mode("routes-lock") && atomic_load(&armed)) {
         char target[512], name[64];
         snprintf(name, sizeof(name), "/proc/self/fd/%d", fd);
