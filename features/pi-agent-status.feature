@@ -31,3 +31,9 @@ Feature: Pi agent status reporting
     Given a Pi reload restores an active background run before the Trailboss extension's session_start runs
     When the Trailboss extension's session_start runs in TUI mode with the parent idle
     Then the first state Trailboss receives is "waiting" with message "awaiting background work"
+
+  Scenario: RootPiReportsIdleAfterForeignSessionCrossTalk
+    Given a Pi TUI root session is working in a pane
+    When another Pi session reports working through the pane's inherited locator
+    And the root Pi session reports idle
+    Then the pane shows idle for the root Pi session

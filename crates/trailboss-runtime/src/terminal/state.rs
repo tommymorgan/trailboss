@@ -1282,7 +1282,7 @@ impl TerminalState {
         });
         let root_session_cross_talk = matches!(
             (source, agent_label),
-            ("herdr:opencode", "opencode") | ("herdr:omp", "omp")
+            ("herdr:opencode", "opencode") | ("herdr:omp", "omp") | ("herdr:pi", "pi")
         ) && process_present
             && anchored_session_ref
                 .zip(session_ref.as_ref())
@@ -3741,6 +3741,43 @@ mod tests {
                 .map(|session_ref| session_ref.value.as_str()),
             Some(test_session_path("one.jsonl").as_str())
         );
+    }
+
+    #[test]
+    fn root_pi_can_report_idle_after_foreign_session_report() {
+        let mut terminal = test_terminal();
+        let root =
+            crate::agent_resume::AgentSessionRef::path(test_session_path("pi-root.jsonl")).unwrap();
+        anchor_full_lifecycle_session(&mut terminal, Agent::Pi, "herdr:pi", "pi", root.clone());
+        terminal
+            .set_hook_authority_with_session_ref(
+                "herdr:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                Some(root.clone()),
+                Some(20),
+            )
+            .unwrap();
+
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            crate::agent_resume::AgentSessionRef::path(test_session_path("pi-foreign.jsonl")),
+            Some(21),
+        );
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Idle,
+            None,
+            Some(root),
+            Some(22),
+        );
+
+        assert_eq!(terminal.state, AgentState::Idle);
     }
 
     #[test]
