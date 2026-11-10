@@ -17,9 +17,13 @@ pub struct CommandInvokeParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UiCommandRunParams {
+    /// Exact visible title or stable Core / qualified plugin identity.
     pub command: String,
+    /// Ordered shell-decoded answers. Raw-tail plugins consume at most one
+    /// unchanged string; omission differs from an explicit empty answer.
     #[serde(default)]
     pub answers: Vec<String>,
+    /// Caller pane locator resolved by Core; never replaced by global focus.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<String>,
 }

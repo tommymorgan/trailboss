@@ -190,11 +190,11 @@ Scenario: ListRunnableCoreCommandsAndHints
 > Shippable state: Enabled available extension commands join the runnable catalog and execute using the same context/arguments as the palette. Built-ins retain Task 1.1 behavior. Pickers remain unadvertised until Task 3.1; no handler-completion wait or new authority is introduced.
 > Boundary verification: At this exact head without Task 3.1, run owned omp-shaped actions by title and qualified ID; inspect handler context and raw-tail bytes through their logs, retain a running handler while CLI exits, and prove the globally focused decoy is unchanged. Re-exercise New space through the same CLI route.
 
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::RunExtensionByVisibleTitle
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: RunExtensionByVisibleTitle
   Given enabled plugin omp exposes the visible palette title "omp: clear" and a qualified stable action ID
   And caller pane Planning in Work differs from the global focused pane
@@ -202,11 +202,11 @@ Scenario: RunExtensionByVisibleTitle
   Then the existing plugin action starts exactly once on the caller's workspace, tab and pane
   And the CLI prints its plugin log ID and exits without waiting for the action to finish
   And no on-screen selection is supplied
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::PreserveRawPluginArgumentText
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: PreserveRawPluginArgumentText
   Given enabled plugin omp exposes "omp: add-dir" with raw-tail input
   When command run selects it by <selector_kind> with <argument>
@@ -218,11 +218,11 @@ Scenario Outline: PreserveRawPluginArgumentText
     | qualified stable ID | explicit empty string (Some empty) |
     | visible title | two leading spaces, /tmp/a b, two trailing spaces |
     | qualified stable ID | literal dollar sign, quotes and newline |
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::RejectUnsupportedPluginExecution
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario Outline: RejectUnsupportedPluginExecution
   Given the current plugin catalog has <state>
   When command run attempts the affected title or stable ID
@@ -234,11 +234,11 @@ Scenario Outline: RejectUnsupportedPluginExecution
     | invalid confirmation declaration that the native palette cannot execute |
     | supplied argument on an action that does not support raw-tail input |
     | two answers supplied to a raw-tail action whose palette accepts one text answer |
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::PluginContextNeverFallsBackToGlobalFocus
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: PluginContextNeverFallsBackToGlobalFocus
   Given global focus is Other in Personal
   And a context-required plugin action and a context-free plugin action are installed
@@ -247,11 +247,11 @@ Scenario: PluginContextNeverFallsBackToGlobalFocus
   When command run invokes the context-free action outside a pane
   Then it starts with absent workspace, tab, pane and selection rather than Other's context
   And its plugin log ID is returned without background-completion waiting
-<!-- TODO -->
+<!-- DONE -->
 # Living: features/command-run.feature::ListPluginsWithArgumentsAndBypassConfirmation
 # Action: creates
-# Status: TODO
-# Living updated: NO
+# Status: DONE
+# Living updated: YES
 Scenario: ListPluginsWithArgumentsAndBypassConfirmation
   Given enabled available plugins omp and pi expose palette commands and a confirmation-fragment action
   When command list is requested from Planning's pane

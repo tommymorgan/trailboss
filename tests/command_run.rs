@@ -465,20 +465,6 @@ fn list_runnable_core_commands_and_hints() {
     let core = support::Core::new();
     let (caller, _) = fixture(&core);
     let pane = caller["root_pane"]["pane_id"].as_str().unwrap();
-    let plugin = core.home.join("unavailable-adapter");
-    std::fs::create_dir(&plugin).unwrap();
-    std::fs::write(plugin.join("trailboss-plugin.toml"), "id = \"fixture.unavailable\"\nname = \"Unavailable adapter\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"run\"\ntitle = \"NotYet\"\ncommand = [\"true\"]\n").unwrap();
-    core.request("plugin.link", json!({"path":plugin,"enabled":true}));
-    let unavailable = cli(
-        &core,
-        &["command", "run", "fixture.unavailable/run"],
-        Some(pane),
-    );
-    assert!(!unavailable.status.success());
-    assert_eq!(
-        core.request("plugin.log.list", json!({"limit":20}))["logs"],
-        json!([])
-    );
     let output = cli(&core, &["command", "list"], Some(pane));
     assert!(
         output.status.success(),
@@ -486,7 +472,6 @@ fn list_runnable_core_commands_and_hints() {
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8(output.stdout).unwrap();
-    assert!(!text.contains("NotYet"));
     for (title, id) in [
         ("New space", "host:new-space"),
         ("New tab or space", "host:new"),
@@ -673,4 +658,302 @@ fn option_looking_answers_and_separators_preserve_text_and_selected_session() {
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["result"]["workspace"]["label"], "Prefix still works");
     assert_eq!(decoy.request("workspace.list", json!({})), decoy_before);
+}
+
+fn plugin_fixture(core: &support::Core, actions: &str) -> std::path::PathBuf {
+    let root = core.home.join("omp");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("trailboss-plugin.toml"),
+        format!("id = \"omp\"\nname = \"OMP fixture\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n{actions}"),
+    ).unwrap();
+    std::fs::write(root.join("record.py"),
+        "import json,os,pathlib,time\nwith open('executed.jsonl','a') as f:\n f.write(json.dumps({'context':json.loads(os.environ['HERDR_PLUGIN_CONTEXT_JSON']),'arguments':json.loads(os.environ['HERDR_PLUGIN_ARGUMENTS_JSON']) if 'HERDR_PLUGIN_ARGUMENTS_JSON' in os.environ else None})+'\\n')\nwhile not pathlib.Path('release').exists():\n time.sleep(0.01)\n").unwrap();
+    core.request("plugin.link", json!({"path":root,"enabled":true}));
+    root
+}
+
+#[test]
+fn run_extension_by_visible_title() {
+    let core = support::Core::new();
+    let (caller, decoy) = fixture(&core);
+    let root = plugin_fixture(&core, "[[actions]]\nid = \"clear\"\ntitle = \"omp: clear\"\ncontexts = [\"pane\"]\ncommand = [\"python3\", \"record.py\"]\n");
+    let output = cli(
+        &core,
+        &["command", "run", "omp: clear"],
+        caller["root_pane"]["pane_id"].as_str(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let result = &response["result"];
+    assert!(result["log"]["log_id"].is_string(), "{response}");
+    assert_eq!(result["log"]["status"], "running");
+    let trace = wait_file(&root.join("executed.jsonl"));
+    let rows = trace
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1);
+    let context = &rows[0]["context"];
+    assert_eq!(context["workspace_id"], caller["workspace"]["workspace_id"]);
+    assert_eq!(context["tab_id"], caller["tab"]["tab_id"]);
+    assert_eq!(context["pane_id"], caller["root_pane"]["pane_id"]);
+    assert!(context.get("selected_text").is_none());
+    let snapshot = core.request("session.snapshot", json!({}));
+    assert!(snapshot
+        .to_string()
+        .contains(decoy["root_pane"]["pane_id"].as_str().unwrap()));
+    assert!(snapshot.to_string().contains("Other"));
+    std::fs::write(root.join("release"), "").unwrap();
+}
+
+#[test]
+fn preserve_raw_plugin_argument_text() {
+    for (selector, answer) in [
+        ("omp: add-dir", None),
+        ("omp/add-dir", Some("")),
+        ("omp: add-dir", Some("  /tmp/a b  ")),
+        ("omp/add-dir", Some("$HOME 'quoted' \"double\"\nnext")),
+    ] {
+        let core = support::Core::new();
+        let (caller, _) = fixture(&core);
+        let root = plugin_fixture(&core, "[[actions]]\nid = \"add-dir\"\ntitle = \"omp: add-dir\"\ncontexts = [\"pane\"]\nargument_input = { kind = \"raw_tail\" }\nargument_hint = \"<directory>\"\ncommand = [\"python3\", \"record.py\"]\n");
+        let mut args = vec!["command", "run", selector];
+        args.extend(answer);
+        let output = cli(&core, &args, caller["root_pane"]["pane_id"].as_str());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(response["result"]["log"]["log_id"].is_string());
+        let trace = wait_file(&root.join("executed.jsonl"));
+        let row: serde_json::Value = serde_json::from_str(trace.trim_end()).unwrap();
+        assert_eq!(row["arguments"], json!(answer), "{selector}");
+        std::fs::write(root.join("release"), "").unwrap();
+    }
+}
+
+#[test]
+fn reject_unsupported_plugin_execution() {
+    for (declaration, disabled, answers, code) in [
+        (
+            "platforms = [\"macos\"]\n",
+            false,
+            vec![],
+            "platform_unsupported",
+        ),
+        ("", true, vec![], "plugin_disabled"),
+        (
+            "confirmation_fragment = \"missing.confirm\"\n",
+            false,
+            vec![],
+            "command_unavailable",
+        ),
+        ("", false, vec!["text"], "unsupported_plugin_arguments"),
+        (
+            "argument_input = { kind = \"raw_tail\" }\n",
+            false,
+            vec!["one", "two"],
+            "extra_answer",
+        ),
+    ] {
+        let core = support::Core::new();
+        let (caller, _) = fixture(&core);
+        let root = plugin_fixture(&core, &format!("[[actions]]\nid = \"candidate\"\ntitle = \"omp: candidate\"\n{declaration}command = [\"python3\", \"record.py\"]\n"));
+        if disabled {
+            core.request("plugin.disable", json!({"plugin_id":"omp"}));
+        }
+        for selector in ["omp: candidate", "omp/candidate"] {
+            let mut args = vec!["command", "run", selector];
+            args.extend(answers.iter().copied());
+            let output = cli(&core, &args, caller["root_pane"]["pane_id"].as_str());
+            assert!(!output.status.success(), "{selector}: {declaration}");
+            let response: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(response["error"]["code"], code, "{response}");
+        }
+        assert_eq!(
+            core.request("plugin.log.list", json!({"plugin_id":"omp"}))["logs"],
+            json!([])
+        );
+        assert!(!root.join("executed.jsonl").exists());
+    }
+}
+
+#[test]
+fn plugin_context_never_falls_back_to_global_focus() {
+    let core = support::Core::new();
+    let (_, decoy) = fixture(&core);
+    let root = plugin_fixture(&core, "[[actions]]\nid = \"required\"\ntitle = \"omp: required\"\ncontexts = [\"pane\"]\ncommand = [\"python3\", \"record.py\"]\n[[actions]]\nid = \"free\"\ntitle = \"omp: free\"\ncontexts = [\"global\"]\ncommand = [\"python3\", \"record.py\"]\n");
+    let refused = cli(&core, &["command", "run", "omp/required"], None);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr)
+        .contains("no Trailboss pane context; run from a Trailboss pane"));
+    assert_eq!(
+        core.request("plugin.log.list", json!({"plugin_id":"omp"}))["logs"],
+        json!([])
+    );
+    let output = cli(&core, &["command", "run", "omp/free"], None);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(result["result"]["log"]["log_id"].is_string());
+    assert_eq!(result["result"]["log"]["status"], "running");
+    let trace = wait_file(&root.join("executed.jsonl"));
+    let row: serde_json::Value = serde_json::from_str(trace.trim_end()).unwrap();
+    for field in [
+        "workspace_id",
+        "tab_id",
+        "pane_id",
+        "focused_pane_id",
+        "selected_text",
+    ] {
+        assert!(row["context"].get(field).is_none(), "{row}");
+    }
+    // The legacy route intentionally still merges the current global focus.
+    let legacy = core.request(
+        "plugin.action.invoke",
+        json!({"plugin_id":"omp","action_id":"free"}),
+    );
+    assert_eq!(
+        legacy["context"]["workspace_id"],
+        decoy["workspace"]["workspace_id"]
+    );
+    assert_eq!(legacy["context"]["tab_id"], decoy["tab"]["tab_id"]);
+    std::fs::write(root.join("release"), "").unwrap();
+}
+
+#[test]
+fn list_plugins_with_arguments_and_bypass_confirmation() {
+    let core = support::Core::new();
+    let (caller, _) = fixture(&core);
+    let pane = caller["root_pane"]["pane_id"].as_str();
+    let root = plugin_fixture(&core, "[[actions]]\nid = \"clear\"\ntitle = \"omp: clear\"\ncontexts = [\"pane\"]\ncommand = [\"python3\", \"record.py\"]\n[[actions]]\nid = \"add-dir\"\ntitle = \"omp: add-dir\"\nargument_input = { kind = \"raw_tail\" }\nargument_hint = \"<directory>\"\ncommand = [\"python3\", \"record.py\"]\n[[actions]]\nid = \"confirm\"\ntitle = \"omp: confirm\"\nconfirmation_fragment = \"confirm.action\"\ncommand = [\"python3\", \"record.py\"]\n[[actions]]\nid = \"broken\"\ntitle = \"Broken confirmation\"\nconfirmation_fragment = \"missing\"\ncommand = [\"true\"]\n");
+    let pi = core.home.join("pi");
+    std::fs::create_dir(&pi).unwrap();
+    std::fs::write(pi.join("trailboss-plugin.toml"), "id = \"pi\"\nname = \"Pi fixture\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"help\"\ntitle = \"pi: help\"\nargument_input = { kind = \"raw_tail\" }\nargument_hint = \"<topic>\"\ncommand = [\"true\"]\n").unwrap();
+    core.request("plugin.link", json!({"path":pi,"enabled":true}));
+    let confirmation = json!({"herdr":"widget_tree","version":1,"zones":[],
+    "fragments":[{"name":"confirm.action","priority":0,"tree":{"type":"column","children":[
+        {"type":"row","action":"host:cancel","children":[{"type":"label","text":"Cancel","role":"label"}]},
+        {"type":"row","action":"confirm","children":[{"type":"label","text":"Confirm","role":"label"}]}
+    ]}}]});
+    std::fs::write(
+        root.join("confirmation.py"),
+        format!("print({:?}, flush=True)\n", confirmation.to_string()),
+    )
+    .unwrap();
+    let manifest = std::fs::read_to_string(root.join("trailboss-plugin.toml")).unwrap();
+    std::fs::write(root.join("trailboss-plugin.toml"), format!("{manifest}[[ui]]\nid = \"confirmation\"\nsurface = \"sidebar\"\ncommand = [\"python3\", \"confirmation.py\"]\n")).unwrap();
+    core.request("plugin.link", json!({"path":root,"enabled":true}));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let logs = core.request("plugin.log.list", json!({"plugin_id":"omp"}));
+        if logs["logs"].as_array().unwrap().iter().any(|log| {
+            log["status"] == "succeeded" && log["command"] == json!(["python3", "confirmation.py"])
+        }) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{logs}");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let output = cli(&core, &["command", "list"], pane);
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    for value in [
+        "omp: clear",
+        "omp/clear",
+        "omp: add-dir",
+        "omp/add-dir",
+        "<directory>",
+        "pi: help",
+        "pi/help",
+        "<topic>",
+        "omp: confirm",
+        "omp/confirm",
+    ] {
+        assert!(text.contains(value), "{text}");
+    }
+    for value in [
+        "Broken confirmation",
+        "Move to session",
+        "Recently closed tabs",
+    ] {
+        assert!(!text.contains(value), "{text}");
+    }
+    let outside = cli(&core, &["command", "list"], None);
+    let outside = String::from_utf8(outside.stdout).unwrap();
+    assert!(!outside.contains("omp: clear"), "{outside}");
+    assert!(outside.contains("omp: add-dir"), "{outside}");
+    let output = cli(&core, &["command", "run", "omp: confirm"], pane);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(response["result"]["log"]["log_id"].is_string());
+    assert_eq!(response["result"]["log"]["status"], "running");
+    let trace = wait_file(&root.join("executed.jsonl"));
+    assert_eq!(trace.lines().count(), 1);
+    std::fs::write(root.join("release"), "").unwrap();
+}
+
+#[test]
+fn unavailable_title_collisions_do_not_hide_runnable_commands() {
+    for (declaration, disabled, code) in [
+        ("", true, "plugin_disabled"),
+        ("platforms = [\"macos\"]\n", false, "platform_unsupported"),
+        (
+            "confirmation_fragment = \"missing.confirm\"\n",
+            false,
+            "command_unavailable",
+        ),
+        ("contexts = [\"pane\"]\n", false, "missing_context"),
+    ] {
+        for title in ["New space", "Runnable plugin"] {
+            let core = support::Core::new();
+            let root = plugin_fixture(&core, &format!("[[actions]]\nid = \"candidate\"\ntitle = {title:?}\n{declaration}command = [\"python3\", \"record.py\"]\n"));
+            if disabled {
+                core.request("plugin.disable", json!({"plugin_id":"omp"}));
+            }
+            let pi = core.home.join("pi");
+            std::fs::create_dir(&pi).unwrap();
+            std::fs::write(pi.join("trailboss-plugin.toml"), "id = \"pi\"\nname = \"Runnable owner\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.9.0\"\n[[actions]]\nid = \"live\"\ntitle = \"Runnable plugin\"\ncommand = [\"true\"]\n").unwrap();
+            core.request("plugin.link", json!({"path":pi,"enabled":true}));
+            let mut args = vec!["command", "run", title];
+            if title == "New space" {
+                args.push("Research");
+            }
+            let output = cli(&core, &args, None);
+            assert!(
+                output.status.success(),
+                "{declaration} disabled={disabled}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            if title == "New space" {
+                assert_eq!(response["result"]["workspace"]["label"], "Research");
+            } else {
+                assert_eq!(response["result"]["action"]["plugin_id"], "pi");
+            }
+            let unavailable = cli(&core, &["command", "run", "omp/candidate"], None);
+            assert!(!unavailable.status.success());
+            let response: serde_json::Value = serde_json::from_slice(&unavailable.stderr).unwrap();
+            assert_eq!(response["error"]["code"], code, "{response}");
+            assert_eq!(
+                core.request("plugin.log.list", json!({"plugin_id":"omp"}))["logs"],
+                json!([])
+            );
+            assert!(!root.join("executed.jsonl").exists());
+        }
+    }
 }

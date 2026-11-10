@@ -25,6 +25,13 @@ use crate::{
 use super::super::responses::{encode_error, encode_success};
 use super::{manifest, plugin_manifest_available};
 
+pub(in crate::app::api) fn plugin_requires_context(command: &UiCommandInfo) -> bool {
+    command
+        .contexts
+        .iter()
+        .any(|context| *context != crate::api::schema::PluginActionContext::Global)
+}
+
 impl App {
     pub(crate) fn ui_command_catalog(
         &mut self,
@@ -36,12 +43,108 @@ impl App {
             })?;
         let ordinary =
             super::sidebar_ui_rows(&self.state.installed_plugins, &self.state.plugin_ui_dynamic);
-        projection(&self.state, ordinary, true, true)
-            .map(|(commands, _)| commands)
-            .map_err(|message| crate::api::schema::ErrorBody {
-                code: "ui_command_projection_failed".into(),
-                message,
+        let (mut commands, _) =
+            projection(&self.state, ordinary, true, true).map_err(|message| {
+                crate::api::schema::ErrorBody {
+                    code: "ui_command_projection_failed".into(),
+                    message,
+                }
+            })?;
+        // Retain unavailable identities for actionable run errors. These never
+        // enter native publication, and list filters them using the same checks.
+        for plugin in self.state.installed_plugins.values() {
+            for action in &plugin.actions {
+                if plugin.enabled
+                    && plugin_manifest_available(plugin)
+                    && manifest::effective_platforms(&action.platforms, &plugin.platforms)
+                        .as_ref()
+                        .is_none_or(|platforms| platforms.contains(&manifest::current_platform()))
+                {
+                    continue;
+                }
+                let key = UiCommandKey::Plugin {
+                    plugin_id: plugin.plugin_id.clone(),
+                    action_id: action.id.clone(),
+                };
+                commands.push(UiCommandInfo {
+                    key,
+                    title: action.title.clone(),
+                    description: action.description.clone(),
+                    contexts: action.contexts.clone(),
+                    argument_input: action.argument_input.clone(),
+                    argument_hint: action.argument_hint.clone(),
+                    target: UiCommandTarget::Owner,
+                    fragment_name: String::new(),
+                    diagnostic: Some("plugin action is unavailable".into()),
+                });
+            }
+        }
+        Ok(commands)
+    }
+    pub(in crate::app::api) fn named_plugin_command_available(
+        &self,
+        command: &UiCommandInfo,
+    ) -> Result<(), crate::api::schema::ErrorBody> {
+        let UiCommandKey::Plugin {
+            plugin_id,
+            action_id,
+        } = &command.key
+        else {
+            return Ok(());
+        };
+        let plugin = self
+            .state
+            .installed_plugins
+            .get(plugin_id)
+            .expect("catalog plugin is installed");
+        if !plugin_manifest_available(plugin) {
+            return Err(crate::api::schema::ErrorBody {
+                code: "plugin_manifest_unavailable".into(),
+                message: format!("plugin {plugin_id} manifest is unavailable"),
+            });
+        }
+        let action = plugin
+            .actions
+            .iter()
+            .find(|action| action.id == *action_id)
+            .expect("catalog action is declared");
+        if !plugin.enabled {
+            return Err(crate::api::schema::ErrorBody {
+                code: "plugin_disabled".into(),
+                message: format!("plugin {plugin_id} is disabled"),
+            });
+        }
+        manifest::ensure_platform_supported(
+            manifest::effective_platforms(&action.platforms, &plugin.platforms),
+            &format!("action '{plugin_id}.{action_id}'"),
+        )
+        .map_err(|(code, message)| crate::api::schema::ErrorBody {
+            code: code.into(),
+            message,
+        })?;
+        if let Some(message) = &command.diagnostic {
+            return Err(crate::api::schema::ErrorBody {
+                code: "command_unavailable".into(),
+                message: message.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(in crate::app::api) fn named_command_runnable(
+        &self,
+        command: &UiCommandInfo,
+        has_context: bool,
+    ) -> bool {
+        if matches!(command.key, UiCommandKey::Plugin { .. }) {
+            self.named_plugin_command_available(command).is_ok()
+                && (has_context || !plugin_requires_context(command))
+        } else {
+            crate::core_actions::command_descriptor(&command.key).is_some_and(|descriptor| {
+                descriptor.runnable_by_name()
+                    && (has_context || descriptor.target == CoreCommandTarget::Global)
             })
+        }
     }
     pub(in crate::app) fn handle_ui_command_list(
         &mut self,
@@ -65,15 +168,12 @@ impl App {
             Err(error) => return super::super::responses::encode_error_body(id, error),
         };
         commands.retain_mut(|command| {
-            let Some(descriptor) = crate::core_actions::command_descriptor(&command.key) else {
-                return false;
-            };
-            if !descriptor.runnable_by_name()
-                || (!has_context && descriptor.target != CoreCommandTarget::Global)
-            {
+            if !self.named_command_runnable(command, has_context) {
                 return false;
             }
-            command.argument_hint = descriptor.action.name_prompt().map(str::to_owned);
+            if let Some(descriptor) = crate::core_actions::command_descriptor(&command.key) {
+                command.argument_hint = descriptor.action.name_prompt().map(str::to_owned);
+            }
             true
         });
         encode_success(

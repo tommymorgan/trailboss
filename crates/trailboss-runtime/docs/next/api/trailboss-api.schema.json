@@ -4802,15 +4802,18 @@
           "properties": {
             "answers": {
               "default": [],
+              "description": "Ordered shell-decoded answers. Raw-tail plugins consume at most one\nunchanged string; omission differs from an explicit empty answer.",
               "items": {
                 "type": "string"
               },
               "type": "array"
             },
             "command": {
+              "description": "Exact visible title or stable Core / qualified plugin identity.",
               "type": "string"
             },
             "pane_id": {
+              "description": "Caller pane locator resolved by Core; never replaced by global focus.",
               "type": [
                 "string",
                 "null"

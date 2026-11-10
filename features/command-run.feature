@@ -108,3 +108,52 @@ Scenario: ListRunnableCoreCommandsAndHints
   And outside a pane the same list retains context-free commands and omits context-required commands
   And command run accepts no per-command workspace, tab or pane context flags
   And the legacy custom-keybinding command.invoke route retains its existing behavior
+
+Scenario: RunExtensionByVisibleTitle
+  Given enabled plugin omp exposes the visible palette title "omp: clear" and a qualified stable action ID
+  And caller pane Planning in Work differs from the global focused pane
+  When trailboss command run "omp: clear" is requested
+  Then the existing plugin action starts exactly once on the caller's workspace, tab and pane
+  And the CLI prints its plugin log ID and exits without waiting for the action to finish
+  And no on-screen selection is supplied
+
+Scenario Outline: PreserveRawPluginArgumentText
+  Given enabled plugin omp exposes "omp: add-dir" with raw-tail input
+  When command run selects it by <selector_kind> with <argument>
+  Then plugin.action.invoke receives that same arguments option without trimming, tokenizing or shell evaluation
+  And the CLI prints the started plugin log ID
+  Examples:
+    | selector_kind | argument |
+    | visible title | omitted (None) |
+    | qualified stable ID | explicit empty string (Some empty) |
+    | visible title | two leading spaces, /tmp/a b, two trailing spaces |
+    | qualified stable ID | literal dollar sign, quotes and newline |
+
+Scenario Outline: RejectUnsupportedPluginExecution
+  Given the current plugin catalog has <state>
+  When command run attempts the affected title or stable ID
+  Then it exits nonzero with the existing actionable error and no handler is started
+  Examples:
+    | state |
+    | action not declared for the current platform |
+    | disabled plugin |
+    | invalid confirmation declaration that the native palette cannot execute |
+    | supplied argument on an action that does not support raw-tail input |
+    | two answers supplied to a raw-tail action whose palette accepts one text answer |
+
+Scenario: PluginContextNeverFallsBackToGlobalFocus
+  Given global focus is Other in Personal
+  And a context-required plugin action and a context-free plugin action are installed
+  When command run invokes the context-required action outside a pane
+  Then it returns "no Trailboss pane context; run from a Trailboss pane" and starts nothing
+  When command run invokes the context-free action outside a pane
+  Then it starts with absent workspace, tab, pane and selection rather than Other's context
+  And its plugin log ID is returned without background-completion waiting
+
+Scenario: ListPluginsWithArgumentsAndBypassConfirmation
+  Given enabled available plugins omp and pi expose palette commands and a confirmation-fragment action
+  When command list is requested from Planning's pane
+  Then every executable omp and pi command is discoverable by its native visible title and qualified stable ID
+  And each raw-tail command retains its declared argument hint
+  When command run selects the confirmation-fragment action
+  Then it starts without requesting a confirmation and immediately returns its plugin log ID

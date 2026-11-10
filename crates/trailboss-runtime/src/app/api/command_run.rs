@@ -41,16 +41,27 @@ impl App {
         {
             command
         } else {
-            let mut matches = catalog
-                .iter()
-                .filter(|command| command.title == params.command);
+            let mut matches = catalog.iter().filter(|command| {
+                command.title == params.command
+                    && self.named_command_runnable(command, params.pane_id.is_some())
+            });
             let selected = matches
                 .next()
+                .or_else(|| {
+                    // A sole unavailable title still yields its actionable dispatch
+                    // error, but cannot make an executable title ambiguous.
+                    catalog
+                        .iter()
+                        .find(|command| command.title == params.command)
+                })
                 .ok_or_else(|| error("command_not_found", "command not found"))?;
             if matches.next().is_some() {
                 let choices = catalog
                     .iter()
-                    .filter(|command| command.title == params.command)
+                    .filter(|command| {
+                        command.title == params.command
+                            && self.named_command_runnable(command, params.pane_id.is_some())
+                    })
                     .map(|command| format!("{} ({})", command.title, command.key.stable_id()))
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -61,6 +72,51 @@ impl App {
             }
             selected
         };
+        if let crate::api::schema::UiCommandKey::Plugin {
+            plugin_id,
+            action_id,
+        } = &selected.key
+        {
+            self.named_plugin_command_available(selected)?;
+            if params.answers.len() > 1 {
+                return Err(error(
+                    "extra_answer",
+                    "extra answer: command accepts no further answers",
+                ));
+            }
+            let mut context = crate::api::schema::PluginInvocationContext {
+                // The palette replacement path preserves absent fields instead
+                // of merging Core-global focus. Legacy API invocation is unchanged.
+                invocation_source: Some("plugin_ui".into()),
+                ..Default::default()
+            };
+            if let Some(locator) = params.pane_id.as_deref() {
+                let (ws, pane) = self.parse_pane_id(locator).ok_or_else(|| {
+                    error(
+                        "pane_not_found",
+                        &format!("Trailboss pane is unavailable: {locator}"),
+                    )
+                })?;
+                context.workspace_id = Some(self.public_workspace_id(ws));
+                context.tab_id = self.state.workspaces[ws]
+                    .find_tab_index_for_pane(pane)
+                    .and_then(|tab| self.public_tab_id(ws, tab));
+                context.pane_id = self.public_pane_id(ws, pane);
+            } else if super::plugins::commands::plugin_requires_context(selected) {
+                return Err(error(
+                    "missing_context",
+                    "no Trailboss pane context; run from a Trailboss pane",
+                ));
+            }
+            return Ok(Method::PluginActionInvoke(
+                crate::api::schema::PluginActionInvokeParams {
+                    plugin_id: Some(plugin_id.clone()),
+                    action_id: action_id.clone(),
+                    arguments: params.answers.first().cloned(),
+                    context: Some(context),
+                },
+            ));
+        }
         let descriptor = crate::core_actions::command_descriptor(&selected.key)
             .filter(|descriptor| descriptor.runnable_by_name())
             .ok_or_else(|| {
