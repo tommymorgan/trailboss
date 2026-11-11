@@ -560,9 +560,7 @@ fn prepare(check: &RestartIdleCheck) -> Result<Prepared, String> {
     let cwd = shell_cwd(shell.pid).ok_or("shell_cwd_unavailable")?;
     let session_file =
         session_file_identity(&check.session_path).ok_or("saved_session_file_unavailable")?;
-    if !compatible_launch_environment(pid, shell.pid)? {
-        return Err("unsupported_environment_override".into());
-    }
+    let restorations = launch_environment(pid, shell.pid)?;
     let argv = match omp_argv {
         Some(argv) => exact_resume_argv(&argv, &check.session_path)?,
         None => {
@@ -578,13 +576,8 @@ fn prepare(check: &RestartIdleCheck) -> Result<Prepared, String> {
             )?
         }
     };
-    let command = format!(
-        "{}\r",
-        argv.iter()
-            .map(|arg| shell_quote(arg, fish))
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
+    verify_launcher_restorations(kind, &restorations, argv.get(1).map_or("", String::as_str))?;
+    let command = resume_command(&restorations, &argv, fish);
     Ok(Prepared {
         kind,
         shell,
@@ -855,20 +848,114 @@ fn session_file_identity(_: &str) -> Option<(u64, u64)> {
     None
 }
 
+/// Pi's managed launcher (`~/.local/bin/pi`) exports this before it execs the
+/// release, so a launcher-started Pi has it while its shell does not.
 #[cfg(target_os = "linux")]
-fn compatible_launch_environment(agent_pid: u32, shell_pid: u32) -> Result<bool, String> {
+const PI_MANAGED_INSTALL_ROOT: &str = "PI_MANAGED_INSTALL_ROOT";
+
+#[cfg(target_os = "linux")]
+fn launch_environment(agent_pid: u32, shell_pid: u32) -> Result<Vec<(String, String)>, String> {
     let agent = process_environment(agent_pid).ok_or("agent_environment_unavailable")?;
     let shell = process_environment(shell_pid).ok_or("shell_environment_unavailable")?;
-    Ok(agent
-        .iter()
-        .chain(shell.iter())
-        .filter(|(key, _)| {
+    launch_environment_restorations(&agent, &shell)
+}
+
+/// Returns the agent variables the relaunch must set again because the
+/// original launcher set them. Any other agent/shell difference in the
+/// variables that steer Pi, OMP, Herdr or XDG lookups is an override the
+/// shell cannot reproduce.
+#[cfg(target_os = "linux")]
+fn launch_environment_restorations(
+    agent: &std::collections::HashMap<String, String>,
+    shell: &std::collections::HashMap<String, String>,
+) -> Result<Vec<(String, String)>, String> {
+    let mut restorations = Vec::new();
+    let mut keys: Vec<&String> = agent
+        .keys()
+        .chain(shell.keys())
+        .filter(|key| {
             key.starts_with("PI_")
                 || key.starts_with("OMP_")
                 || key.starts_with("HERDR_")
                 || key.starts_with("XDG_")
         })
-        .all(|(key, _)| agent.get(key) == shell.get(key)))
+        .collect();
+    keys.sort();
+    keys.dedup();
+    for key in keys {
+        match (agent.get(key), shell.get(key)) {
+            (agent_value, shell_value) if agent_value == shell_value => {}
+            (Some(value), None) if key == PI_MANAGED_INSTALL_ROOT => {
+                restorations.push((key.clone(), value.clone()));
+            }
+            _ => return Err("unsupported_environment_override".into()),
+        }
+    }
+    if let Some(path) = launcher_prepended_path(agent).filter(|_| !restorations.is_empty()) {
+        restorations.insert(0, ("PATH".to_owned(), path));
+    }
+    Ok(restorations)
+}
+
+/// The managed launcher puts `${XDG_DATA_HOME:-$HOME/.local/share}/pi-node/current/bin`
+/// at the front of PATH when the Pi installer placed Node.js there. Returns
+/// that directory when the agent's PATH starts with it. The shell's own PATH
+/// is not compared: `/proc` shows only the PATH the shell started with, not
+/// what its startup files exported, so the relaunch prepends to the shell's
+/// current `$PATH` instead.
+#[cfg(target_os = "linux")]
+fn launcher_prepended_path(agent: &std::collections::HashMap<String, String>) -> Option<String> {
+    let data_home = match agent.get("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
+        Some(value) => value.clone(),
+        None => format!("{}/.local/share", agent.get("HOME")?),
+    };
+    let pi_node = format!("{data_home}/pi-node/current/bin");
+    let rest = agent.get("PATH")?.strip_prefix(&pi_node)?;
+    (rest.is_empty() || rest.starts_with(':')).then_some(pi_node)
+}
+
+/// A restored install root must be the one Pi's launcher derived for the
+/// running release: the release script lives under `<root>/releases`, the same
+/// check Pi applies before it trusts the variable. The relaunch runs the
+/// release script directly rather than through the launcher, so it sets the
+/// launcher's variables itself; a restored PATH prefix is accepted only alongside
+/// this verified root, because it is restored only for launcher-started Pi.
+#[cfg(target_os = "linux")]
+fn verify_launcher_restorations(
+    kind: RestartAgentKind,
+    restorations: &[(String, String)],
+    script: &str,
+) -> Result<(), String> {
+    for (key, root) in restorations {
+        if key == "PATH" {
+            continue;
+        }
+        let owned = key == PI_MANAGED_INSTALL_ROOT
+            && kind == RestartAgentKind::Pi
+            && std::fs::canonicalize(std::path::Path::new(root).join("releases"))
+                .ok()
+                .zip(std::fs::canonicalize(script).ok())
+                .is_some_and(|(releases, script)| script.starts_with(releases));
+        if !owned {
+            return Err("unsupported_environment_override".into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn resume_command(restorations: &[(String, String)], argv: &[String], fish: bool) -> String {
+    let assignments = restorations.iter().map(|(key, value)| match key.as_str() {
+        // Both POSIX shells and fish (a quoted path variable joins with
+        // ':') expand this to the directory before the shell's current PATH.
+        "PATH" => format!("PATH={}:\"$PATH\"", shell_quote(value, fish)),
+        _ => format!("{key}={}", shell_quote(value, fish)),
+    });
+    let words = argv.iter().map(|arg| shell_quote(arg, fish));
+    format!(
+        "{}\r",
+        assignments.chain(words).collect::<Vec<_>>().join(" ")
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -1992,5 +2079,221 @@ mod pi_launch_tests {
             Ok(vec!["--offline".into(), "--session".into(), path.into()])
         );
         assert_eq!(operations, ["launch-info"]);
+    }
+
+    fn environment(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    const SHARED_ENVIRONMENT: [(&str, &str); 2] = [
+        ("HERDR_SOCKET_PATH", "/run/herdr.sock"),
+        ("XDG_CONFIG_HOME", "/home/user/.config"),
+    ];
+
+    fn with_shared(extra: &[(&'static str, &'static str)]) -> Vec<(&'static str, &'static str)> {
+        let mut pairs = SHARED_ENVIRONMENT.to_vec();
+        pairs.extend_from_slice(extra);
+        pairs
+    }
+
+    // Pi started through its managed launcher carries PI_MANAGED_INSTALL_ROOT,
+    // which the shell lacks; the relaunch sets it again.
+    #[test]
+    fn launcher_set_install_root_is_restored_on_relaunch() {
+        let root = "/home/user/.local/bin/../../.pi/agent/install";
+        let agent = environment(&with_shared(&[("PI_MANAGED_INSTALL_ROOT", root)]));
+        let shell = environment(&SHARED_ENVIRONMENT);
+        let restored = launch_environment_restorations(&agent, &shell);
+        assert_eq!(
+            restored,
+            Ok(vec![(
+                "PI_MANAGED_INSTALL_ROOT".to_owned(),
+                root.to_owned()
+            )])
+        );
+        let argv: Vec<String> = [
+            "/usr/bin/node",
+            "/usr/lib/pi/cli.js",
+            "--session",
+            "/tmp/pri/sessions/m.jsonl",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        assert_eq!(
+            resume_command(&restored.unwrap(), &argv, false),
+            "PI_MANAGED_INSTALL_ROOT='/home/user/.local/bin/../../.pi/agent/install' \
+             '/usr/bin/node' '/usr/lib/pi/cli.js' '--session' '/tmp/pri/sessions/m.jsonl'\r"
+        );
+        assert_eq!(
+            resume_command(&[], &argv, false),
+            "'/usr/bin/node' '/usr/lib/pi/cli.js' '--session' '/tmp/pri/sessions/m.jsonl'\r"
+        );
+    }
+
+    #[test]
+    fn environment_overrides_the_launcher_did_not_set_are_still_refused() {
+        let shell = environment(&with_shared(&[]));
+        for (case, agent, shell) in [
+            (
+                "other Pi variable only in the agent",
+                environment(&with_shared(&[("PI_CODING_AGENT_DIR", "/elsewhere")])),
+                shell.clone(),
+            ),
+            (
+                "XDG variable changed for the agent",
+                environment(&[
+                    ("HERDR_SOCKET_PATH", "/run/herdr.sock"),
+                    ("XDG_CONFIG_HOME", "/elsewhere"),
+                ]),
+                shell.clone(),
+            ),
+            (
+                "install root differs from the shell's",
+                environment(&with_shared(&[("PI_MANAGED_INSTALL_ROOT", "/a/install")])),
+                environment(&with_shared(&[("PI_MANAGED_INSTALL_ROOT", "/b/install")])),
+            ),
+            (
+                "variable only in the shell",
+                environment(&with_shared(&[])),
+                environment(&with_shared(&[("OMP_PROFILE", "work")])),
+            ),
+        ] {
+            assert_eq!(
+                launch_environment_restorations(&agent, &shell),
+                Err("unsupported_environment_override".to_owned()),
+                "{case}"
+            );
+        }
+        assert_eq!(
+            launch_environment_restorations(&shell, &shell),
+            Ok(Vec::new())
+        );
+    }
+
+    // The launcher also puts the Node.js the Pi installer placed under
+    // `pi-node` at the front of PATH; the relaunch puts it back.
+    #[test]
+    fn launcher_prepended_pi_node_path_is_restored_on_relaunch() {
+        let root = "/home/user/.pi/agent/install";
+        let pi_node = "/home/user/.local/share/pi-node/current/bin";
+        // The shell's startup files extended PATH after the shell started, so
+        // the agent's PATH suffix differs from the shell's starting PATH.
+        let shell = environment(&with_shared(&[
+            ("HOME", "/home/user"),
+            ("PATH", "/usr/bin"),
+        ]));
+        let launched = environment(&with_shared(&[
+            ("HOME", "/home/user"),
+            (
+                "PATH",
+                "/home/user/.local/share/pi-node/current/bin:/home/user/.local/bin:/usr/bin",
+            ),
+            ("PI_MANAGED_INSTALL_ROOT", root),
+        ]));
+        let restored = launch_environment_restorations(&launched, &shell).unwrap();
+        assert_eq!(
+            restored,
+            vec![
+                ("PATH".to_owned(), pi_node.to_owned()),
+                ("PI_MANAGED_INSTALL_ROOT".to_owned(), root.to_owned()),
+            ]
+        );
+        let argv: Vec<String> = ["/usr/bin/node", "/r/pi"].map(str::to_owned).to_vec();
+        assert_eq!(
+            resume_command(&restored, &argv, false),
+            "PATH='/home/user/.local/share/pi-node/current/bin':\"$PATH\" \
+             PI_MANAGED_INSTALL_ROOT='/home/user/.pi/agent/install' '/usr/bin/node' '/r/pi'\r"
+        );
+        assert_eq!(
+            resume_command(&restored, &argv, true),
+            "PATH='/home/user/.local/share/pi-node/current/bin':\"$PATH\" \
+             PI_MANAGED_INSTALL_ROOT='/home/user/.pi/agent/install' '/usr/bin/node' '/r/pi'\r"
+        );
+        for (case, agent) in [
+            (
+                "launcher did not prepend pi-node",
+                environment(&with_shared(&[
+                    ("HOME", "/home/user"),
+                    ("PATH", "/home/user/.local/bin:/usr/bin"),
+                    ("PI_MANAGED_INSTALL_ROOT", root),
+                ])),
+            ),
+            (
+                "not started by the managed launcher",
+                environment(&with_shared(&[
+                    ("HOME", "/home/user"),
+                    (
+                        "PATH",
+                        "/home/user/.local/share/pi-node/current/bin:/usr/bin",
+                    ),
+                ])),
+            ),
+        ] {
+            assert!(
+                launch_environment_restorations(&agent, &shell)
+                    .unwrap()
+                    .iter()
+                    .all(|(key, _)| key != "PATH"),
+                "{case}"
+            );
+        }
+    }
+
+    // The tolerated install root must be the one Pi's launcher derived for the
+    // running release; any other value is an override.
+    #[test]
+    fn restored_install_root_must_own_the_running_pi_release() {
+        let directory = std::env::temp_dir().join(format!(
+            "trailboss-managed-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = directory.join("install");
+        let release = root.join("releases/1.5.2/node_modules/.bin");
+        std::fs::create_dir_all(&release).unwrap();
+        let script = release.join("pi");
+        std::fs::write(&script, "").unwrap();
+        let foreign = directory.join("cli.js");
+        std::fs::write(&foreign, "").unwrap();
+        let lexical_root = format!("{}/install/releases/../", directory.display());
+        let restored = vec![("PI_MANAGED_INSTALL_ROOT".to_owned(), lexical_root)];
+        let script = script.to_str().unwrap();
+        let foreign = foreign.to_str().unwrap();
+        assert_eq!(
+            verify_launcher_restorations(RestartAgentKind::Pi, &restored, script),
+            Ok(())
+        );
+        let with_path = [
+            (
+                "PATH".to_owned(),
+                "/home/user/.local/share/pi-node/current/bin".to_owned(),
+            ),
+            restored[0].clone(),
+        ];
+        assert_eq!(
+            verify_launcher_restorations(RestartAgentKind::Pi, &with_path, script),
+            Ok(())
+        );
+        for (case, kind, script) in [
+            ("script outside the root", RestartAgentKind::Pi, foreign),
+            ("OMP has no Pi launcher", RestartAgentKind::Omp, script),
+        ] {
+            assert_eq!(
+                verify_launcher_restorations(kind, &restored, script),
+                Err("unsupported_environment_override".to_owned()),
+                "{case}"
+            );
+        }
+        assert_eq!(
+            verify_launcher_restorations(RestartAgentKind::Omp, &[], "omp"),
+            Ok(())
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
