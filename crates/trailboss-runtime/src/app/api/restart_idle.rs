@@ -577,6 +577,7 @@ fn prepare(check: &RestartIdleCheck) -> Result<Prepared, String> {
         }
     };
     verify_launcher_restorations(kind, &restorations, argv.get(1).map_or("", String::as_str))?;
+    let (restorations, argv) = relaunch(&restorations, &argv);
     let command = resume_command(&restorations, &argv, fish);
     Ok(Prepared {
         kind,
@@ -916,10 +917,11 @@ fn launcher_prepended_path(agent: &std::collections::HashMap<String, String>) ->
 
 /// A restored install root must be the one Pi's launcher derived for the
 /// running release: the release script lives under `<root>/releases`, the same
-/// check Pi applies before it trusts the variable. The relaunch runs the
-/// release script directly rather than through the launcher, so it sets the
-/// launcher's variables itself; a restored PATH prefix is accepted only alongside
-/// this verified root, because it is restored only for launcher-started Pi.
+/// check Pi applies before it trusts the variable. When the restart cannot go
+/// through the launcher (see `relaunch`), it reruns the release script and sets
+/// the launcher's variables itself; a restored PATH prefix is accepted only
+/// alongside this verified root, because it is restored only for
+/// launcher-started Pi.
 #[cfg(target_os = "linux")]
 fn verify_launcher_restorations(
     kind: RestartAgentKind,
@@ -941,6 +943,54 @@ fn verify_launcher_restorations(
         }
     }
     Ok(())
+}
+
+/// Chooses how the resume command starts Pi. A Pi the managed launcher
+/// started is restarted through that launcher, so a `pi update` made before
+/// the restart takes effect: the launcher starts the release named in
+/// `current-version` and sets its own environment. Any other Pi, or a
+/// launcher whose current release is missing, reruns the original release
+/// with the restored launcher environment.
+#[cfg(target_os = "linux")]
+fn relaunch(
+    restorations: &[(String, String)],
+    argv: &[String],
+) -> (Vec<(String, String)>, Vec<String>) {
+    let launcher = restorations
+        .iter()
+        .find(|(key, _)| key == PI_MANAGED_INSTALL_ROOT)
+        .and_then(|(_, root)| managed_launcher(std::path::Path::new(root)));
+    match launcher {
+        Some(launcher) if argv.len() >= 2 => (
+            Vec::new(),
+            std::iter::once(launcher)
+                .chain(argv[2..].iter().cloned())
+                .collect(),
+        ),
+        _ => (restorations.to_vec(), argv.to_vec()),
+    }
+}
+
+/// The launcher lives at `<agent dir>/bin/pi` beside `<agent dir>/install`
+/// and execs `install/releases/<current-version>/node_modules/.bin/pi`.
+#[cfg(target_os = "linux")]
+fn managed_launcher(root: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = |path: &std::path::Path| {
+        std::fs::metadata(path)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    };
+    let root = std::fs::canonicalize(root).ok()?;
+    let version = std::fs::read_to_string(root.join("current-version")).ok()?;
+    let version = version.lines().next()?.trim();
+    if version.is_empty() || version.contains('/') || version.starts_with('.') {
+        return None;
+    }
+    let release = root.join(format!("releases/{version}/node_modules/.bin/pi"));
+    let launcher = root.parent()?.join("bin/pi");
+    (executable(&release) && executable(&launcher))
+        .then(|| launcher.to_str().map(str::to_owned))
+        .flatten()
 }
 
 #[cfg(target_os = "linux")]
@@ -2240,6 +2290,76 @@ mod pi_launch_tests {
                 "{case}"
             );
         }
+    }
+
+    // After `pi update`, a launcher-started Pi restarts through the managed
+    // launcher, which starts the release named in `current-version` and sets
+    // its own environment.
+    #[test]
+    fn launcher_started_pi_restarts_through_the_launcher_on_the_current_release() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "trailboss-pi-launcher-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let agent_dir = directory.join("agent");
+        let executable = |path: std::path::PathBuf| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let launcher = executable(agent_dir.join("bin/pi"));
+        let old = executable(agent_dir.join("install/releases/1.5.2/node_modules/.bin/pi"));
+        executable(agent_dir.join("install/releases/1.6.0/node_modules/.bin/pi"));
+        std::fs::write(agent_dir.join("install/current-version"), "1.6.0\n").unwrap();
+        let restorations = vec![
+            (
+                "PATH".to_owned(),
+                "/home/user/.local/share/pi-node/current/bin".to_owned(),
+            ),
+            (
+                "PI_MANAGED_INSTALL_ROOT".to_owned(),
+                format!("{}/bin/../install", agent_dir.display()),
+            ),
+        ];
+        let argv: Vec<String> = [
+            "/usr/bin/node",
+            old.to_str().unwrap(),
+            "--thinking",
+            "high",
+            "--session",
+            "/tmp/pri/sessions/u.jsonl",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        assert_eq!(
+            relaunch(&restorations, &argv),
+            (
+                Vec::new(),
+                vec![
+                    launcher.to_str().unwrap().to_owned(),
+                    "--thinking".to_owned(),
+                    "high".to_owned(),
+                    "--session".to_owned(),
+                    "/tmp/pri/sessions/u.jsonl".to_owned(),
+                ]
+            )
+        );
+        // A current-version that names a missing release would leave the pane
+        // without Pi, so the restart keeps the running release instead.
+        std::fs::write(agent_dir.join("install/current-version"), "9.9.9\n").unwrap();
+        assert_eq!(
+            relaunch(&restorations, &argv),
+            (restorations.clone(), argv.clone())
+        );
+        // A Pi started without the launcher keeps its exact original command.
+        assert_eq!(relaunch(&[], &argv), (Vec::new(), argv.clone()));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     // The tolerated install root must be the one Pi's launcher derived for the

@@ -318,7 +318,7 @@ fn agent_command() -> Command {
             Command::new("restart-idle")
                 .about("Cooperatively restart unfocused idle OMP and Pi agents in the current session")
                 .arg(flag("json"))
-                .after_help("Preserves each exact saved conversation and original shell. Unsafe or unsupported agents are skipped; no force option. Select another Trailboss session with the existing global --session option."),
+                .after_help("Preserves each exact saved conversation and original shell. A Pi started by its managed launcher restarts on the current Pi release, so a pi update made before the restart takes effect. Unsafe or unsupported agents are skipped; no force option. Select another Trailboss session with the existing global --session option."),
         )
         .subcommand(id_command("get", "target", "Show an agent"))
         .subcommand(
