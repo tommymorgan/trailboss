@@ -41,10 +41,33 @@ pub(crate) const EXPERIMENTAL_INTEGRATION_TARGET_LABELS: &[&str] = &["letta", "s
 
 const PI_EXTENSION_INSTALL_NAME: &str = "trailboss-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/trailboss-agent-state.ts");
-const PI_INTEGRATION_VERSION: u32 = 11;
+const PI_INTEGRATION_VERSION: u32 = 12;
 const OMP_EXTENSION_INSTALL_NAME: &str = "trailboss-omp-agent-state.ts";
 const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/trailboss-agent-state.ts");
 const OMP_INTEGRATION_VERSION: u32 = 18;
+const SHARED_CONVERSATION_ASSET: &str = include_str!("assets/shared/trailboss-conversation.ts");
+const SHARED_CONVERSATION_IMPORT_MARKER: &str = "// trailboss:inline-shared-conversation";
+
+/// Returns `asset` as installed: its shared conversation import line is replaced
+/// by the shared module, so the installed reporter is one self-contained file.
+/// Shared imports the reporter already declares are dropped to avoid duplicate bindings.
+fn installed_reporter(asset: &str) -> String {
+    let mut installed = String::with_capacity(asset.len() + SHARED_CONVERSATION_ASSET.len());
+    for line in asset.split_inclusive('\n') {
+        if !line.trim_end().ends_with(SHARED_CONVERSATION_IMPORT_MARKER) {
+            installed.push_str(line);
+            continue;
+        }
+        for shared in SHARED_CONVERSATION_ASSET.split_inclusive('\n') {
+            let duplicate_import =
+                shared.starts_with("import ") && asset.lines().any(|own| own == shared.trim_end());
+            if !duplicate_import {
+                installed.push_str(shared);
+            }
+        }
+    }
+    installed
+}
 const CLAUDE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "trailboss-agent-state.ps1"
 } else {

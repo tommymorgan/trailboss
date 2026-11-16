@@ -476,7 +476,7 @@ impl From<&Prepared> for ControlTarget {
     }
 }
 
-/// Resolves the live OMP process behind a pane for non-restart control ops:
+/// Resolves the live OMP or Pi process behind a pane for non-restart control ops:
 /// same process-tree admission as restart, without resume argv reconstruction.
 #[cfg(target_os = "linux")]
 pub(super) fn prepare_control_target(
@@ -487,14 +487,19 @@ pub(super) fn prepare_control_target(
 ) -> Result<ControlTarget, String> {
     let shell = process_identity(shell_pid).ok_or("shell_identity_unavailable")?;
     let job = crate::detect::foreground_job(shell.pid).ok_or("foreground_unavailable")?;
-    let (agent, _, pid) =
-        crate::detect::identify_agent_process_in_job(&job).ok_or("foreground_not_omp")?;
-    if agent != crate::detect::Agent::Omp || pid == shell.pid || pid != job.process_group_id {
-        return Err("foreground_not_root_omp".into());
+    let (agent, _, pid) = crate::detect::identify_agent_process_in_job(&job)
+        .ok_or("foreground_not_controllable_agent")?;
+    let kind = match agent {
+        crate::detect::Agent::Omp => RestartAgentKind::Omp,
+        crate::detect::Agent::Pi => RestartAgentKind::Pi,
+        _ => return Err("foreground_not_controllable_agent".into()),
+    };
+    if pid == shell.pid || pid != job.process_group_id {
+        return Err(format!("foreground_not_root_{}", kind.name()));
     }
-    let omp = process_identity(pid).ok_or("agent_identity_unavailable")?;
+    let agent = process_identity(pid).ok_or("agent_identity_unavailable")?;
     if process_stat(pid).and_then(|s| s.get(1)?.parse::<u32>().ok()) != Some(shell.pid) {
-        return Err("omp_not_original_shell_child".into());
+        return Err(format!("{}_not_original_shell_child", kind.name()));
     }
     // Session-path admission is enforced by the reporter against its live
     // session; a local existence probe would misclassify socketless (v11)
@@ -502,9 +507,9 @@ pub(super) fn prepare_control_target(
     let pane_identity =
         process_environment_value(pid, "HERDR_PANE_ID").ok_or("pane_environment_unavailable")?;
     Ok(ControlTarget {
-        kind: RestartAgentKind::Omp,
+        kind,
         shell,
-        agent: omp,
+        agent,
         pane_identity,
     })
 }

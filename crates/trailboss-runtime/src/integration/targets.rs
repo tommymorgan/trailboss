@@ -82,7 +82,7 @@ pub(crate) fn install_pi() -> io::Result<PathBuf> {
     ensure_extension_dir(&dir, "pi")?;
 
     let path = dir.join(PI_EXTENSION_INSTALL_NAME);
-    fs::write(&path, PI_EXTENSION_ASSET)?;
+    fs::write(&path, super::installed_reporter(PI_EXTENSION_ASSET))?;
     Ok(path)
 }
 
@@ -99,7 +99,10 @@ pub(crate) fn install_omp() -> io::Result<OmpInstallPaths> {
 
     let removed_legacy_pi_extension = remove_legacy_pi_extension_from_omp_dir(&dir)?;
     let extension_path = dir.join(OMP_EXTENSION_INSTALL_NAME);
-    fs::write(&extension_path, OMP_EXTENSION_ASSET)?;
+    fs::write(
+        &extension_path,
+        super::installed_reporter(OMP_EXTENSION_ASSET),
+    )?;
     Ok(OmpInstallPaths {
         extension_path,
         removed_legacy_pi_extension,

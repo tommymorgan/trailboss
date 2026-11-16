@@ -21,6 +21,16 @@ Reporter 18 adds a restricted app profile over the same four public methods and 
 - The reservation holds desktop session transitions (`session_before_switch`, `_branch`, `_tree` cancel) only after a turn has been observed to start. A public send can return without ever starting a turn (no model or API key, usage preflight, cost cap, Esc during setup); that reservation stays outstanding, without replay, until the next observed settled turn or a session switch, branch, tree or context change releases it, so `/new`, `/resume`, `/fork` and `/tree` stay available as the way out.
 - The restricted profile advertises neither native guarded capabilities nor `restricted_abort_v1`; Core still requires `guarded_abort_v1` for abort. App cancellation invalidates the app job and rejects late results. It does not claim queued-input withdrawal or ownership of a later input's work fence.
 
+### Pi reporter
+
+Pi reporter 12 offers the same restricted app profile; the OMP and Pi reporters share one adapter module (`integration/assets/shared/trailboss-conversation.ts`), which the integration installer inlines so each installed reporter stays a single file. Pi provides no native guarded conversation control, so only the restricted profile is available. Differences from OMP:
+
+- The opt-in marker lives at `/tmp/trailboss-pi-control-<uid>/<pid>.restricted-app.json`, beside the Pi reporter's control socket, with the same format and checks.
+- Pi reports a final run on `agent_settled`; `agent_end` can still be followed by retries or queued continuations, so the reservation settles on `agent_settled`.
+- `session_before_switch`, `_fork` and `_tree` are cancelled while a started app turn holds the reservation. A completed `/new`, `/resume` or fork recreates the reporter, which changes the reporter epoch, and the grant no longer matches the new conversation.
+
+`tests/pi_restricted_conversation.rs` runs the installed interactive Pi with the installed reporter in an owned Core against an owned loopback model provider: metadata read, single-outstanding submit, refusal of a second submit while the first runs, and reading the reply.
+
 Activate Core before opt-in enrollment and app pairing. A Core handoff can replace its lifetime-scoped terminal handle while preserving the OMP process and conversation, so an old terminal binding must be refused rather than silently adopted. Installing a reporter file or switching Core does not replace already-loaded extension code. Any necessary targeted agent shutdown/resume requires its own authorization; pairing follows activation and captures the resulting process, terminal and reporter identities.
 
 ## Decision and alternatives

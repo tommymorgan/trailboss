@@ -544,7 +544,7 @@ fn install_pi_writes_embedded_asset_to_pi_extensions_dir() {
     let content = fs::read_to_string(&path).unwrap();
 
     assert_eq!(path, ext_dir.join(PI_EXTENSION_INSTALL_NAME));
-    assert_eq!(content, PI_EXTENSION_ASSET);
+    assert_eq!(content, super::installed_reporter(PI_EXTENSION_ASSET));
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
@@ -624,7 +624,7 @@ fn install_omp_writes_embedded_asset_to_omp_extensions_dir() {
         ext_dir.join(OMP_EXTENSION_INSTALL_NAME)
     );
     assert!(!installed.removed_legacy_pi_extension);
-    assert_eq!(content, OMP_EXTENSION_ASSET);
+    assert_eq!(content, super::installed_reporter(OMP_EXTENSION_ASSET));
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
@@ -3163,6 +3163,37 @@ fn install_hermes_errors_when_config_dir_missing() {
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn installed_omp_and_pi_reporters_inline_the_shared_conversation_adapter() {
+    for (name, asset) in [("pi", PI_EXTENSION_ASSET), ("omp", OMP_EXTENSION_ASSET)] {
+        let installed = super::installed_reporter(asset);
+        assert!(
+            !installed.contains("../shared/"),
+            "{name} reporter still imports the shared module"
+        );
+        assert_eq!(
+            installed
+                .matches("export function createConversationAdapter(")
+                .count(),
+            1,
+            "{name} reporter must carry exactly one adapter"
+        );
+        let mut modules: Vec<&str> = installed
+            .lines()
+            .filter(|line| line.starts_with("import "))
+            .filter_map(|line| line.rsplit_once(" from ").map(|(_, module)| module))
+            .collect();
+        let count = modules.len();
+        modules.sort_unstable();
+        modules.dedup();
+        assert_eq!(
+            modules.len(),
+            count,
+            "{name} reporter imports a module twice"
+        );
+    }
 }
 
 #[test]

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createConversationAdapter } from "./trailboss-agent-state";
+import { createConversationAdapter } from "../shared/trailboss-conversation";
 
 type Entry = { id: string; parentId: string | null; type: string; message?: { role: string; content: string | Array<{ type: string; text?: string }>; stopReason?: string; synthetic?: boolean; attribution?: string } };
 

@@ -2,13 +2,15 @@
 // managed by trailboss; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // TRAILBOSS_INTEGRATION_ID=pi
-// TRAILBOSS_INTEGRATION_VERSION=11
+// TRAILBOSS_INTEGRATION_VERSION=12
 // @ts-nocheck
 
-import { randomUUID } from "node:crypto";
+// Matches the shared conversation module import, which the installer then drops.
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { createConversationAdapter, readRestrictedAppGrant } from "../shared/trailboss-conversation"; // trailboss:inline-shared-conversation
 
 const HERDR_ENV = process.env.HERDR_ENV;
 const socketPath = process.env.HERDR_SOCKET_PATH;
@@ -197,7 +199,15 @@ export default function (pi) {
   let controlClosed = false;
   const controlClients = new Set<net.Socket>();
   const acceptedClients = new Set<net.Socket>();
-  const CONTROL_FRAME_LIMIT = 8192;
+  // Restricted app submissions carry up to 128 KiB of text; Core caps frames at 256 KiB.
+  const CONTROL_FRAME_LIMIT = 256 * 1024;
+  // Pi has no native guarded conversation control, so only the explicitly opted-in
+  // restricted app profile is available: process-bound grant, single outstanding
+  // instruction, and submission only while Pi is idle with nothing queued.
+  const conversation = createConversationAdapter(() => (rootSession ? currentContext : undefined), {
+    readGrant: (ctx) => readRestrictedAppGrant(ctx, `/tmp/trailboss-pi-control-${process.geteuid?.()}`),
+    sendUserMessage: (text) => pi.sendUserMessage(text),
+  });
   // Well under Core's 3s control step, which also covers the final recheck.
   const SUBAGENT_STATUS_DEADLINE_MS = 1000;
 
@@ -216,6 +226,7 @@ export default function (pi) {
 
   function closeControl() {
     controlClosed = true;
+    conversation.close();
     controlServer?.close(() => {});
     removeOwnedSocket();
     for (const client of controlClients) {
@@ -381,6 +392,22 @@ export default function (pi) {
             reply({ status: "skipped", reason: "invalid-request" });
             return;
           }
+          const operation = request?.operation;
+          if (typeof operation === "string" && operation.startsWith("conversation_")) {
+            // Metadata readiness can wait 750 ms; submission settles after one send.
+            clearTimeout(deadline);
+            client.setTimeout(5000, () => client.destroy());
+            const base = baseSkipReason(request, operation);
+            if (base) {
+              reply({ status: "conversation", reason: "", error: {
+                code: "binding_mismatch", message: base, reason: "binding_mismatch",
+                invocation: "not_started", input_id: request.params?.input_id,
+              } });
+              return;
+            }
+            void conversation(request).then(reply);
+            return;
+          }
           const outcome = handleControlRequest(request);
           if (outcome !== "restart") {
             reply(outcome);
@@ -456,6 +483,12 @@ export default function (pi) {
     return { state: "idle" as const, message: undefined };
   }
 
+  // Restricted app bookkeeping; session_before_* results can cancel a transition.
+  function observeConversation(name: string, event: unknown, ctx: any) {
+    if (ctx?.hasUI !== true) return undefined;
+    return conversation.observe(name, event, ctx);
+  }
+
   function publishState(force = false) {
     const next = desiredState();
     if (!force && next.state === lastState && next.message === lastMessage) {
@@ -512,6 +545,7 @@ export default function (pi) {
     currentContext = ctx;
     updateSessionRef(ctx);
     startControl();
+    observeConversation("session_start", event, ctx);
     await reportSession(event?.reason);
     // A reload can replace this extension mid-run without emitting another agent_start.
     agentActive = ctx?.isIdle?.() === false;
@@ -524,20 +558,33 @@ export default function (pi) {
     }
     currentContext = ctx;
     updateSessionRef(ctx);
+    observeConversation("agent_start", _event, ctx);
     void reportSession();
     agentActive = true;
     publishState();
   });
 
-  pi.on("agent_settled", (_event, ctx) => {
+  // agent_settled is Pi's final run boundary; agent_end can still continue.
+  pi.on("agent_settled", (event, ctx) => {
     if (!rootSession || ctx?.isIdle?.() !== true) {
       return;
     }
 
     currentContext = ctx;
+    observeConversation("agent_settled", event, ctx);
     agentActive = false;
     publishState();
   });
+
+  for (const name of ["input", "message_start", "message_end", "tool_execution_end",
+      "session_tree", "session_compact", "session_before_switch", "session_before_fork",
+      "session_before_tree"]) {
+    pi.on(name, (event, ctx) => {
+      if (!rootSession) return;
+      currentContext = ctx;
+      return observeConversation(name, event, ctx);
+    });
+  }
 
   pi.on("session_shutdown", () => {
     closeControl();

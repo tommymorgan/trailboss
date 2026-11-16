@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createConversationAdapter, readRestrictedAppGrant } from "./trailboss-agent-state";
+import { createConversationAdapter, readRestrictedAppGrant } from "../shared/trailboss-conversation";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); });
@@ -294,7 +294,7 @@ test("idle settings entries without extension hooks eventually refresh metadata 
 
 test("a FIFO opt-in marker is refused without blocking the reporter process", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "repeater-fifo-"));
-  const module = path.join(import.meta.dir, "trailboss-agent-state.ts");
+  const module = path.join(import.meta.dir, "../shared/trailboss-conversation.ts");
   const script = `
     import fs from "node:fs"; import path from "node:path";
     import { readRestrictedAppGrant } from ${JSON.stringify(module)};
