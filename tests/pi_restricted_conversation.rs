@@ -367,3 +367,63 @@ fn restricted_app_submits_one_instruction_to_pi_and_reads_its_reply() {
     assert_eq!(pi.journal_count("must not run"), 0);
     provider.assert_no_request(Duration::from_millis(500), "after the single instruction");
 }
+
+#[test]
+#[ignore = "requires installed interactive Pi; owned loopback model provider"]
+fn restart_idle_keeps_the_restricted_app_grant_for_the_same_conversation() {
+    let provider = StubProvider::start();
+    let core = Core::new();
+    let workspace = core.request(
+        "workspace.create",
+        json!({"label":"Review","cwd":core.home,"focus":true}),
+    );
+    let pane = workspace["root_pane"]["pane_id"].as_str().unwrap();
+    let pi = RestrictedPi::start(&core, pane, &provider);
+    // Pi writes its session file only after the first exchange.
+    let idle = pi.read(&core, "not_working");
+    let first = pi.submit(&core, &idle, "before-restart", "first request");
+    assert_eq!(
+        first["result"]["result"]["status"], "accepted_by_reporter",
+        "{first}"
+    );
+    provider.next_request();
+    provider.release();
+    let before = pi.read(&core, "not_working");
+    let old_pid = core.request("pane.process_info", json!({"pane_id":pane}))["process_info"]
+        ["foreground_process_group_id"]
+        .as_u64()
+        .unwrap();
+    // Restart-idle skips the focused pane.
+    core.request(
+        "workspace.create",
+        json!({"label":"Elsewhere","cwd":core.home,"focus":true}),
+    );
+
+    let restarted = cli(
+        &core,
+        &["--session", &core.name, "agent", "restart-idle", "--json"],
+    );
+    let rows: Value = serde_json::from_slice(&restarted.stdout).unwrap_or(Value::Null);
+    assert!(
+        rows.to_string().contains("exact_session_resumed"),
+        "restart-idle did not restart the Pi agent: {rows} {}",
+        String::from_utf8_lossy(&restarted.stderr)
+    );
+    let new_pid = core.request("pane.process_info", json!({"pane_id":pane}))["process_info"]
+        ["foreground_process_group_id"]
+        .as_u64()
+        .unwrap();
+    assert_ne!(new_pid, old_pid);
+    let uid = std::fs::metadata("/proc/self").unwrap().uid();
+    let directory = PathBuf::from(format!("/tmp/trailboss-pi-control-{uid}"));
+    let _new_grant = Grant(directory.join(format!("{new_pid}.restricted-app.json")));
+
+    let after = pi.read(&core, "not_working");
+    assert_eq!(after["binding"], before["binding"]);
+    assert!(
+        !directory
+            .join(format!("{old_pid}.restricted-app.json"))
+            .exists(),
+        "the restarted process's old grant marker was left behind"
+    );
+}

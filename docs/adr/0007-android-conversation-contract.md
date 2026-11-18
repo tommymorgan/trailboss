@@ -31,6 +31,10 @@ Pi reporter 12 offers the same restricted app profile; the OMP and Pi reporters 
 
 `tests/pi_restricted_conversation.rs` runs the installed interactive Pi with the installed reporter in an owned Core against an owned loopback model provider: metadata read, single-outstanding submit, refusal of a second submit while the first runs, and reading the reply.
 
+### Restart-idle keeps the grant
+
+The marker is bound to one process incarnation, so a restarted agent would otherwise lose its pairing. Before restart-idle stops an OMP or Pi agent, it reads that process's marker with the reporter's checks and requires it to name the same Core terminal and the session being resumed. Only after the new process is verified to have resumed that exact session does it write the same binding with the new PID and start ticks (mode 0600, never replacing an existing marker for the new PID), then remove the old marker if it is still the file it read. An invalid or absent marker is not carried; the agent still restarts without a grant.
+
 Activate Core before opt-in enrollment and app pairing. A Core handoff can replace its lifetime-scoped terminal handle while preserving the OMP process and conversation, so an old terminal binding must be refused rather than silently adopted. Installing a reporter file or switching Core does not replace already-loaded extension code. Any necessary targeted agent shutdown/resume requires its own authorization; pairing follows activation and captures the resulting process, terminal and reporter identities.
 
 ## Decision and alternatives

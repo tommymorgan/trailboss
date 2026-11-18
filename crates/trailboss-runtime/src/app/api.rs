@@ -11,6 +11,8 @@ mod panes;
 pub(crate) mod plugins;
 pub(super) mod responses;
 pub(crate) mod restart_idle;
+#[cfg(target_os = "linux")]
+mod restricted_grant;
 mod session;
 mod tabs;
 mod workspaces;

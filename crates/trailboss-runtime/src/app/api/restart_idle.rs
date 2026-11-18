@@ -378,6 +378,17 @@ fn restart_one(
         Ok(prepared) => prepared,
         Err(reason) => return row(&check.agent, Outcome::Skipped, reason),
     };
+    // A restricted-app grant is bound to this process incarnation; capture it
+    // now so the restarted process can keep the same pairing.
+    let uid = unsafe { libc::geteuid() };
+    let grant_directory = super::restricted_grant::grant_directory(prepared.kind.name(), uid);
+    let held_grant = super::restricted_grant::read_held_grant(
+        &grant_directory,
+        uid,
+        &prepared.agent,
+        &check.agent.terminal_id,
+        &check.session_path,
+    );
     match request_shutdown(&prepared, &check.session_path) {
         Ok(ControlReply { status, reason, .. }) if status == "skipped" => {
             return row(&check.agent, Outcome::Skipped, reason)
@@ -431,6 +442,21 @@ fn restart_one(
                 verify.input_epoch = verify.input_epoch.wrapping_add(1);
                 verify.verify_since = Some(resumed_at);
                 if core_check(tx, verify).is_ok() {
+                    // Core has verified the same pane resumed the exact session.
+                    if let Some(held) = &held_grant {
+                        if let Err(reason) = super::restricted_grant::carry_grant(
+                            &grant_directory,
+                            uid,
+                            held,
+                            &new.agent,
+                        ) {
+                            tracing::warn!(
+                                terminal_id = %check.agent.terminal_id,
+                                reason,
+                                "restricted app grant was not carried across restart"
+                            );
+                        }
+                    }
                     return row(&check.agent, Outcome::Restarted, "exact_session_resumed");
                 }
             }
