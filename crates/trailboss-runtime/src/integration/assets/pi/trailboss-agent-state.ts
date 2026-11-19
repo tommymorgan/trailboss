@@ -2,7 +2,7 @@
 // managed by trailboss; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // TRAILBOSS_INTEGRATION_ID=pi
-// TRAILBOSS_INTEGRATION_VERSION=12
+// TRAILBOSS_INTEGRATION_VERSION=13
 // @ts-nocheck
 
 // Matches the shared conversation module import, which the installer then drops.
@@ -10,7 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
-import { createConversationAdapter, readRestrictedAppGrant } from "../shared/trailboss-conversation"; // trailboss:inline-shared-conversation
+import { createConversationAdapter, endsWithQuestion, lastAssistantText, readRestrictedAppGrant } from "../shared/trailboss-conversation"; // trailboss:inline-shared-conversation
 
 const HERDR_ENV = process.env.HERDR_ENV;
 const socketPath = process.env.HERDR_SOCKET_PATH;
@@ -189,6 +189,8 @@ export default function (pi) {
   let blockedCount = 0;
   let blockedMessage: string | undefined;
   let busyCount = 0;
+  // The agent's settled turn ended by asking the user; cleared by their next input.
+  let questionPending = false;
   let lastState: AgentState | undefined;
   let lastMessage: string | undefined;
   let rootSession = false;
@@ -477,6 +479,9 @@ export default function (pi) {
     if (agentActive) {
       return { state: "working" as const, message: undefined };
     }
+    if (questionPending) {
+      return { state: "waiting" as const, message: "question" };
+    }
     if (busyCount > 0) {
       return { state: "waiting" as const, message: "awaiting background work" };
     }
@@ -561,6 +566,7 @@ export default function (pi) {
     observeConversation("agent_start", _event, ctx);
     void reportSession();
     agentActive = true;
+    questionPending = false;
     publishState();
   });
 
@@ -573,6 +579,7 @@ export default function (pi) {
     currentContext = ctx;
     observeConversation("agent_settled", event, ctx);
     agentActive = false;
+    questionPending = event?.aborted !== true && endsWithQuestion(lastAssistantText(ctx));
     publishState();
   });
 
@@ -582,6 +589,10 @@ export default function (pi) {
     pi.on(name, (event, ctx) => {
       if (!rootSession) return;
       currentContext = ctx;
+      if (name === "input" && questionPending) {
+        questionPending = false;
+        publishState();
+      }
       return observeConversation(name, event, ctx);
     });
   }

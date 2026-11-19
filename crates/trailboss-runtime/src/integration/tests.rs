@@ -3415,7 +3415,7 @@ fn omp_runtime_events_can_activate_root_session_after_resume() {
 fn omp_ask_and_approval_events_report_waiting_state() {
     let approval_handler = omp_handler("tool_approval_requested");
     approval_handler
-        .find("activateWaiting(label);")
+        .find("activateWaiting();")
         .expect("approval requests should mark the pane waiting");
 
     let approval_resolved = omp_handler("tool_approval_resolved");
@@ -3428,7 +3428,7 @@ fn omp_ask_and_approval_events_report_waiting_state() {
         .find("event?.toolName !== \"ask\"")
         .expect("tool execution handler should only treat Ask as waiting");
     ask_handler
-        .find("activateWaiting(askWaitingMessage(event.args));")
+        .find("activateWaiting();")
         .expect("Ask start should mark the pane waiting");
 
     let ask_end_handler = omp_handler("tool_execution_end");

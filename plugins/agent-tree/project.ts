@@ -16,6 +16,7 @@ export const Role = z.enum([
   'status-working',
   'status-blocked',
   'status-waiting',
+  'status-question',
   'status-done',
   'status-idle',
 ])
@@ -40,7 +41,12 @@ export const Declaration = z.object({
 export type Declaration = z.infer<typeof Declaration>
 
 export function icon(status: string) {
+  if (status === 'question') return '?'
   return status === 'idle' || status === 'unknown' ? '○' : '●'
+}
+// A waiting tab whose agent waits for the user's answer, not background work.
+function displayStatus(tab: EntityRow, asking: Set<string | null>): string {
+  return tab.agentStatus === 'waiting' && asking.has(tab.tabId) ? 'question' : tab.agentStatus
 }
 export function statusRole(status: string): z.infer<typeof Role> {
   const role = Role.safeParse(`status-${status === 'unknown' ? 'idle' : status}`)
@@ -61,6 +67,11 @@ export function projectTree(entities: EntityRow[], collapsed: Set<string>): z.in
     .filter((row) => row.kind === 'workspace')
     .sort((a, b) => a.position - b.position)
   const tabs = entities.filter((row) => row.kind === 'tab').sort((a, b) => a.position - b.position)
+  const asking = new Set(
+    entities
+      .filter((pane) => pane.kind === 'pane' && pane.waitingFor === 'question')
+      .map((pane) => pane.tabId),
+  )
   const rows: Row[] = []
   for (const workspace of workspaces) {
     const children = tabs.filter((tab) => tab.workspaceId === workspace.workspaceId)
@@ -68,7 +79,7 @@ export function projectTree(entities: EntityRow[], collapsed: Set<string>): z.in
     const active = [
       ...new Set(
         children
-          .map((tab) => tab.agentStatus)
+          .map((tab) => displayStatus(tab, asking))
           .filter((status) => status !== 'idle')
           .map((status) => (status === 'unknown' ? 'idle' : status)),
       ),
@@ -99,7 +110,7 @@ export function projectTree(entities: EntityRow[], collapsed: Set<string>): z.in
         context: { workspace_id: workspace.workspaceId, tab_id: tab.tabId },
         menu: { type: 'use', name: `sidebar.tab-menu:${tab.tabId}` },
         children: [
-          label(icon(tab.agentStatus), statusRole(tab.agentStatus)),
+          label(icon(displayStatus(tab, asking)), statusRole(displayStatus(tab, asking))),
           label(` ${tab.label}`, 'label'),
           ...(result === undefined ? [] : [label(result, 'muted')]),
         ],

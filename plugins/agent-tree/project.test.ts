@@ -310,3 +310,45 @@ test('reordered snapshot declares moved tabs first while public tab numbers rema
   ])
   expect(rows.filter((row) => row.kind === 'tab').map((row) => row.number)).toEqual([2, 1])
 })
+
+test("a tab waiting for the user's answer gets its own symbol and color, apart from background work", () => {
+  const pane = (tab_id: string, waiting_for?: string) => ({
+    workspace_id: 'w',
+    tab_id,
+    pane_id: `${tab_id}-p`,
+    focused: false,
+    agent_status: 'waiting',
+    ...(waiting_for ? { waiting_for } : {}),
+  })
+  const tab = (tab_id: string) => ({
+    workspace_id: 'w',
+    tab_id,
+    label: tab_id,
+    number: 1,
+    focused: false,
+    agent_status: 'waiting',
+  })
+  const tree = projectTree(
+    snapshotRows({
+      type: 'session_snapshot',
+      snapshot: {
+        workspaces: [
+          { workspace_id: 'w', label: 'Space', number: 1, focused: false, agent_status: 'waiting' },
+        ],
+        tabs: [tab('asks'), tab('background')],
+        panes: [pane('asks', 'question'), pane('background')],
+      },
+    }),
+    new Set(),
+  )
+  const row = (id: string) => tree.children.find((row) => row.context?.tab_id === id)
+  expect(row('asks')?.children[0]).toEqual({ type: 'label', text: '?', role: 'status-question' })
+  expect(row('background')?.children[0]).toEqual({
+    type: 'label',
+    text: '●',
+    role: 'status-waiting',
+  })
+  const header = tree.children.find((row) => row.action === 'open-workspace')
+  expect(header?.children).toContainEqual({ type: 'label', text: '? ', role: 'status-question' })
+  expect(header?.children).toContainEqual({ type: 'label', text: '● ', role: 'status-waiting' })
+})

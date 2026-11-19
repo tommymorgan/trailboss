@@ -464,3 +464,32 @@ export function createConversationAdapter(getContext, restrictedOptions) {
   };
   return adapter;
 }
+
+// A trailing reply timestamp ("Nov 18, 2026 2:54:00 PM CST") is not the question.
+const TRAILING_STAMP = /\b\d{4}\b.*\b\d{1,2}:\d{2}|\b\d{1,2}:\d{2}.*\b\d{4}\b/;
+
+/** True when an agent's final reply ends by asking the user something. */
+export function endsWithQuestion(text) {
+  if (typeof text !== "string") return false;
+  const lines = text.split("\n").map(line => line.trim()).filter(Boolean);
+  while (lines.length && TRAILING_STAMP.test(lines.at(-1)) && !lines.at(-1).includes("?")) lines.pop();
+  const last = (lines.at(-1) ?? "").replace(/[\s*_`)"'\]]+$/u, "");
+  return last.endsWith("?");
+}
+
+/** Text of the last assistant message in `messages`, else on the current branch. */
+export function lastAssistantText(ctx, messages) {
+  let branch = Array.isArray(messages) ? messages.map(message => ({ type: "message", message })) : undefined;
+  if (!branch?.some(entry => entry.message?.role === "assistant")) {
+    try { branch = ctx?.sessionManager?.getBranch?.(); } catch { return undefined; }
+  }
+  if (!Array.isArray(branch)) return undefined;
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const message = branch[i]?.type === "message" ? branch[i].message : undefined;
+    if (message?.role !== "assistant") continue;
+    const content = message.content;
+    return typeof content === "string" ? content : Array.isArray(content) ?
+      content.filter(block => block?.type === "text" && typeof block.text === "string").map(block => block.text).join("") : undefined;
+  }
+  return undefined;
+}

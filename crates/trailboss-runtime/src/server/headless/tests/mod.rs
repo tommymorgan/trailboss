@@ -7928,6 +7928,63 @@ fn completion_guard_api_report(server: &mut HeadlessServer, method: api::schema:
 }
 
 #[test]
+fn a_waiting_agent_reporting_a_question_is_marked_as_waiting_for_a_question() {
+    let (writer, _control_rx, _render_rx) = test_client_writer();
+    let (mut server, pane_id) = completion_guard_server(writer);
+    let public_pane_id = server.app.public_pane_id(0, pane_id).unwrap();
+    let report = |seq: u64, message: &str| {
+        api::schema::Method::PaneReportAgent(api::schema::PaneReportAgentParams {
+            pane_id: public_pane_id.clone(),
+            source: "prime-agent".into(),
+            agent: "prime-agent".into(),
+            state: api::schema::PaneAgentState::Waiting,
+            message: Some(message.into()),
+            seq: Some(seq),
+            agent_session_id: Some("01a0".into()),
+            agent_session_path: None,
+            resume_argv: None,
+        })
+    };
+    let waiting_for = |server: &mut HeadlessServer| {
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            #[cfg(unix)]
+            route_admission: None,
+            request: serde_json::from_value(serde_json::json!({
+                "id": "pane", "method": "pane.get", "params": {"pane_id": public_pane_id}
+            }))
+            .unwrap(),
+            respond_to,
+            response_write_complete: None,
+        });
+        let response: serde_json::Value = serde_json::from_str(
+            &response_rx
+                .recv_timeout(Duration::from_millis(100))
+                .unwrap(),
+        )
+        .unwrap();
+        response["result"]["pane"]["waiting_for"].clone()
+    };
+
+    completion_guard_api_report(&mut server, report(1, "awaiting background work"));
+    assert_eq!(waiting_for(&mut server), serde_json::Value::Null);
+    let before = pane_updated_events(&server.app.event_hub);
+    completion_guard_api_report(&mut server, report(2, "question"));
+    assert_eq!(waiting_for(&mut server), "question");
+    assert!(
+        pane_updated_events(&server.app.event_hub) > before,
+        "subscribers were not told the waiting pane now waits for a question"
+    );
+    let before = pane_updated_events(&server.app.event_hub);
+    completion_guard_api_report(&mut server, report(3, "awaiting background work"));
+    assert_eq!(waiting_for(&mut server), serde_json::Value::Null);
+    assert!(
+        pane_updated_events(&server.app.event_hub) > before,
+        "subscribers were not told the question was answered"
+    );
+}
+
+#[test]
 fn api_report_agent_stores_valid_resume_argv_and_rejects_invalid() {
     let (writer, _control_rx, _render_rx) = test_client_writer();
     let (mut server, pane_id) = completion_guard_server(writer);

@@ -157,6 +157,21 @@ pub enum PaneAgentState {
     Waiting,
 }
 
+/// What a waiting agent is waiting for, when its reporter says. Background
+/// work also reports Waiting; only an agent waiting for the user's answer is
+/// marked, so the sidebar can tell the two apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitingFor {
+    Question,
+    /// A reason this client does not know yet.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Reporter message that marks a Waiting report as a question for the user.
+pub const QUESTION_WAITING_MESSAGE: &str = "question";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {

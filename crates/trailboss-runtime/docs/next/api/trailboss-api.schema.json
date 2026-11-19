@@ -895,6 +895,16 @@
               },
               "type": "object"
             },
+            "waiting_for": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/WaitingFor"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "workspace_id": {
               "type": "string"
             }
@@ -1156,6 +1166,22 @@
             "panes"
           ],
           "type": "object"
+        },
+        "WaitingFor": {
+          "description": "What a waiting agent is waiting for, when its reporter says. Background\nwork also reports Waiting; only an agent waiting for the user's answer is\nmarked, so the sidebar can tell the two apart.",
+          "oneOf": [
+            {
+              "enum": [
+                "question"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "unknown",
+              "description": "A reason this client does not know yet.",
+              "type": "string"
+            }
+          ]
         },
         "WorkspaceInfo": {
           "properties": {
@@ -3244,6 +3270,7 @@
               ]
             },
             "message": {
+              "description": "Free-form status text. With state `waiting`, the exact message\n`\"question\"` marks the agent as waiting for the user's answer.",
               "type": [
                 "string",
                 "null"
@@ -9135,6 +9162,16 @@
               },
               "type": "object"
             },
+            "waiting_for": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/WaitingFor"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "workspace_id": {
               "type": "string"
             }
@@ -12315,6 +12352,22 @@
             "client_local"
           ],
           "type": "string"
+        },
+        "WaitingFor": {
+          "description": "What a waiting agent is waiting for, when its reporter says. Background\nwork also reports Waiting; only an agent waiting for the user's answer is\nmarked, so the sidebar can tell the two apart.",
+          "oneOf": [
+            {
+              "enum": [
+                "question"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "unknown",
+              "description": "A reason this client does not know yet.",
+              "type": "string"
+            }
+          ]
         },
         "WorkspaceInfo": {
           "properties": {

@@ -2,13 +2,13 @@
 // managed by trailboss; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // TRAILBOSS_INTEGRATION_ID=omp
-// TRAILBOSS_INTEGRATION_VERSION=18
+// TRAILBOSS_INTEGRATION_VERSION=19
 // @ts-nocheck
 
 import net, { type Server, type Socket } from "node:net";
 import fs from "node:fs";
 import path from "node:path";
-import { createConversationAdapter, readRestrictedAppGrant } from "../shared/trailboss-conversation"; // trailboss:inline-shared-conversation
+import { createConversationAdapter, endsWithQuestion, lastAssistantText, readRestrictedAppGrant } from "../shared/trailboss-conversation"; // trailboss:inline-shared-conversation
 
 const HERDR_ENV = process.env.HERDR_ENV;
 const socketPath = process.env.HERDR_SOCKET_PATH;
@@ -304,15 +304,6 @@ function retryableErrorMessage(event: any): string | undefined {
   return errorMessage || "retryable provider error";
 }
 
-function askWaitingMessage(args: any): string {
-  const questions = Array.isArray(args?.questions) ? args.questions : [];
-  const firstQuestion = questions.find((question: any) => typeof question?.question === "string");
-  if (firstQuestion?.question) {
-    return firstQuestion.question;
-  }
-  return "waiting for user input";
-}
-
 type RestartContext = {
   hasUI?: boolean;
   sessionManager?: {
@@ -348,7 +339,8 @@ export default function (pi) {
   let explicitBlockedCount = 0;
   let explicitBlockedMessage: string | undefined;
   let waitingCount = 0;
-  let waitingMessage: string | undefined;
+  // The agent's settled turn ended by asking the user; cleared by their next input.
+  let questionPending = false;
   let lastState: AgentState | undefined;
   let lastMessage: string | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -373,6 +365,10 @@ export default function (pi) {
     pi.on(name, (event, ctx) => {
       if (ctx?.hasUI !== true) return;
       captureContext(ctx);
+      if (name === "input" && questionPending) {
+        questionPending = false;
+        publishState();
+      }
       return conversation.observe(name, event, ctx);
     });
   }
@@ -768,10 +764,14 @@ export default function (pi) {
       return { state: "blocked" as const, message: explicitBlockedMessage };
     }
     if (waitingCount > 0) {
-      return { state: "waiting" as const, message: waitingMessage };
+      // Ask prompts and tool approvals both wait for the user's answer.
+      return { state: "waiting" as const, message: "question" };
     }
     if (failureBlocked) {
       return { state: "blocked" as const, message: failureMessage };
+    }
+    if (questionPending) {
+      return { state: "waiting" as const, message: "question" };
     }
     if (backgroundAwait) {
       return { state: "waiting" as const, message: "awaiting background work" };
@@ -836,21 +836,17 @@ export default function (pi) {
     explicitBlockedCount = 0;
     explicitBlockedMessage = undefined;
     waitingCount = 0;
-    waitingMessage = undefined;
+    questionPending = false;
   }
 
-  function activateWaiting(message: string | undefined) {
+  function activateWaiting() {
     clearPendingTimers();
     waitingCount += 1;
-    waitingMessage = message;
     publishState();
   }
 
   function deactivateWaiting() {
     waitingCount = Math.max(0, waitingCount - 1);
-    if (waitingCount === 0) {
-      waitingMessage = undefined;
-    }
     publishState();
   }
 
@@ -898,6 +894,7 @@ export default function (pi) {
     clearFailureState();
     backgroundAwait = false;
     agentActive = true;
+    questionPending = false;
     publishState();
   });
 
@@ -906,8 +903,7 @@ export default function (pi) {
       return;
     }
     captureContext(ctx);
-    const label = event?.reason || `${event?.toolName || "Tool"} approval`;
-    activateWaiting(label);
+    activateWaiting();
   });
 
   pi.on("tool_approval_resolved", (_event, ctx) => {
@@ -926,7 +922,7 @@ export default function (pi) {
       return;
     }
     captureContext(ctx);
-    activateWaiting(askWaitingMessage(event.args));
+    activateWaiting();
   });
 
   pi.on("tool_execution_end", (event, ctx) => {
@@ -963,6 +959,7 @@ export default function (pi) {
         // wait as a distinct waiting state instead of yellow Working.
         agentActive = false;
         backgroundAwait = true;
+        questionPending = endsWithQuestion(lastAssistantText(ctx, event?.messages));
         clearPendingTimers();
         publishState(true);
         return;
@@ -981,6 +978,7 @@ export default function (pi) {
       return;
     }
 
+    questionPending = endsWithQuestion(lastAssistantText(ctx, event?.messages));
     scheduleIdle();
   });
 

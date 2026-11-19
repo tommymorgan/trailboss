@@ -41,6 +41,8 @@ export const Entity = z.object({
   position: z.number().int().nonnegative(),
   focused: z.boolean(),
   agentStatus: z.string(),
+  // Set on a waiting pane whose agent waits for the user's answer.
+  waitingFor: z.string().nullable().optional(),
   agent: z.string().nullable(),
   cwd: z.string().nullable(),
   command: CommandResult.optional(),
@@ -76,6 +78,7 @@ const Pane = Common.extend({
   title: z.string().nullable().optional(),
   agent: z.string().nullable().optional(),
   cwd: z.string().nullable().optional(),
+  waiting_for: z.string().nullable().optional(),
   tokens: z.record(z.string(), z.string()).optional(),
 })
 const Snapshot = z.object({
@@ -136,6 +139,7 @@ export function snapshotRows(value: unknown): EntityRow[] {
         position: nextPosition(panePositions, p.tab_id),
         focused: p.focused,
         agentStatus: p.agent_status,
+        waitingFor: p.waiting_for ?? null,
         agent: p.agent ?? null,
         cwd: p.cwd ?? null,
         command: CommandTokens.safeParse(p.tokens).data,

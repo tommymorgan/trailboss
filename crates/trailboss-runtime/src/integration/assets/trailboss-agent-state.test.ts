@@ -661,6 +661,53 @@ test("Pi reports idle only after the agent settles", async () => {
   expect(requestStates(requests)).toEqual(["idle", "working", "idle"]);
 });
 
+test("Pi reports a question for the user until the user answers", async () => {
+  const requests = await startRecordingServer("pi-question");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/trailboss-agent-state.ts");
+  install(pi);
+
+  let idle = true;
+  let reply = "";
+  const context = {
+    ...piContext(() => idle),
+    sessionManager: {
+      getSessionFile: () => undefined,
+      getSessionId: () => undefined,
+      getBranch: () => [
+        { type: "message", message: { role: "user", content: "build it?" } },
+        { type: "message", message: { role: "assistant", content: [{ type: "text", text: reply }] } },
+      ],
+    },
+  };
+  const reports = () =>
+    requests
+      .filter((request) => isRecord(request) && request.method === "pane.report_agent")
+      .map((request) => [requestState(request), (request as { params: { message?: string } }).params.message]);
+  const turn = async (text: string, count: number) => {
+    idle = false;
+    handlers.get("agent_start")?.({}, context);
+    reply = text;
+    idle = true;
+    handlers.get("agent_settled")?.({}, context);
+    await waitFor(() => reports().length === count);
+  };
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => reports().length === 1);
+
+  await turn("Built and staged.\n\nShould I start building it now?\n\nNov 18, 2026 2:54:00 PM CST", 3);
+  expect(reports().at(-1)).toEqual(["waiting", "question"]);
+  handlers.get("input")?.({ text: "yes", source: "interactive" }, context);
+  await waitFor(() => reports().length === 4);
+  expect(reports().at(-1)).toEqual(["idle", undefined]);
+
+  await turn("Done. Nothing is needed from you.", 6);
+  expect(reports().at(-1)).toEqual(["idle", undefined]);
+
+  await turn("Install it now?\n\nWed Nov 18 02:54:00 PM CST 2026", 8);
+  expect(reports().at(-1)).toEqual(["waiting", "question"]);
+});
+
 test("Pi ignores RPC sessions even when UI APIs are available", async () => {
   const requests = await startRecordingServer("pi-rpc");
   const { handlers, pi } = createExtensionHarness();
@@ -1088,16 +1135,48 @@ test("OMP overlapping ask and approval wait until both resolve before resuming",
   handlers.get("tool_approval_requested")?.({ reason: "Approve command" }, context);
   await waitFor(() => requestStates(requests).length === 2);
   handlers.get("tool_execution_start")?.({ toolName: "ask", args: { questions: [{ question: "Choose target" }] } }, context);
-  await waitFor(() => requestStates(requests).length === 3);
   handlers.get("tool_approval_resolved")?.({}, context);
   await Bun.sleep(25);
-  expect(requestStates(requests)).toEqual(["working", "waiting", "waiting"]);
+  // Both wait for the user's answer, so the second adds no new report.
+  expect(requestStates(requests)).toEqual(["working", "waiting"]);
   handlers.get("tool_execution_end")?.({ toolName: "ask" }, context);
-  await waitFor(() => requestStates(requests).length === 4);
+  await waitFor(() => requestStates(requests).length === 3);
   expect(requestStates(requests).at(-1)).toBe("working");
   handlers.get("agent_end")?.({ messages: [] }, context);
-  await waitFor(() => requestStates(requests).length === 5);
+  await waitFor(() => requestStates(requests).length === 4);
   expect(requestStates(requests).at(-1)).toBe("idle");
+});
+
+test("OMP reports a question at the end of a turn and when asking, until the user answers", async () => {
+  const requests = await startRecordingServer("omp-question");
+  process.env.TRAILBOSS_OMP_IDLE_DEBOUNCE_MS = "0";
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./omp/trailboss-agent-state.ts");
+  install(pi);
+  const context = piContext(() => false);
+  const reports = () =>
+    requests
+      .filter((request) => isRecord(request) && request.method === "pane.report_agent")
+      .map((request) => [requestState(request), (request as { params: { message?: string } }).params.message]);
+  const reply = (text: string) => ({ messages: [{ role: "assistant", content: [{ type: "text", text }] }] });
+  handlers.get("session_start")?.({}, context);
+  await waitFor(() => reports().length === 1);
+
+  handlers.get("agent_end")?.(reply("Staged.\n\nShould I install it?"), context);
+  await waitFor(() => reports().length === 2);
+  expect(reports().at(-1)).toEqual(["waiting", "question"]);
+  handlers.get("input")?.({ text: "yes" }, { ...context, hasUI: true });
+  await waitFor(() => reports().length === 3);
+  expect(reports().at(-1)).toEqual(["idle", undefined]);
+
+  handlers.get("agent_start")?.({}, context);
+  handlers.get("tool_execution_start")?.({ toolName: "ask", args: {} }, context);
+  await waitFor(() => reports().length === 5);
+  expect(reports().at(-1)).toEqual(["waiting", "question"]);
+  handlers.get("tool_execution_end")?.({ toolName: "ask" }, context);
+  handlers.get("agent_end")?.(reply("Installed."), context);
+  await waitFor(() => reports().at(-1)?.[0] === "idle");
+  expect(reports().at(-1)).toEqual(["idle", undefined]);
 });
 
 test("OMP resolving an idle approval returns to idle without hiding an explicit blocker", async () => {

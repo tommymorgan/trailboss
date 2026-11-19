@@ -1574,6 +1574,9 @@ impl App {
             params.agent_session_id,
             params.agent_session_path,
         );
+        let waiting_for_before = self
+            .pane_metadata(ws_idx, pane_id)
+            .and_then(|pane| pane.waiting_for);
         self.handle_internal_event(crate::events::AppEvent::HookStateReported {
             pane_id,
             session_ref: session_ref.clone(),
@@ -1583,6 +1586,15 @@ impl App {
             message: params.message,
             seq: params.seq,
         });
+        // A waiting pane can switch between background work and a question
+        // without any state change, so announce that change on its own.
+        if self
+            .pane_metadata(ws_idx, pane_id)
+            .and_then(|pane| pane.waiting_for)
+            != waiting_for_before
+        {
+            self.emit_pane_updated(ws_idx, pane_id);
+        }
         let applied =
             report_is_newer && self.session_report_applied(ws_idx, pane_id, session_ref.as_ref());
         self.report_agent_resume(

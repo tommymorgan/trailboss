@@ -365,6 +365,8 @@ pub struct PaneReportAgentParams {
     pub source: String,
     pub agent: String,
     pub state: PaneAgentState,
+    /// Free-form status text. With state `waiting`, the exact message
+    /// `"question"` marks the agent as waiting for the user's answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -472,6 +474,8 @@ pub struct PaneInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_agent: Option<String>,
     pub agent_status: AgentStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for: Option<super::common::WaitingFor>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub state_labels: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

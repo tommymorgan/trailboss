@@ -209,6 +209,7 @@ pub(in crate::client::shell) fn plugin_segment_style(
         "status-working" => Style::default().fg(palette.yellow),
         "status-blocked" => Style::default().fg(palette.red),
         "status-waiting" => Style::default().fg(palette.mauve),
+        "status-question" => Style::default().fg(palette.peach),
         "status-done" => Style::default().fg(palette.green),
         "status-idle" => Style::default().fg(palette.green),
         _ => base,
@@ -1239,5 +1240,22 @@ pub(in crate::client::shell) fn render_workspace_rows(
                 buffer[(x, y)].set_bg(background);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod question_role_tests {
+    use super::*;
+
+    #[test]
+    fn a_question_is_colored_apart_from_background_waiting() {
+        let palette = Palette::catppuccin();
+        let base = Style::default();
+        let question = plugin_segment_style("status-question", base, &palette);
+        assert_eq!(question, Style::default().fg(palette.peach));
+        assert_ne!(
+            question,
+            plugin_segment_style("status-waiting", base, &palette)
+        );
     }
 }

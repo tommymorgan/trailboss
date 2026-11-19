@@ -232,6 +232,7 @@ fn reply_to_probe(request: ApiRequestMessage) {
                 terminal_title_stripped: None,
                 display_agent: None,
                 agent_status: AgentStatus::Working,
+                waiting_for: None,
                 state_labels: Default::default(),
                 tokens: Default::default(),
                 agent_session: None,

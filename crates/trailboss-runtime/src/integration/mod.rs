@@ -41,10 +41,10 @@ pub(crate) const EXPERIMENTAL_INTEGRATION_TARGET_LABELS: &[&str] = &["letta", "s
 
 const PI_EXTENSION_INSTALL_NAME: &str = "trailboss-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/trailboss-agent-state.ts");
-const PI_INTEGRATION_VERSION: u32 = 12;
+const PI_INTEGRATION_VERSION: u32 = 13;
 const OMP_EXTENSION_INSTALL_NAME: &str = "trailboss-omp-agent-state.ts";
 const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/trailboss-agent-state.ts");
-const OMP_INTEGRATION_VERSION: u32 = 18;
+const OMP_INTEGRATION_VERSION: u32 = 19;
 const SHARED_CONVERSATION_ASSET: &str = include_str!("assets/shared/trailboss-conversation.ts");
 const SHARED_CONVERSATION_IMPORT_MARKER: &str = "// trailboss:inline-shared-conversation";
 

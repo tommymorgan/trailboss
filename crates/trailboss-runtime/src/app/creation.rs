@@ -357,6 +357,7 @@ impl App {
             terminal_title_stripped: terminal.terminal_title_stripped(),
             display_agent: presentation.display_agent,
             agent_status: pane_agent_status(terminal.indicator_state(pane.seen), pane.seen),
+            waiting_for: terminal_waiting_for(terminal),
             state_labels: presentation.state_labels,
             tokens: terminal.metadata_tokens.values(),
             agent_session: terminal_agent_session_info(terminal),
@@ -436,4 +437,20 @@ fn terminal_agent_session_info(
             kind: session.session_ref.kind,
             value: session.session_ref.value.clone(),
         })
+}
+
+/// A pane is waiting for a question only while its live reporter says so.
+fn terminal_waiting_for(
+    terminal: &crate::terminal::TerminalState,
+) -> Option<crate::api::schema::WaitingFor> {
+    terminal
+        .hook_authority
+        .as_ref()
+        .filter(|authority| {
+            authority.state == crate::detect::AgentState::Waiting
+                && terminal.state == crate::detect::AgentState::Waiting
+                && authority.message.as_deref()
+                    == Some(crate::api::schema::QUESTION_WAITING_MESSAGE)
+        })
+        .map(|_| crate::api::schema::WaitingFor::Question)
 }
