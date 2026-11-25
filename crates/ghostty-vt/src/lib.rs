@@ -202,7 +202,9 @@ pub const MODE_COLOR_SCHEME_REPORT: u16 = 2031;
 const TERMINAL_DATA_COLOR_FOREGROUND: ffi::GhosttyTerminalData = 18;
 const TERMINAL_DATA_COLOR_CURSOR: ffi::GhosttyTerminalData = 20;
 
-const KITTY_IMAGE_STORAGE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+/// Matches Ghostty's default, so a pane keeps about a dozen full-size
+/// screenshots before the oldest image is evicted.
+const KITTY_IMAGE_STORAGE_LIMIT_BYTES: u64 = 320 * 1000 * 1000;
 const APC_MAX_BYTES: usize = 16 * 1024 * 1024;
 const APC_MAX_BYTES_KITTY: usize = 16 * 1024 * 1024;
 pub const KITTY_UNICODE_PLACEHOLDER: u32 = 0x10EEEE;

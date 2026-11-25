@@ -144,3 +144,40 @@ fn file_upload_automatically_retains_snapshot_when_platform_supports_clone() {
     }
     std::fs::remove_file(path).unwrap();
 }
+
+// A pane keeps several full-size screenshots; older ones are not evicted
+// while they are still placed on screen or in scrollback.
+#[test]
+fn a_pane_keeps_several_full_size_screenshots() {
+    let (width, height) = (2672u32, 2214u32);
+    let mut terminal = Terminal::new(200, 100, 1000).unwrap();
+    terminal.enable_kitty_graphics().unwrap();
+    let pixels =
+        base64::engine::general_purpose::STANDARD
+            .encode(vec![200u8; (width * height * 4) as usize]);
+    for id in 1..=6u32 {
+        let chunks: Vec<&[u8]> = pixels.as_bytes().chunks(4096).collect();
+        for (index, chunk) in chunks.iter().enumerate() {
+            let more = u8::from(index + 1 < chunks.len());
+            let control = if index == 0 {
+                format!("a=T,f=32,s={width},v={height},i={id},c=40,r=12,C=1,q=2,m={more}")
+            } else {
+                format!("m={more}")
+            };
+            terminal.write(format!("\x1b_G{control};").as_bytes());
+            terminal.write(chunk);
+            terminal.write(b"\x1b\\");
+        }
+        terminal.write("\r\n".repeat(13).as_bytes());
+    }
+    // Every placement is still on the 100-row screen, so each listed
+    // placement proves its image is still stored.
+    let mut placed: Vec<u32> = terminal
+        .kitty_image_placements()
+        .unwrap()
+        .iter()
+        .map(|placement| placement.image_id)
+        .collect();
+    placed.sort_unstable();
+    assert_eq!(placed, [1, 2, 3, 4, 5, 6]);
+}
